@@ -1,6 +1,8 @@
 import * as cfg from '../config/index.js'
 import * as helper from '../src/helper.js'
 import * as chatSvc from '../src/chatService.js'
+import * as ws from '../src/webServer.js'
+import * as auth from '../src/auth.js'
 
 export class AICommands extends plugin {
   constructor() {
@@ -49,12 +51,33 @@ export class AICommands extends plugin {
           reg: '^#ai(重载|重新加载|reload)$',
           fnc: 'reloadConfig',
           permission: 'master'
+        },
+        {
+          reg: '^#ai(网页管理|web|后台)$',
+          fnc: 'webAdmin',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai网页(启动|开启)$',
+          fnc: 'webStart',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai网页(关闭|停止)$',
+          fnc: 'webStop',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai(生成验证码|验证码)$',
+          fnc: 'genCode',
+          permission: 'master'
         }
       ]
     })
   }
 
   async help() {
+    const info = ws.getServerInfo()
     const lines = [
       '🤖 AI0-Plugin 帮助菜单',
       '',
@@ -65,6 +88,12 @@ export class AICommands extends plugin {
       '  #ai帮助        查看此菜单',
       '  #ai新会话       开启新的对话（清空上下文）',
       '  #ai模型         查看当前使用的模型配置',
+      '',
+      '【网页管理后台】(仅主人)',
+      `  #ai网页管理     生成免登录直链（${info.running ? '运行中' : '未启动'}）`,
+      '  #ai网页启动     启动网页后台',
+      '  #ai网页关闭     关闭网页后台',
+      '  #ai验证码       生成终端验证码（用于网页登录）',
       '',
       '【管理命令】(仅主人)',
       '  #ai设置模型 <模型名>',
@@ -173,7 +202,90 @@ export class AICommands extends plugin {
     if (!helper.isMaster(userId)) {
       return this.e.reply('❌ 此命令仅主人可用')
     }
-    const config = cfg.loadConfig()
+    cfg.loadConfig()
     return this.e.reply('✅ 配置文件已重新加载。')
+  }
+
+  async _ensureWebStarted() {
+    if (ws.isRunning()) return ws.getServerInfo()
+    const config = cfg.loadConfig()
+    const port = Number(config.web?.port) || 12580
+    const host = config.web?.host || '127.0.0.1'
+    try {
+      await ws.startWebServer(port, host)
+      return ws.getServerInfo()
+    } catch (e) {
+      throw new Error(`启动网页后台失败：${e.message}`)
+    }
+  }
+
+  async webAdmin() {
+    const userId = helper.getUserId(this.e)
+    if (!helper.isMaster(userId)) {
+      return this.e.reply('❌ 此命令仅主人可用')
+    }
+    let info
+    try {
+      info = await this._ensureWebStarted()
+    } catch (e) {
+      return this.e.reply(`❌ ${e.message}`)
+    }
+    const token = auth.generateMagicLink()
+    const url = `${info.url}/magic/${token}`
+    const msg = [
+      '✅ 网页管理后台已就绪',
+      '',
+      `🔗 免登录直链（10分钟有效，一次有效）：`,
+      url,
+      '',
+      '⚠️ 请妥善保管该链接，任何持有此链接的人均可访问后台。',
+      '如果是群聊环境，建议撤回此消息或私聊使用。'
+    ].join('\n')
+    return this.e.reply(msg)
+  }
+
+  async webStart() {
+    const userId = helper.getUserId(this.e)
+    if (!helper.isMaster(userId)) {
+      return this.e.reply('❌ 此命令仅主人可用')
+    }
+    try {
+      const info = await this._ensureWebStarted()
+      return this.e.reply(`✅ 网页管理后台已启动：${info.url}\n绑定地址：${info.host}:${info.port}`)
+    } catch (e) {
+      return this.e.reply(`❌ ${e.message}`)
+    }
+  }
+
+  async webStop() {
+    const userId = helper.getUserId(this.e)
+    if (!helper.isMaster(userId)) {
+      return this.e.reply('❌ 此命令仅主人可用')
+    }
+    const ok = await ws.stopWebServer()
+    return this.e.reply(ok ? '✅ 网页管理后台已关闭。' : '网页后台当前未运行。')
+  }
+
+  async genCode() {
+    const userId = helper.getUserId(this.e)
+    if (!helper.isMaster(userId)) {
+      return this.e.reply('❌ 此命令仅主人可用')
+    }
+    try {
+      await this._ensureWebStarted()
+    } catch (e) {
+      // 继续即可
+    }
+    const { code } = auth.generateTerminalCode()
+    const info = ws.getServerInfo()
+    const lines = [
+      '🔐 网页管理登录验证码（5分钟有效）：',
+      '',
+      `    ${code}`,
+      '',
+      info.url ? `访问：${info.url}` : '',
+      '（验证码会同时打印在 Yunzai 运行终端）'
+    ].filter(Boolean)
+    return this.e.reply(lines.join('\n'))
   }
 }

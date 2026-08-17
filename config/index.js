@@ -21,7 +21,7 @@ const defaultConfigContent = `# AI0-Plugin 配置文件
 model:
   # 默认使用的模型
   default: openai-compatible
-  
+
   # OpenAI 兼容格式（支持任意兼容此格式的服务）
   openai-compatible:
     name: "AI0模型"
@@ -81,6 +81,15 @@ response:
   typingDelay: 500
   # 是否在回复末尾追加模型名
   showModelTag: true
+
+# 网页管理后台
+web:
+  # 插件加载时是否自动启动
+  autoStart: true
+  # 监听端口
+  port: 12580
+  # 绑定地址：127.0.0.1 仅本机；0.0.0.0 允许局域网访问（请配合防火墙）
+  host: "127.0.0.1"
 `
 
 if (!fs.existsSync(DEFAULT_CONFIG)) {

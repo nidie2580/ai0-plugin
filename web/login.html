@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AI0-Plugin · 登录</title>
+<link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body class="login-page">
+  <div class="login-card">
+    <div class="brand">
+      <div class="logo">🤖</div>
+      <h1>AI0-Plugin</h1>
+      <p class="sub">XRK-Yunzai 网页管理后台</p>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="code">终端验证码</button>
+      <button class="tab" data-tab="magic">主人快速链接</button>
+    </div>
+
+    <div class="tab-pane active" id="tab-code">
+      <p class="hint">打开 Yunzai 运行终端查看最新打印的 6 位验证码。<br>或由主人向机器人发送 <code>#ai验证码</code> 获取。</p>
+      <label>验证码
+        <input id="codeInput" maxlength="6" placeholder="6 位数字" inputmode="numeric" />
+      </label>
+      <button class="btn primary" id="loginBtn">登录</button>
+      <p id="err" class="err"></p>
+    </div>
+
+    <div class="tab-pane" id="tab-magic">
+      <p class="hint">在 QQ 里以主人身份向机器人发送：</p>
+      <div class="cmd-box">#ai网页管理</div>
+      <p class="hint">机器人会回复一条一次性免登录链接，打开即可。</p>
+    </div>
+  </div>
+
+  <script src="/assets/app.js" data-route="login"></script>
+</body>
+</html>

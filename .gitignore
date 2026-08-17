@@ -6,3 +6,4 @@ data/history/*
 *.log
 .env
 .env.local
+.trae-html-share-packages/

@@ -1,59 +1,118 @@
 # AI0-Plugin
 
-> 适用于 **XRK-Yunzai** 的轻量 AI 聊天插件  
+> 适用于 **XRK-Yunzai** 的轻量 AI 聊天插件（附带 **网页管理后台**）  
 > 基于 OpenAI 兼容协议，可接入任意大模型服务（支持 ChatGLM、DeepSeek、硅基流动、Kimi、通义千问 等）
 
 ---
 
 ## ✨ 功能特性
 
-- 🗨️ **群聊 / 私聊对话**：群内艾特或私聊直接提问
-- 💬 **上下文记忆**：自动保存会话历史，支持多轮对话
-- 🔌 **OpenAI 兼容**：任何兼容 `/v1/chat/completions` 格式的模型均可接入
-- 🎛️ **管理命令**：模型、API Key、主人权限一键设置
-- 🔐 **权限控制**：白名单 / 黑名单模式，精细化控制使用人群
-- 🗃️ **转发消息**：长回复自动使用合并转发，刷屏不担心
+### 🗨️ 对话
+- 群内 @机器人 / 私聊直接提问
+- 自动上下文记忆，多轮对话
+- 长回复自动合并转发，避免刷屏
+- 自定义触发前缀（不用 @ 也能触发）
+
+### 🔌 多模型接入
+任何兼容 `/v1/chat/completions` 格式的服务均可接入：
+官方 OpenAI、DeepSeek、硅基流动 SiliconFlow、零一万物 Kimi、
+智谱 GLM、阿里通义、本地 Ollama / LM Studio 等。
+
+### 🛡️ 权限控制
+- 白名单 / 黑名单模式
+- 独立主人权限（可执行管理命令、访问网页后台）
+
+### 🌐 **网页管理后台** (v1.1.0 新增)
+- 📝 可视化配置编辑（模型、对话、权限、网页后台）
+- 💬 会话历史浏览 / 删除
+- 🧪 模型连通性一键测试
+- 🔐 两种登录方式，安全便捷
 
 ---
 
 ## 📦 安装
 
-将本仓库克隆到 XRK-Yunzai 的 `plugins/` 目录下：
-
 ```bash
 cd Yunzai/plugins
-git clone <你的仓库地址> ai0-plugin
+git clone https://github.com/nidie2580/ai0-plugin.git
 cd ai0-plugin
 npm install
 ```
 
-然后重启 Yunzai 即可。
+重启 Yunzai 即可（插件会自动尝试启动网页后台）。
+
+---
+
+## 🌐 网页管理后台：两种登录方式
+
+> 默认地址：<http://127.0.0.1:12580>  
+> 默认只绑定 `127.0.0.1`，只有机器本身能访问；如需局域网访问，把 `config.yaml`
+> 中 `web.host` 改为 `0.0.0.0` 并开放防火墙端口。
+
+### 方式 A：主人命令一键直链（推荐）
+以 **主人身份** 向机器人发送：
+```
+#ai网页管理
+```
+机器人会立刻回复一条 **10分钟有效、一次性** 的免登录链接，点击即可进入后台。
+
+> 建议在 **私聊** 中使用；若在群里使用，请在点击后尽快撤回该消息。
+
+### 方式 B：终端 6 位验证码
+有两种生成验证码的方式：
+1. **独立启动**（不用先启动 Yunzai）：
+   ```bash
+   cd plugins/ai0-plugin
+   npm run web
+   ```
+   启动后会直接在终端打印验证码和访问地址。
+2. **在 Yunzai 内**：主人向机器人发送 `#ai验证码`，
+   验证码会同时出现在 Yunzai 运行终端和 QQ 回复消息里。
+
+然后在登录页的「终端验证码」标签页填入 6 位数字即可。
+
+### 其他网页管理命令
+| 命令 | 说明 |
+|------|------|
+| `#ai网页管理` / `#aiweb` | 启动后台 + 生成一次性直链 |
+| `#ai网页启动` | 只启动后台 |
+| `#ai网页关闭` | 关闭后台 |
+| `#ai验证码` | 生成 6 位终端验证码 |
 
 ---
 
 ## ⚙️ 配置
 
-首次加载后，打开 `plugins/ai0-plugin/config/config.yaml`：
+打开 `plugins/ai0-plugin/config/config.yaml`：
 
 ```yaml
+# ========== 模型 ==========
 model:
   default: openai-compatible
   openai-compatible:
     name: "AI0模型"
-    apiBase: "https://api.openai.com/v1"   # 改成你的接口地址
-    apiKey: "sk-xxxxxx"                    # 改成你的 API Key
-    model: "gpt-3.5-turbo"                # 改成你使用的模型名
+    apiBase: "https://api.openai.com/v1"   # 改这里
+    apiKey: "sk-xxxxxx"                    # 改这里
+    model: "gpt-3.5-turbo"                # 改这里
     temperature: 0.8
     maxTokens: 2000
 
+# ========== 对话 ==========
 chat:
-  groupAtReply: true     # 群聊艾特回复
-  privateReply: true     # 私聊回复
-  triggerPrefix: []      # 可选：直接用前缀触发，如 ["#ai "]
+  groupAtReply: true
+  privateReply: true
+  triggerPrefix: []      # 例：["#ai ", "小爱"]
   contextSize: 10        # 上下文轮数
 
+# ========== 权限 ==========
 permissions:
-  masters: [123456789]   # 改为你的QQ号，才能使用管理命令
+  masters: [123456789]   # 你的QQ号（主人），管理命令+网页后台都需要
+
+# ========== 网页后台 ==========
+web:
+  autoStart: true        # Yunzai 启动时自动拉起
+  port: 12580
+  host: "127.0.0.1"      # 0.0.0.0 = 允许局域网访问
 ```
 
 ### 🚀 常用兼容接入示例
@@ -66,27 +125,25 @@ permissions:
 | 零一万物 (Kimi) | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
 | 智谱 (GLM) | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` |
 | 阿里 (通义) | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| 本地 Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5:7b` 等 |
 
 ---
 
-## 🎮 使用方式
-
-### 对话
-- **群聊**：@机器人 直接提问（或配置触发前缀）
-- **私聊**：直接发送消息即可
-
-### 命令
+## 🎮 命令一览
 
 | 命令 | 说明 | 权限 |
 |------|------|------|
 | `#ai帮助` | 查看帮助菜单 | 全部 |
-| `#ai新会话` | 重置上下文，开启新对话 | 全部 |
+| `#ai新会话` | 重置上下文 | 全部 |
 | `#ai模型` | 查看当前模型配置 | 全部 |
-| `#ai设置模型 <模型名>` | 切换模型 ID | 主人 |
-| `#ai设置apikey <key>` | 设置 API Key | 主人 |
+| `#ai设置模型 <模型名>` | 切换默认模型 ID | 主人 |
+| `#ai设置apikey <key>` | 保存 API Key | 主人 |
 | `#ai设置api <URL>` | 设置 API Base | 主人 |
 | `#ai添加主人 <QQ>` | 新增主人 | 主人 |
 | `#ai重载` | 重新加载配置 | 主人 |
+| `#ai网页管理` / `#aiweb` | 启动并生成一次性免登录直链 | 主人 |
+| `#ai网页启动` / `#ai网页关闭` | 启停网页后台 | 主人 |
+| `#ai验证码` | 生成 6 位终端登录验证码 | 主人 |
 
 ---
 
@@ -94,20 +151,27 @@ permissions:
 
 ```
 ai0-plugin/
-├── index.js                # 插件入口
-├── package.json            # 依赖声明
+├── index.js                     # 插件入口 + 自动拉起网页后台
+├── package.json
 ├── apps/
-│   ├── chat.js             # 对话消息监听
-│   └── commands.js         # 命令处理
+│   ├── chat.js                  # 消息监听
+│   └── commands.js              # 全部 #ai 命令（含网页管理）
 ├── config/
-│   ├── index.js            # 配置管理
-│   ├── default_config.yaml # 默认配置（模板）
-│   └── config.yaml         # 用户配置（实际生效）
+│   ├── index.js                 # YAML 配置管理
+│   ├── default_config.yaml
+│   └── config.yaml              # 实际生效
 ├── src/
-│   ├── helper.js           # 工具函数
-│   ├── llm.js              # LLM 调用 & 会话存储
-│   └── chatService.js      # 对话逻辑
-└── data/history/           # 各用户会话历史
+│   ├── auth.js                  # 验证码 / Magic link / Session
+│   ├── webServer.js             # Express + 路由 API
+│   ├── standalone-web.js        # npm run web 的独立入口
+│   ├── chatService.js
+│   ├── helper.js
+│   └── llm.js                   # LLM 调用 + 会话持久化
+├── web/
+│   ├── login.html               # 登录页（验证码 / 直链说明）
+│   ├── dashboard.html           # 管理后台首页
+│   └── assets/                  # 样式与脚本
+└── data/history/                # 用户会话 JSON
 ```
 
 ---
