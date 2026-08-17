@@ -1,0 +1,66 @@
+# AI0-Plugin 配置文件
+
+# 模型配置
+model:
+  # 默认使用的模型
+  default: openai-compatible
+
+  # OpenAI 兼容格式（支持任意兼容此格式的服务）
+  openai-compatible:
+    name: "AI0模型"
+    apiBase: "https://api.openai.com/v1"
+    apiKey: "sk-your-api-key-here"
+    model: "gpt-3.5-turbo"
+    temperature: 0.8
+    maxTokens: 2000
+    timeout: 60000
+
+# 对话设置
+chat:
+  # 是否开启群聊艾特回复
+  groupAtReply: true
+  # 是否开启私聊回复
+  privateReply: true
+  # 触发前缀（不需要艾特直接触发），留空则只有艾特/私聊触发
+  triggerPrefix: []
+  # 上下文消息数量（不含当前轮）
+  contextSize: 10
+  # 单用户最大同时对话数（旧的会被清理）
+  maxSessionsPerUser: 3
+  # 对话过期时间（毫秒），-1 为永不过期
+  sessionTimeout: 1800000
+
+# 系统提示词
+system:
+  prompt: |
+    你是一个友善、乐于助人的AI助手，正在通过QQ机器人与用户交流。
+    请用简洁、自然的中文回答用户的问题。
+    - 如果涉及违规/违法/敏感内容，请直接拒绝回答。
+    - 保持礼貌，适度使用颜文字和emoji。
+    - 不要主动透露你是基于什么模型运行的。
+
+# 白名单/黑名单
+permissions:
+  # true: 白名单模式（只有列表内可用），false: 黑名单模式
+  whitelistMode: false
+  # 允许的用户QQ号（白名单模式生效）
+  allowedUsers: []
+  # 允许的群号（白名单模式生效）
+  allowedGroups: []
+  # 禁止的用户QQ号（黑名单模式生效）
+  blockedUsers: []
+  # 禁止的群号（黑名单模式生效）
+  blockedGroups: []
+  # 主人QQ（可以执行管理命令）
+  masters: []
+
+# 响应设置
+response:
+  # 是否使用转发消息（长文本时）
+  useForwardMsg: true
+  # 超过多少字使用转发（设大则禁用）
+  forwardThreshold: 500
+  # 打字动画延迟（毫秒），0为关闭
+  typingDelay: 500
+  # 是否在回复末尾追加模型名
+  showModelTag: true

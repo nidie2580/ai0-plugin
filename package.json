@@ -1,0 +1,23 @@
+{
+  "name": "ai0-plugin",
+  "version": "1.0.0",
+  "description": "XRK-Yunzai AI聊天插件 - 支持多种大语言模型的对话插件",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "yunzai",
+    "xrk-yunzai",
+    "ai",
+    "chatgpt",
+    "plugin"
+  ],
+  "author": "ai0",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "yaml": "^2.4.5"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+config/config.yaml.bak
+data/history/*
+!data/history/.gitkeep
+*.log
+.env
+.env.local
