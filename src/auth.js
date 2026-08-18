@@ -38,10 +38,12 @@ export function generateTerminalCode() {
     expireAt: Date.now() + AUTH_CFG.codeExpireMs,
     used: false
   })
+  const logLine = `[ai0-plugin] ===== 网页管理验证码：${code} ===== (5分钟内有效)`
   if (typeof logger !== 'undefined') {
-    logger.mark(`[ai0-plugin] ===== 网页管理验证码：${code} ===== (5分钟内有效)`)
+    const fn = (typeof logger.mark === 'function') ? logger.mark : (logger.info || console.log)
+    fn(logLine)
   } else {
-    console.log(`[ai0-plugin] ===== 网页管理验证码：${code} ===== (5分钟内有效)`)
+    console.log(logLine)
   }
   return { id, code }
 }

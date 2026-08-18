@@ -1,7 +1,7 @@
 {
   "name": "ai0-plugin",
-  "version": "1.1.0",
-  "description": "XRK-Yunzai AI聊天插件 - 支持多种大语言模型的对话插件",
+  "version": "1.2.0",
+  "description": "XRK-Yunzai AI聊天插件 - 支持多种大语言模型的对话插件（多源主人权限 + 诊断命令）",
   "main": "index.js",
   "type": "module",
   "scripts": {

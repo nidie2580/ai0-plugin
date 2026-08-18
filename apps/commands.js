@@ -71,6 +71,11 @@ export class AICommands extends plugin {
           reg: '^#ai(生成验证码|验证码)$',
           fnc: 'genCode',
           permission: 'master'
+        },
+        {
+          reg: '^#ai(诊断|debug|检查)$',
+          fnc: 'diagnose',
+          permission: 'all'
         }
       ]
     })
@@ -102,6 +107,10 @@ export class AICommands extends plugin {
       '  #ai添加主人 <QQ号>',
       '  #ai重载         重新加载配置文件',
       '',
+      '',
+      '【诊断命令】',
+      '  #ai诊断        检查权限/主人/配置/后台运行状态（任何人可用）',
+      '',
       '💡 详细配置：plugins/ai0-plugin/config/config.yaml'
     ]
     return this.e.reply(lines.join('\n'))
@@ -132,8 +141,8 @@ export class AICommands extends plugin {
 
   async setModel() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
-      return this.e.reply('❌ 此命令仅主人可用')
+    if (!helper.isMaster(userId, this.e)) {
+      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置模型\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置模型 <模型ID>')
@@ -148,8 +157,8 @@ export class AICommands extends plugin {
 
   async setApiKey() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
-      return this.e.reply('❌ 此命令仅主人可用')
+    if (!helper.isMaster(userId, this.e)) {
+      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置apikey\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置apikey <你的apikey>')
@@ -164,8 +173,8 @@ export class AICommands extends plugin {
 
   async setApiBase() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
-      return this.e.reply('❌ 此命令仅主人可用')
+    if (!helper.isMaster(userId, this.e)) {
+      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置api\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置api <apiBaseURL>')
@@ -180,8 +189,8 @@ export class AICommands extends plugin {
 
   async addMaster() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
-      return this.e.reply('❌ 此命令仅主人可用')
+    if (!helper.isMaster(userId, this.e)) {
+      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     const match = helper.getMessageText(this.e).match(/^#ai添加主人\s+(\d+)/)
     if (!match) return this.e.reply('用法：#ai添加主人 <QQ号>')
@@ -199,8 +208,8 @@ export class AICommands extends plugin {
 
   async reloadConfig() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
-      return this.e.reply('❌ 此命令仅主人可用')
+    if (!helper.isMaster(userId, this.e)) {
+      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     cfg.loadConfig()
     return this.e.reply('✅ 配置文件已重新加载。')
@@ -221,8 +230,8 @@ export class AICommands extends plugin {
 
   async webAdmin() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
-      return this.e.reply('❌ 此命令仅主人可用')
+    if (!helper.isMaster(userId, this.e)) {
+      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     let info
     try {
@@ -246,8 +255,8 @@ export class AICommands extends plugin {
 
   async webStart() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
-      return this.e.reply('❌ 此命令仅主人可用')
+    if (!helper.isMaster(userId, this.e)) {
+      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     try {
       const info = await this._ensureWebStarted()
@@ -259,8 +268,8 @@ export class AICommands extends plugin {
 
   async webStop() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
-      return this.e.reply('❌ 此命令仅主人可用')
+    if (!helper.isMaster(userId, this.e)) {
+      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     const ok = await ws.stopWebServer()
     return this.e.reply(ok ? '✅ 网页管理后台已关闭。' : '网页后台当前未运行。')
@@ -268,7 +277,7 @@ export class AICommands extends plugin {
 
   async genCode() {
     const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId)) {
+    if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用')
     }
     try {
@@ -287,5 +296,74 @@ export class AICommands extends plugin {
       '（验证码会同时打印在 Yunzai 运行终端）'
     ].filter(Boolean)
     return this.e.reply(lines.join('\n'))
+  }
+
+  async diagnose() {
+    const e = this.e
+    const userId = helper.getUserId(e)
+    const groupId = helper.getGroupId(e)
+    const sources = helper.listMasterSources()
+    const allMasters = helper.listMasters()
+    const isMasterNow = helper.isMaster(userId, e)
+    const isAllowedNow = helper.isUserAllowed(userId, groupId, e)
+
+    // 事件对象自带 isMaster / master
+    const eProps = []
+    if ('isMaster' in e) eProps.push(`isMaster=${e.isMaster}`)
+    if ('master' in e) eProps.push(`master=${e.master}`)
+    if ('isAdmin' in e) eProps.push(`isAdmin=${e.isAdmin}`)
+    if ('permission' in e) eProps.push(`permission=${e.permission}`)
+
+    // 模型配置
+    const cfgData = cfg.loadConfig()
+    const modelDefault = cfgData.model?.default || '(未设置)'
+    const mm = cfgData.model?.[modelDefault] || {}
+    const modelStatus = []
+    if (mm.apiBase) modelStatus.push('apiBase已配置')
+    if (mm.apiKey && !/^\s*$/.test(mm.apiKey) && !/sk-your-api|^\*+$/.test(mm.apiKey)) {
+      modelStatus.push('apiKey已设置')
+    } else {
+      modelStatus.push('⚠️ apiKey未设置')
+    }
+    if (mm.model) modelStatus.push(`model=${mm.model}`)
+
+    const info = ws.getServerInfo()
+    const webLines = info.running
+      ? `✅ 运行中 ${info.url}（绑定 ${info.host}:${info.port}）`
+      : '未启动（发送 #ai网页启动 或 在 config.yaml 中设置 web.autoStart:true）'
+
+    const lines = [
+      '🩺 AI0-Plugin 诊断报告',
+      '',
+      '【当前用户】',
+      `  user_id  : ${userId ?? '无法读取'}`,
+      `  group_id : ${groupId ?? '(私聊)'}` + (eProps.length ? `\n  e对象    : ${eProps.join(', ')}` : ''),
+      `  主人判定 : ${isMasterNow ? '✅ 是主人' : '❌ 不是主人'}`,
+      `  允许对话 : ${isAllowedNow ? '✅ 通过' : '❌ 被拒绝'}`,
+      '',
+      '【主人来源】',
+      `  框架全局(Config)：${sources.framework.length ? sources.framework.join(', ') : '(空)'}`,
+      `  插件配置(permissions.masters)：${sources.plugin.length ? sources.plugin.join(', ') : '(空)'}`,
+      `  合并后的主人总数：${allMasters.length}（${allMasters.length ? allMasters.join(', ') : '⚠️ 无主人'}）`,
+      '',
+      '【模型配置】',
+      `  默认模型 key：${modelDefault}`,
+      `  状态：${modelStatus.join('、')}`,
+      '',
+      '【网页后台】',
+      `  ${webLines}`,
+      '',
+      '💡 如果主人判定一直是❌：',
+      '  1) XRK-Yunzai 自带主人系统（config/matcher 中的 master），通常在 Yunzai 根目录 config/ 配置即可。我们会自动读取它。',
+      '  2) 也可以改 plugins/ai0-plugin/config/config.yaml 的 permissions.masters，然后发送 #ai重载 或重启。',
+      '  3) 不确定就把这里的诊断截图发出来对照。'
+    ]
+
+    // 对不是主人且调用了 master 命令的人，顺手给出 tips
+    if (!isMasterNow && allMasters.length === 0) {
+      lines.push('', '⚠️ 没有任何主人！请先配置主人，再使用 #ai网页管理 等命令。')
+    }
+
+    return e.reply(lines.join('\n'))
   }
 }

@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser'
 import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
 import * as auth from './auth.js'
+import * as helper from './helper.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -139,6 +140,39 @@ export function createApp() {
   app.get('/api/me', (req, res) => {
     const token = req.cookies?.ai0_session
     res.json({ ok: true, loggedIn: auth.verifySession(token) })
+  })
+
+  // 任何人都可以访问的诊断接口（无敏感信息，只返回主人来源结构、合并后主人数量、是否有配置apiKey等）
+  app.get('/api/diag', (req, res) => {
+    try {
+      const sources = helper.listMasterSources()
+      const allMasters = helper.listMasters()
+      const cfgData = cfg.loadConfig()
+      const def = cfgData.model?.default || '(未设置)'
+      const mm = (cfgData.model && def && cfgData.model[def]) || {}
+      const apiKeyMasked = !!(mm.apiKey && !/^\s*$/.test(mm.apiKey) && !/sk-your-api|^\*+$/.test(mm.apiKey))
+      const info = getServerInfo()
+      res.json({
+        ok: true,
+        master: {
+          frameworkCount: sources.framework.length,
+          pluginCount: sources.plugin.length,
+          totalMasters: allMasters.length,
+          // 不返回具体账号避免泄露
+          frameworkHasAny: sources.framework.length > 0,
+          pluginHasAny: sources.plugin.length > 0
+        },
+        model: {
+          defaultKey: def,
+          apiBaseSet: !!mm.apiBase,
+          apiKeySet: apiKeyMasked,
+          modelName: mm.model || ''
+        },
+        web: info
+      })
+    } catch (e) {
+      res.json({ ok: false, msg: String(e && e.message || e) })
+    }
   })
 
   // ---- 管理 ----

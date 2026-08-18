@@ -7,3 +7,4 @@ data/history/*
 .env
 .env.local
 .trae-html-share-packages/
+_smoke_*.mjs

@@ -33,7 +33,7 @@ export async function handleChat(e) {
 
   if (!userId || !text) return false
 
-  if (!helper.isUserAllowed(userId, groupId)) {
+  if (!helper.isUserAllowed(userId, groupId, e)) {
     return false
   }
 
