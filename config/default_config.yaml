@@ -60,10 +60,12 @@ response:
   useForwardMsg: true
   # 超过多少字使用转发（设大则禁用）
   forwardThreshold: 500
-  # 打字动画延迟（毫秒），0为关闭
-  typingDelay: 500
-  # 是否在回复末尾追加模型名
-  showModelTag: true
+  # 是否在回复前发送「我正在思考中...」占位提示。默认关闭（只输出AI纯回复）
+  showThinkingHint: false
+  # 如果开启了 showThinkingHint，延迟多少毫秒后发送占位提示（避免回复很快时一闪而过）。0=立刻发
+  thinkingDelay: 500
+  # 是否在回复末尾追加模型名（如"\n\n—— AI0模型"）。默认关闭，只输出AI纯回复
+  showModelTag: false
 
 # 网页管理后台
 web:

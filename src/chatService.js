@@ -67,16 +67,23 @@ export async function handleChat(e) {
 
   if (!matched || !pureText) return false
 
-  if (cfg.get('response.typingDelay', 0) > 0) {
-    try {
-      if (isGroup && e.group_id) {
-        (e.bot || Bot).pickGroup?.(e.group_id).sendMsg?.('我正在思考中...')
-          .catch(() => {})
-      } else if (userId) {
-        (e.bot || Bot).pickFriend?.(userId).sendMsg?.('我正在思考中...')
-          .catch(() => {})
-      }
-    } catch {}
+  // 「我正在思考中」占位消息：默认关闭。想开启的话在 config.yaml 写 response.showThinkingHint: true
+  // 注意：typingDelay 只是「延迟多少毫秒再发占位」，不是开关本身。即便 typingDelay>0，只要 showThinkingHint=false 也不发占位。
+  const showThinkingHint = cfg.get('response.showThinkingHint', false)
+  const thinkingDelay = Math.max(0, Number(cfg.get('response.thinkingDelay', 0) ?? cfg.get('response.typingDelay', 0) ?? 0))
+
+  if (showThinkingHint) {
+    const sendHint = () => {
+      try {
+        if (isGroup && e.group_id) {
+          (e.bot || Bot).pickGroup?.(e.group_id).sendMsg?.('我正在思考中...').catch(() => {})
+        } else if (userId) {
+          (e.bot || Bot).pickFriend?.(userId).sendMsg?.('我正在思考中...').catch(() => {})
+        }
+      } catch {}
+    }
+    if (thinkingDelay > 0) setTimeout(sendHint, thinkingDelay)
+    else sendHint()
   }
 
   const contextSize = cfg.get('chat.contextSize', 10)
@@ -116,8 +123,9 @@ export async function handleChat(e) {
     llm.saveHistory(userId, sessionId, history)
   }
 
+  // 默认只输出 AI 纯回复，不加任何固定后缀。想追加模型名标签可在 config.yaml 里 response.showModelTag: true
   let finalText = replyText || '（没有产生回复内容）'
-  if (cfg.get('response.showModelTag', true) && modelName) {
+  if (cfg.get('response.showModelTag', false) && modelName) {
     finalText += `\n\n—— ${modelName}`
   }
 
