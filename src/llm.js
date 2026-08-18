@@ -149,17 +149,14 @@ function summarizeAxiosError(err) {
   }
 }
 
-export async function probeModelConnection({ modelKey = null } = {}) {
+export async function listAvailableModels({ modelKey = null } = {}) {
   const config = cfg.loadConfig()
   const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
   const m = config.model?.[modelCfgKey] || {}
-  if (!m.apiKey || !m.apiBase) {
-    return { ok: false, reason: '未配置 apiBase 或 apiKey' }
-  }
+  if (!m.apiKey || !m.apiBase) return { ok: false, models: [], error: '未配置 apiBase 或 apiKey' }
   const base = normalizeApiBase(m.apiBase, 'openai')
   const modelsUrl = `${base}/models`
   try {
-    const t0 = Date.now()
     const resp = await axios.get(modelsUrl, {
       headers: {
         'Authorization': `Bearer ${m.apiKey}`,
@@ -168,27 +165,39 @@ export async function probeModelConnection({ modelKey = null } = {}) {
       timeout: 15000,
       validateStatus: () => true
     })
-    const dt = Date.now() - t0
-    return {
-      ok: true,
-      method: 'GET /models',
-      status: resp.status,
-      url: modelsUrl,
-      latencyMs: dt,
-      bodySnippet: typeof resp.data === 'string' ? resp.data.slice(0, 200) : JSON.stringify(resp.data || {}).slice(0, 200)
+    if (resp.status >= 200 && resp.status < 300) {
+      const arr = Array.isArray(resp.data?.data) ? resp.data.data : Array.isArray(resp.data) ? resp.data : []
+      const ids = arr.map(x => x?.id).filter(Boolean)
+      return { ok: true, status: resp.status, url: modelsUrl, models: ids, count: ids.length }
     }
+    return { ok: false, status: resp.status, url: modelsUrl, models: [], error: `HTTP ${resp.status}` }
   } catch (e) {
     const s = summarizeAxiosError(e)
-    return {
-      ok: false,
-      method: 'GET /models',
-      status: s.status,
-      url: modelsUrl,
-      code: s.code,
-      message: s.message,
-      bodySnippet: s.body
-    }
+    return { ok: false, models: [], error: s.message, status: s.status, url: modelsUrl }
   }
+}
+
+export async function probeModelConnection({ modelKey = null } = {}) {
+  const config = cfg.loadConfig()
+  const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
+  const m = config.model?.[modelCfgKey] || {}
+  if (!m.apiKey || !m.apiBase) {
+    return { ok: false, reason: '未配置 apiBase 或 apiKey' }
+  }
+  const t0 = Date.now()
+  const info = await listAvailableModels({ modelKey })
+  const latencyMs = Date.now() - t0
+  const out = {
+    ok: info.ok,
+    method: 'GET /models',
+    status: info.status,
+    url: info.url,
+    latencyMs,
+    availableModels: info.models || [],
+    count: info.count || 0
+  }
+  if (!info.ok && info.error) out.error = info.error
+  return out
 }
 
 export async function chatCompletions(messages, {
@@ -252,29 +261,50 @@ export async function chatCompletions(messages, {
 
     // 友好化常见错误
     let extra = ''
-    if (status === 401) extra = '（API Key 错误、未生效或未填 Bearer 前缀）'
-    else if (status === 403) extra = '（权限不足：此 key 无该模型权限或账户欠费/被封禁）'
-    else if (status === 404) {
-      extra = [
-        '（接口路径不存在：请确认 apiBase 是否正确。推荐格式：',
-        `  Kimi: https://api.moonshot.cn/v1`,
-        `  DeepSeek: https://api.deepseek.com/v1`,
-        `  通用规则：若服务商要求带 /v1，请把 /v1 放到 apiBase 末尾，不要在 apiBase 里写 /chat/completions）`,
-        `  当前实际请求 URL: ${url}`
-      ].join('\n')
-    } else if (status === 429) extra = '（请求过于频繁 / 速率限制 / 余额不足）'
-    else if (status >= 500) extra = '（服务商服务端错误，稍后再试或查看服务状态页）'
-
     // 解析返回 JSON 里的 error.message
     let providerMsg = ''
     try {
       const j = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data
       providerMsg = j?.error?.message || j?.message || j?.msg || ''
     } catch (_) {}
+
+    const lower = String(providerMsg).toLowerCase()
+    const looksModelError = /not found the model|model.*not found|permission denied|unknown model|model_not_found|invalid model|does not exist|model.*not allowed|模型.*不存在|模型.*未授权|无权访问.*模型/.test(lower)
+
+    if (status === 401) extra = '（API Key 错误、未生效或未填 Bearer 前缀）'
+    else if (status === 403) extra = '（权限不足：此 key 无该模型权限或账户欠费/被封禁）'
+    else if (status === 404) {
+      extra = looksModelError
+        ? '（模型名错误或该账户未开通此模型权限，不是接口路径问题）'
+        : '（接口路径不存在：请确认 apiBase 是否正确。推荐格式：'
+      extra += looksModelError ? '' : [
+            '  Kimi: https://api.moonshot.cn/v1',
+            '  DeepSeek: https://api.deepseek.com/v1',
+            '  通用规则：若服务商要求带 /v1，请把 /v1 放到 apiBase 末尾，不要在 apiBase 里写 /chat/completions）'
+          ].join('\n')
+      extra += `\n  当前实际请求 URL: ${url}`
+    } else if (status === 429) extra = '（请求过于频繁 / 速率限制 / 余额不足）'
+    else if (status >= 500) extra = '（服务商服务端错误，稍后再试或查看服务状态页）'
+
+    // 如果识别为模型错误，附加 /models 返回的可用模型列表，直接引导用户改配置
+    let modelHint = ''
+    if (looksModelError) {
+      try {
+        const avail = await listAvailableModels({ modelKey: modelCfgKey })
+        if (avail.ok && Array.isArray(avail.models) && avail.models.length) {
+          const list = avail.models.slice(0, 30).join(', ')
+          modelHint = `\n本账号当前可用模型（共 ${avail.models.length} 个）：${list}\n请把 config.yaml 的 model 字段改为上方列表中的任意一个后重试。`
+        } else {
+          modelHint = '\n若 /models 不可达，请先用 #ai测试模型 诊断接口连通性。'
+        }
+      } catch (_) {}
+    }
+
     const combined = [
       `HTTP ${status} ${resp.statusText || ''}${extra}`,
       providerMsg ? `提供商原始错误：${providerMsg}` : '',
-      bodyPreview ? `（完整响应体见 Yunzai 日志）` : ''
+      modelHint,
+      bodyPreview ? '（完整响应体见 Yunzai 日志）' : ''
     ].filter(Boolean).join('\n')
     throw new Error(combined)
   }

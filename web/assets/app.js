@@ -320,17 +320,22 @@ if (route === 'dashboard') {
     if (r.ok) {
       info.className = 'save-msg ok'
       info.textContent = `✅ 成功（${dur}ms · 模型 ${escapeHtml(r.modelName || '')}）`
+      const availList = (r.probe && Array.isArray(r.probe.availableModels) && r.probe.availableModels.length)
+        ? `可用模型（${r.probe.availableModels.length} 个）: ${r.probe.availableModels.join(', ')}\n` : ''
       out.textContent =
         `模型名: ${r.modelName || '-'}\n` +
         `耗时: ${dur} ms\n` +
         (r.probe ? `探测: ${r.probe.method || ''} ${r.probe.url || ''} → HTTP ${r.probe.status} (${r.probe.latencyMs ?? '-'} ms)\n` : '') +
+        availList +
         `Token使用: ${r.usage ? JSON.stringify(r.usage) : '-'}\n\n` +
         `— 回复 —\n${r.text || '(空)'}`
     } else {
       info.className = 'save-msg err'
       info.textContent = `❌ 失败（${dur}ms）`
+      const availList = (r.probe && Array.isArray(r.probe.availableModels) && r.probe.availableModels.length)
+        ? `可用模型（${r.probe.availableModels.length} 个）: ${r.probe.availableModels.join(', ')}\n` : ''
       const probePart = r.probe
-        ? `探测（${r.probe.method || ''}）:\n  请求: ${r.probe.url || '-'}\n  结果: HTTP ${r.probe.status || '-'}${r.probe.code ? '  code=' + r.probe.code : ''}  ${r.probe.ok ? '✅ 可达' : '❌ 不可达'}${r.probe.latencyMs ? ' (' + r.probe.latencyMs + ' ms)' : ''}\n  响应片段: ${r.probe.bodySnippet || ''}\n\n`
+        ? `探测（${r.probe.method || ''}）:\n  请求: ${r.probe.url || '-'}\n  结果: HTTP ${r.probe.status || '-'}${r.probe.code ? '  code=' + r.probe.code : ''}  ${r.probe.ok ? '✅ 可达' : '❌ 不可达'}${r.probe.latencyMs ? ' (' + r.probe.latencyMs + ' ms)' : ''}\n` + availList
         : ''
       out.textContent = probePart + `错误详情：\n${r.msg || '未知错误'}`
     }

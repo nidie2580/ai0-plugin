@@ -493,11 +493,17 @@ export class AICommands extends plugin {
     probeLines.push(`  HTTP   : ${probe?.status ?? '-'}${probe?.code ? '  code=' + probe.code : ''}  耗时 ${probe?.latencyMs ?? '-'} ms`)
     if (probe?.ok) {
       probeLines.push(`  结果   : ✅ /models 可达（鉴权 & 域名/端口基本正确）`)
-      if (probe?.bodySnippet) probeLines.push(`  响应片段: ${probe.bodySnippet}`)
+      const avail = Array.isArray(probe?.availableModels) ? probe.availableModels : []
+      if (avail.length) {
+        probeLines.push(`  本账号可用模型（${avail.length} 个）: ${avail.join(', ')}`)
+        const cfgModel = String(usedModel.model || '').trim()
+        if (cfgModel && !avail.includes(cfgModel)) {
+          probeLines.push(`  ⚠ 你当前配置的 model="${cfgModel}" 不在可用列表里 → 很可能是模型名写错或账号未开通权限。`)
+        }
+      }
     } else {
       probeLines.push(`  结果   : ❌ /models 不可达`)
       if (probe?.message) probeLines.push(`  错误   : ${probe.message}`)
-      if (probe?.bodySnippet) probeLines.push(`  响应体 : ${probe.bodySnippet}`)
     }
     await e.reply(probeLines.join('\n'))
 
