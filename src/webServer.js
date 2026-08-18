@@ -289,9 +289,26 @@ export function createApp() {
   app.post('/api/test-model', requireAuth, async (req, res) => {
     const { message = '请用一句话介绍你自己', modelKey = null } = req.body || {}
     try {
+      // 先探测 /models 并返回归一化后的 url 用于 UI 诊断展示
+      const probe = await llm.probeModelConnection({ modelKey })
       const msgs = [{ role: 'user', content: message }]
-      const r = await llm.chatCompletions(msgs, { modelKey })
-      res.json({ ok: true, text: r.text, usage: r.usage, modelName: r.modelName })
+      let chatResult = null
+      let chatErr = null
+      try {
+        chatResult = await llm.chatCompletions(msgs, { modelKey })
+      } catch (e) {
+        chatErr = e.message || String(e)
+      }
+      res.json({
+        ok: !!chatResult,
+        text: chatResult?.text,
+        usage: chatResult?.usage,
+        modelName: chatResult?.modelName,
+        msg: chatErr,
+        probe,
+        url: probe?.url,
+        method: probe?.method
+      })
     } catch (e) {
       res.json({ ok: false, msg: e.message || String(e) })
     }

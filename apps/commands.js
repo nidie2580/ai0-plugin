@@ -3,6 +3,7 @@ import * as helper from '../src/helper.js'
 import * as chatSvc from '../src/chatService.js'
 import * as ws from '../src/webServer.js'
 import * as auth from '../src/auth.js'
+import * as llm from '../src/llm.js'
 
 export class AICommands extends plugin {
   constructor() {
@@ -76,6 +77,11 @@ export class AICommands extends plugin {
           reg: '^#ai(诊断|debug|检查)$',
           fnc: 'diagnose',
           permission: 'all'
+        },
+        {
+          reg: '^#ai(测试模型|模型测试|测模型)(\\s+\\S+)?$',
+          fnc: 'testModel',
+          permission: 'all'
         }
       ]
     })
@@ -110,6 +116,7 @@ export class AICommands extends plugin {
       '',
       '【诊断命令】',
       '  #ai诊断        检查权限/主人/配置/后台运行状态（任何人可用）',
+      '  #ai测试模型 [key]    测试默认模型（或指定 key）的 /models 探测 + /chat/completions 调用',
       '',
       '💡 详细配置：plugins/ai0-plugin/config/config.yaml'
     ]
@@ -351,6 +358,22 @@ export class AICommands extends plugin {
     }
     if (mm.model) modelStatus.push(`model=${mm.model}`)
 
+    // 计算归一化后的 base（不做网络请求，直接本地给提示）
+    let modelDiag = null
+    try {
+      if (mm.apiBase) {
+        const norm = llm.normalizeApiBase(mm.apiBase)
+        const chatUrl = llm.buildEndpoint(norm, '/chat/completions')
+        const modelsUrl = llm.buildEndpoint(norm, '/models')
+        modelDiag = {
+          rawBase: String(mm.apiBase),
+          normalizedBase: norm,
+          chatUrl,
+          modelsUrl
+        }
+      }
+    } catch (_) {}
+
     const info = ws.getServerInfo()
     // 配置声明 vs 实际绑定 不一致时，重点提示
     const declaredHost = (cfgData.web && cfgData.web.host != null) ? String(cfgData.web.host) : '(未填，默认127.0.0.1)'
@@ -392,9 +415,18 @@ export class AICommands extends plugin {
       '【模型配置】',
       `  默认模型 key：${modelDefault}`,
       `  状态：${modelStatus.join('、')}`,
+      modelDiag ? `  原始 apiBase ：${modelDiag.rawBase}\n  归一化 apiBase：${modelDiag.normalizedBase}\n  /chat/completions → ${modelDiag.chatUrl}\n  /models          → ${modelDiag.modelsUrl}` : '',
       '',
       '【网页后台】',
       webLines.join('\n'),
+      '',
+      '💡 Kimi/DeepSeek 等 404 快速处理：',
+      '  1) 发送 #ai测试模型  进行一键检测：会打 /models 探测 + /chat/completions 真实请求并把最终URL/HTTP状态/响应体都告诉你。',
+      '  2) apiBase 推荐写法：Kimi=https://api.moonshot.cn/v1   DeepSeek=https://api.deepseek.com/v1   （不要写 /chat/completions，也不要裸域名不带 /v1）',
+      '  3) #ai诊断 上方已打印我们实际会请求的 /chat/completions URL，你可以直接核对：',
+      '     - Kimi 必须形如 https://api.moonshot.cn/v1/chat/completions',
+      '     - 不能出现 //chat/completions 或 /v1/v1/chat/completions 这种重复段',
+      '  4) 404 时 Yunzai 运行日志里已经会输出 “base(原始) / base(归一化) / url” 三段 + 完整响应体 JSON，把那段贴出来即可精确定位。',
       '',
       '💡 常见「0.0.0.0 改了还是 127.0.0.1」快速处理：',
       '  1) 改完 config.yaml 后发送：#ai网页启动   （会强制按新配置重启，忽略旧绑定）',
@@ -414,5 +446,80 @@ export class AICommands extends plugin {
     }
 
     return e.reply(lines.join('\n'))
+  }
+
+  async testModel() {
+    const e = this.e
+    const text = helper.getMessageText(e)
+    const m = (text || '').match(/^#ai(测试模型|模型测试|测模型)\s*(\S+)?\s*$/)
+    const modelKey = (m && m[2]) ? m[2] : null
+
+    const config = cfg.loadConfig()
+    const defaultKey = config.model?.default || 'openai-compatible'
+    const useKey = modelKey || defaultKey
+    const usedModel = config.model?.[useKey]
+    const statusLines = [`🧪 AI 模型连通性测试（key=${useKey}）`]
+    if (!usedModel) {
+      statusLines.push(`❌ 模型 key=${useKey} 不存在，可用 key：${Object.keys(config.model || {}).join('、') || '(无)'}`)
+      return e.reply(statusLines.join('\n'))
+    }
+
+    statusLines.push('', `【配置】`)
+    const rawBase = String(usedModel.apiBase || '(空)')
+    statusLines.push(`  apiBase 原始   : ${rawBase}`)
+    let normalized = '', chatUrl = '', modelsUrl = ''
+    try {
+      normalized = llm.normalizeApiBase(rawBase)
+      chatUrl = llm.buildEndpoint(normalized, '/chat/completions')
+      modelsUrl = llm.buildEndpoint(normalized, '/models')
+    } catch (err) {
+      normalized = `(归一化失败: ${err.message})`
+    }
+    statusLines.push(`  apiBase 归一化 : ${normalized}`)
+    statusLines.push(`  model           : ${usedModel.model || '(未设置)'}`)
+    statusLines.push(`  → GET  ${modelsUrl}`)
+    statusLines.push(`  → POST ${chatUrl}`)
+
+    // 1) 先探测 /models
+    let probe = null
+    try {
+      await e.reply(statusLines.join('\n') + `\n\n① 正在探测 /models ...`)
+      probe = await llm.probeModelConnection({ modelKey: useKey })
+    } catch (err) {
+      probe = { ok: false, message: err.message || String(err) }
+    }
+    const probeLines = [`\n【① /models 探测${probe?.ok ? ' ✅' : ' ❌'}】`]
+    if (probe?.url) probeLines.push(`  URL    : ${probe.url}`)
+    probeLines.push(`  HTTP   : ${probe?.status ?? '-'}${probe?.code ? '  code=' + probe.code : ''}  耗时 ${probe?.latencyMs ?? '-'} ms`)
+    if (probe?.ok) {
+      probeLines.push(`  结果   : ✅ /models 可达（鉴权 & 域名/端口基本正确）`)
+      if (probe?.bodySnippet) probeLines.push(`  响应片段: ${probe.bodySnippet}`)
+    } else {
+      probeLines.push(`  结果   : ❌ /models 不可达`)
+      if (probe?.message) probeLines.push(`  错误   : ${probe.message}`)
+      if (probe?.bodySnippet) probeLines.push(`  响应体 : ${probe.bodySnippet}`)
+    }
+    await e.reply(probeLines.join('\n'))
+
+    // 2) 再实际调用 /chat/completions
+    const chatLines = [`【② /chat/completions 真实调用】`]
+    try {
+      const msgs = [{ role: 'user', content: '请只用一句话回复：ping 成功，并说明你使用的模型名。' }]
+      const t0 = Date.now()
+      const r = await llm.chatCompletions(msgs, { modelKey: useKey })
+      const dt = Date.now() - t0
+      chatLines.push(`  URL    : ${chatUrl}`)
+      chatLines.push(`  HTTP   : 200 OK（${dt} ms）`)
+      chatLines.push(`  模型名 : ${r.modelName || '-'}`)
+      if (r.usage) chatLines.push(`  usage  : ${JSON.stringify(r.usage)}`)
+      chatLines.push(`  回复内容：\n${r.text || '(空)'}`)
+      chatLines.unshift('【② /chat/completions 真实调用 ✅】')
+    } catch (err) {
+      chatLines.unshift('【② /chat/completions 真实调用 ❌】')
+      chatLines.push(`  URL    : ${chatUrl}`)
+      chatLines.push(`  错误   : ${err.message || String(err)}`)
+      chatLines.push(``, '💡 若为 HTTP 404/401/403/429，请看上面对应小节中的解释。同时请去 Yunzai 运行日志里找 [ai0-plugin] LLM HTTP ... 日志，有完整的响应体 JSON。')
+    }
+    return e.reply(chatLines.join('\n'))
   }
 }

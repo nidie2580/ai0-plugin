@@ -307,7 +307,7 @@ if (route === 'dashboard') {
     const info = $('#testInfo')
     const out = $('#testOut')
     info.className = 'save-msg'
-    info.textContent = '请求中…'
+    info.textContent = '请求中…（先探测 /models + 再发起 /chat/completions）'
     out.classList.add('hidden')
     const body = {
       message: $('#test_msg').value,
@@ -323,12 +323,16 @@ if (route === 'dashboard') {
       out.textContent =
         `模型名: ${r.modelName || '-'}\n` +
         `耗时: ${dur} ms\n` +
+        (r.probe ? `探测: ${r.probe.method || ''} ${r.probe.url || ''} → HTTP ${r.probe.status} (${r.probe.latencyMs ?? '-'} ms)\n` : '') +
         `Token使用: ${r.usage ? JSON.stringify(r.usage) : '-'}\n\n` +
         `— 回复 —\n${r.text || '(空)'}`
     } else {
       info.className = 'save-msg err'
       info.textContent = `❌ 失败（${dur}ms）`
-      out.textContent = `错误：${r.msg || '未知错误'}`
+      const probePart = r.probe
+        ? `探测（${r.probe.method || ''}）:\n  请求: ${r.probe.url || '-'}\n  结果: HTTP ${r.probe.status || '-'}${r.probe.code ? '  code=' + r.probe.code : ''}  ${r.probe.ok ? '✅ 可达' : '❌ 不可达'}${r.probe.latencyMs ? ' (' + r.probe.latencyMs + ' ms)' : ''}\n  响应片段: ${r.probe.bodySnippet || ''}\n\n`
+        : ''
+      out.textContent = probePart + `错误详情：\n${r.msg || '未知错误'}`
     }
   })
 
