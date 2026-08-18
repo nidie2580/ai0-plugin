@@ -118,6 +118,327 @@ export function isAtBot(e) {
   return false
 }
 
+/* -------------------------------------------------------------------------- */
+/*                  消息解构 + 引用/合并转发消息的上下文提取                  */
+/* -------------------------------------------------------------------------- */
+
+function isSelfId(e, uin) {
+  if (uin == null) return false
+  if (e?.self_id != null && String(uin) === String(e.self_id)) return true
+  try {
+    const b = e?.bot ?? Bot
+    if (b?.uin != null && String(uin) === String(b.uin)) return true
+    if (b?.self_id != null && String(uin) === String(b.self_id)) return true
+    if (b?.bot?.uin != null && String(uin) === String(b.bot.uin)) return true
+  } catch (_) {}
+  return false
+}
+
+function safeName(raw) {
+  if (raw == null) return ''
+  let s = typeof raw === 'string' ? raw : String(raw)
+  s = s.replace(/[\r\n\t]+/g, ' ').trim()
+  if (s.length > 24) s = s.slice(0, 24)
+  return s
+}
+
+/**
+ * 从单个消息段/消息数组中抽取纯文本：兼容 YZ Message / segment 数组 / 字符串 / node.content
+ */
+function extractTextFromMessage(msg) {
+  if (msg == null) return ''
+  if (typeof msg === 'string') return msg
+  if (Array.isArray(msg)) {
+    let text = ''
+    for (const seg of msg) {
+      if (!seg || typeof seg !== 'object') continue
+      const type = seg.type ?? seg.msg_type ?? seg.post_type
+      if (type === 'text') {
+        text += (seg.text ?? seg.data?.text ?? seg.content ?? '')
+      } else if (type === 'face') {
+        const id = seg.id ?? seg.face ?? seg.data?.id ?? ''
+        text += id ? `[表情:${id}]` : '[表情]'
+      } else if (type === 'image') {
+        const url = seg.url ?? seg.file ?? seg.data?.url ?? seg.data?.file ?? ''
+        text += url ? `[图片:${url}]` : '[图片]'
+      } else if (type === 'record' || type === 'voice') {
+        text += '[语音]'
+      } else if (type === 'video') {
+        text += '[视频]'
+      } else if (type === 'file') {
+        text += '[文件]'
+      } else if (type === 'reply' || type === 'quote' || type === 'reference' || type === 'source') {
+        // 引用段本身只在"提取引用消息"阶段解析，正文不直接追加
+        continue
+      } else if (type === 'forward' || type === 'node' || type === 'longmsg') {
+        text += '[合并转发聊天记录]'
+      } else if (type === 'at') {
+        const qq = seg.qq ?? seg.data?.qq ?? ''
+        text += qq ? `[@${qq}]` : `[@某人]`
+      } else if (seg.text && typeof seg.text === 'string') {
+        text += seg.text
+      } else if (seg.content && typeof seg.content === 'string') {
+        text += seg.content
+      }
+    }
+    return text.trim()
+  }
+  if (typeof msg === 'object') {
+    if (typeof msg.content === 'string') return msg.content.trim()
+    if (Array.isArray(msg.content)) return extractTextFromMessage(msg.content)
+    if (Array.isArray(msg.message)) return extractTextFromMessage(msg.message)
+  }
+  try {
+    return String(msg).trim()
+  } catch (_) {
+    return ''
+  }
+}
+
+/**
+ * 从一个"消息节点"(node / forward 消息数组里的每条 / 引用原消息对象)里抽取发件人+文本
+ */
+function normalizeOneNode(node, selfIdTester) {
+  if (!node || typeof node !== 'object') return null
+  // 常见字段：
+  // YZ 引用源 e.source.message / forward 节点: { user_id, nickname, card, message }
+  // OneBot reply 段：{ type:'reply', id:'...', data:{...}, ... } 此时真正的 sender/user_id 要取顶层 user_id/nickname（如果有的话）
+  // 或 OneBot: { uin, name, content }
+  // 或 MCQQ/ICQQ: { sender: {user_id,nickname,card}, message }
+  // 兼容：node.user_id 没取到但 node.data 里有 user_id/nickname 也能拿到（reply/quote 段常把原信息塞到 data）
+  const data = node.data && typeof node.data === 'object' ? node.data : null
+  const uin =
+    node.user_id ??
+    node.uin ??
+    data?.user_id ??
+    data?.uin ??
+    data?.sender_id ??
+    data?.from_uin ??
+    node.senderId ??
+    node.from_uin ??
+    node.from_user ??
+    node.sender?.user_id ??
+    node.author?.user_id ??
+    null
+  const name = safeName(
+    node.nickname ??
+      node.card ??
+      node.name ??
+      data?.nickname ??
+      data?.card ??
+      data?.name ??
+      node.sender?.nickname ??
+      node.sender?.card ??
+      data?.sender?.nickname ??
+      data?.sender?.card ??
+      node.author?.nickname ??
+      node.senderName ??
+      (uin != null ? `QQ${uin}` : '')
+  )
+  // rawMsg 取法：message / content / data.message / data.content，兼容 {type:'reply', message: [...]} 与 {type:'reply', data:{message:[...]}}
+  let rawMsg =
+    node.message ??
+    node.content ??
+    data?.content ??
+    data?.message ??
+    null
+  if (typeof node.message === 'function') {
+    try { rawMsg = node.message() ?? rawMsg } catch (_) {}
+  }
+  if (rawMsg == null && data && typeof data.content === 'function') {
+    try { rawMsg = data.content() } catch (_) {}
+  }
+  const text = extractTextFromMessage(rawMsg)
+  if (!text) return null
+  const isBot = selfIdTester(uin)
+  return {
+    user_id: uin != null ? String(uin) : null,
+    name: name || (uin != null ? `QQ${uin}` : ''),
+    text,
+    isBot: !!isBot
+  }
+}
+
+/**
+ * 递归把"合并转发聊天记录"节点数组拆成平铺的对话序列
+ */
+function flattenForwardNodes(forwardPayload, selfIdTester, depth = 0) {
+  const out = []
+  if (depth > 3) return out
+  if (!forwardPayload) return out
+  let nodes = null
+  if (Array.isArray(forwardPayload)) nodes = forwardPayload
+  else if (typeof forwardPayload === 'object') {
+    nodes =
+      forwardPayload.nodes ??
+      forwardPayload.messages ??
+      forwardPayload.message ??
+      forwardPayload.content ??
+      null
+    if (!Array.isArray(nodes) && Array.isArray(forwardPayload.data)) nodes = forwardPayload.data
+    if (!Array.isArray(nodes) && Array.isArray(forwardPayload.node)) nodes = forwardPayload.node
+  }
+  if (!Array.isArray(nodes)) return out
+  for (const n of nodes) {
+    if (!n || typeof n !== 'object') continue
+    // 节点本身可能再包一层 forward / longmsg
+    const nestedFwd =
+      n.forward ??
+      n.content?.forward ??
+      (Array.isArray(n.content) && n.content.find(s => s?.type === 'forward'))?.data ??
+      n.data?.nodes ??
+      null
+    if (nestedFwd) {
+      out.push(...flattenForwardNodes(nestedFwd, selfIdTester, depth + 1))
+    }
+    const one = normalizeOneNode(n, selfIdTester)
+    if (one) out.push(one)
+  }
+  return out
+}
+
+/**
+ * 从事件 e 里提取：
+ *  1) 当前发送者的文本消息（剥离 reply/quote/at 等对大模型干扰的段）
+ *  2) 被引用消息（reply/quote/reference/source），展开成一条 {name,isBot,text}
+ *  3) 当前消息内或引用消息内如果包含 "合并转发聊天记录" 节点，递归平铺成对话序列
+ *
+ * 返回结构：
+ * {
+ *   current: { user_id, name, text, isBot },
+ *   quote:   null | { user_id, name, text, isBot },
+ *   forwardFromQuote: [{user_id,name,text,isBot}],   // 来自被引用消息里的合并转发
+ *   forwardFromCurrent: [{user_id,name,text,isBot}], // 来自当前消息里的合并转发
+ * }
+ */
+export function parseMessageWithContext(e) {
+  const current = {
+    user_id: null,
+    name: '',
+    text: '',
+    isBot: false
+  }
+
+  const selfIdTester = uin => isSelfId(e, uin)
+
+  // 当前消息发送者
+  const uid = e?.user_id ?? e?.sender?.user_id ?? e?.from_user ?? null
+  current.user_id = uid != null ? String(uid) : null
+  current.name = safeName(
+    e?.sender?.nickname ??
+      e?.sender?.card ??
+      e?.nickname ??
+      e?.card ??
+      e?.fromNickname ??
+      (current.user_id ? `QQ${current.user_id}` : '')
+  )
+  current.isBot = selfIdTester(uid)
+
+  let quote = null
+  let forwardFromQuote = []
+  let forwardFromCurrent = []
+
+  const msgArr = Array.isArray(e?.message) ? e.message : []
+
+  // 先抓 reply / quote / reference / source 段（OneBot/Yunzai 通用）
+  let quoteSeg = null
+  for (const seg of msgArr) {
+    if (!seg || typeof seg !== 'object') continue
+    const t = seg.type ?? seg.msg_type ?? seg.post_type
+    if (t === 'reply' || t === 'quote' || t === 'reference') {
+      quoteSeg = seg
+      break
+    }
+    if (t === 'source' && (seg.data || seg.message || seg.content)) {
+      quoteSeg = seg
+      break
+    }
+  }
+
+  // 部分适配器把引用源写到事件顶层：e.quote / e.reply_message / e.reference / e.source
+  const topQuote =
+    e?.quote ??
+    e?.replyMessage ??
+    e?.reply_message ??
+    e?.reference ??
+    e?.source ??
+    e?.quoted ??
+    e?.raw_message_ref ??
+    null
+
+  // 解析引用消息 + 引用消息里可能存在的合并转发
+  const quoteCandidates = []
+  if (quoteSeg) quoteCandidates.push(quoteSeg)
+  if (topQuote && (!quoteSeg || topQuote !== quoteSeg)) quoteCandidates.push(topQuote)
+
+  const seenQuoteSignatures = new Set()
+  for (const q of quoteCandidates) {
+    const mergedQuote = normalizeOneNode(q, selfIdTester)
+    if (mergedQuote) {
+      const sig = `${mergedQuote.user_id}|${mergedQuote.text.slice(0, 120)}`
+      if (!seenQuoteSignatures.has(sig)) {
+        seenQuoteSignatures.add(sig)
+        if (!quote) quote = mergedQuote
+      }
+    }
+    // 引用消息对象自身的 message/content 里可能是 forward 段数组（QQ 的"引用某条转发记录"）
+    const rawMsg = q?.message ?? q?.content ?? q?.data?.message ?? q?.data?.content
+    const forwardPayload =
+      q?.forward ??
+      q?.nodes ??
+      (rawMsg && typeof rawMsg === 'object' && !Array.isArray(rawMsg)
+        ? rawMsg.forward ?? rawMsg.nodes ?? null
+        : null) ??
+      (Array.isArray(rawMsg) ? rawMsg.find(s => s?.type === 'forward')?.data ?? null : null) ??
+      null
+    if (forwardPayload) {
+      forwardFromQuote.push(...flattenForwardNodes(forwardPayload, selfIdTester))
+    }
+    if (Array.isArray(rawMsg) && rawMsg.some(s => s?.type === 'forward' || s?.type === 'node')) {
+      const inlineNodes = rawMsg.filter(s => s?.type === 'forward' || s?.type === 'node')
+      for (const n of inlineNodes) {
+        const pl = n?.data?.nodes ?? n?.data?.content ?? n?.nodes ?? n?.content ?? n
+        forwardFromQuote.push(...flattenForwardNodes(pl, selfIdTester))
+      }
+    }
+  }
+
+  // 当前消息正文中的合并转发：如果当前消息里有 [forward/longmsg/node] 段，递归平铺
+  for (const seg of msgArr) {
+    if (!seg || typeof seg !== 'object') continue
+    const t = seg.type ?? seg.msg_type ?? seg.post_type
+    if (t === 'forward' || t === 'longmsg') {
+      const pl = seg?.data?.nodes ?? seg?.nodes ?? seg?.data?.content ?? seg?.content ?? seg?.data
+      forwardFromCurrent.push(...flattenForwardNodes(pl, selfIdTester))
+    } else if (t === 'node' && Array.isArray(seg?.data?.nodes)) {
+      forwardFromCurrent.push(...flattenForwardNodes(seg.data, selfIdTester))
+    }
+  }
+
+  // 当前消息纯文本（去除 @bot / 回复段 等干扰，保留表情/图片占位）
+  const currentText = extractTextFromMessage(msgArr)
+  current.text = currentText
+
+  return {
+    current,
+    quote,
+    forwardFromQuote,
+    forwardFromCurrent
+  }
+}
+
+/**
+ * 给"发件人+文本"打标，生成适合喂给 LLM 的字符串（可配置开关 includeSenderTag）
+ */
+export function formatTurnForPrompt({ name, text, isBot, tagBotAs = 'AI', tagUserAs = '用户' }) {
+  const t = String(text ?? '').trim()
+  if (!t) return ''
+  const who =
+    (name ? name : (isBot ? tagBotAs : tagUserAs)) +
+    (isBot ? `（${tagBotAs}）` : '')
+  return `【${who}】：\n${t}`
+}
+
 export async function replyForward(e, text) {
   if (!e.group_id) return e.reply(text)
   try {
