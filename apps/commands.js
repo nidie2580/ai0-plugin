@@ -82,6 +82,11 @@ export class AICommands extends plugin {
           reg: '^#ai(测试模型|模型测试|测模型)(\\s+\\S+)?$',
           fnc: 'testModel',
           permission: 'all'
+        },
+        {
+          reg: '^#(ai)?(切换模型|切模型|换模型)(\\s+\\S+(\\s+\\S+)?)?$',
+          fnc: 'switchModel',
+          permission: 'master'
         }
       ]
     })
@@ -99,6 +104,7 @@ export class AICommands extends plugin {
       '  #ai帮助        查看此菜单',
       '  #ai新会话       开启新的对话（清空上下文）',
       '  #ai模型         查看当前使用的模型配置',
+      '  #切换模型 [编号|模型名]  一键切换当前账号可用模型（探测 /models → 列出 → 选号/直写）',
       '',
       '【网页管理后台】(仅主人)',
       `  #ai网页管理     生成免登录直链（${info.running ? '运行中' : '未启动'}）`,
@@ -107,6 +113,7 @@ export class AICommands extends plugin {
       '  #ai验证码       生成终端验证码（用于网页登录）',
       '',
       '【管理命令】(仅主人)',
+      '  #切换模型 [n|模型名]  快速切换（无参数则列出当前账号所有可用模型并标注当前值）',
       '  #ai设置模型 <模型名>',
       '  #ai设置apikey <key>',
       '  #ai设置api <apiBaseURL>',
@@ -540,5 +547,126 @@ export class AICommands extends plugin {
       chatLines.push(``, '💡 若为 HTTP 404/401/403/429，请看上面对应小节中的解释。同时请去 Yunzai 运行日志里找 [ai0-plugin] LLM HTTP ... 日志，有完整的响应体 JSON。')
     }
     return e.reply(chatLines.join('\n'))
+  }
+
+  /**
+   * #切换模型 [编号|模型名|key 模型名]
+   * - 无参数：探测 /models，列出所有可用模型（标当前值），提示用户发 "#切换模型 1" 或 "#切换模型 kimi-k2.6"
+   * - 纯数字 n：选第 n 个模型
+   * - 其他：直接当模型 ID
+   * - 两个参数：第一个视为 modelKey（provider 段名），第二个视为模型名
+   */
+  async switchModel() {
+    const e = this.e
+    const userId = helper.getUserId(e)
+    if (!helper.isMaster(userId, e)) {
+      return e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+    }
+    const raw = helper.getMessageText(e)
+    const re = /^#(ai)?(切换模型|切模型|换模型)\s*(.*)?$/s
+    const m = raw.match(re)
+    const args = (m && m[3] ? m[3].trim() : '').split(/\s+/).filter(Boolean)
+
+    const config = cfg.loadConfig()
+    const defaultKey = config.model?.default || 'openai-compatible'
+    let useKey = defaultKey
+    let target = ''
+    if (args.length === 1) {
+      target = args[0]
+    } else if (args.length >= 2) {
+      const maybeKey = args[0]
+      if (config.model && Object.prototype.hasOwnProperty.call(config.model, maybeKey)) {
+        useKey = maybeKey
+        target = args.slice(1).join(' ').trim()
+      } else {
+        target = args.join(' ').trim()
+      }
+    }
+    const cfgModel = config.model?.[useKey]
+    if (!cfgModel) return e.reply(`❌ 模型配置段 key=${useKey} 不存在，可用 key：${Object.keys(config.model || {}).join('、') || '(无)'}`)
+    if (!cfgModel.apiBase || !cfgModel.apiKey) return e.reply(`❌ 模型配置段 key=${useKey} 还没有设置 apiBase 或 apiKey，先设置后再切换。`)
+
+    // 第一步：探测 /models 获取本账号可用模型列表
+    let listInfo = null
+    try {
+      await e.reply(`🔍 正在探测账号「${useKey}」的可用模型列表（GET /models）...`)
+      listInfo = await llm.listAvailableModels({ modelKey: useKey })
+    } catch (err) {
+      return e.reply(`❌ 探测失败：${err.message || String(err)}`)
+    }
+    const availableModels = Array.isArray(listInfo?.models) ? listInfo.models : []
+    const currentModel = String(cfgModel.model || '').trim()
+
+    // 第二步：无参数 → 直接列出
+    if (!target) {
+      if (!listInfo?.ok || !availableModels.length) {
+        const header = listInfo?.ok ? '❌ 本账号未返回任何可用模型' : `❌ 探测失败（HTTP ${listInfo?.status || '-'}）`
+        const lines = [
+          header,
+          `  请求: ${listInfo?.url || '-'}`,
+          `  当前已配置模型: ${currentModel || '(未设置)'}`,
+          ``,
+          `此时仍可以直接用 "#切换模型 <模型名>" 手动输入（例如 #切换模型 kimi-k2.6）。`
+        ]
+        return e.reply(lines.join('\n'))
+      }
+      const lines = [
+        `🔁 模型切换助手（key=${useKey}）`,
+        `  当前模型: ${currentModel || '(未设置)'}`,
+        `  可用模型共 ${availableModels.length} 个：`
+      ]
+      availableModels.slice(0, 50).forEach((id, idx) => {
+        const cur = (id === currentModel) ? '  ← 当前使用' : ''
+        lines.push(`  ${String(idx + 1).padStart(2, ' ')}) ${id}${cur}`)
+      })
+      if (availableModels.length > 50) lines.push(`  ...(${availableModels.length - 50} 个未展示，直接写完整模型名即可切换)`)
+      lines.push(``, `切换方式二选一：`)
+      lines.push(`  ① 发 "#切换模型 1" / "#切换模型 2" 按编号切换`)
+      lines.push(`  ② 发 "#切换模型 ${availableModels[0] || '模型ID'}" 直接写名字切换`)
+      if (availableModels.length > 1) lines.push(`  ③ 指定其他 provider 段: "#切换模型 ${useKey} ${availableModels[1] || '模型ID'}"`)
+      return e.reply(lines.join('\n'))
+    }
+
+    // 第三步：有参数 → 支持「纯数字编号」或「直接写模型名」
+    let nextModel = target
+    if (/^\d+$/.test(target)) {
+      const n = parseInt(target, 10)
+      if (!availableModels.length) return e.reply(`❌ 当前没有可用模型列表可按编号选，请改用 "#切换模型 <模型ID>" 直接写名字。`)
+      if (n < 1 || n > availableModels.length) return e.reply(`❌ 编号 ${n} 超出范围（可用编号 1 ~ ${availableModels.length}）`)
+      nextModel = availableModels[n - 1]
+    } else {
+      // 写名字时若探测成功，做一次"存在提示"但允许强制切换（防止 /models 接口不可达但用户知道正确模型名）
+      if (availableModels.length && !availableModels.includes(nextModel)) {
+        const lower = availableModels.map(x => x.toLowerCase())
+        const exact = lower.includes(nextModel.toLowerCase()) ? availableModels.find(x => x.toLowerCase() === nextModel.toLowerCase()) : null
+        if (exact) {
+          nextModel = exact
+        }
+      }
+    }
+
+    // 写入配置
+    const config2 = cfg.loadConfig()
+    if (!config2.model) config2.model = {}
+    if (!config2.model[useKey]) config2.model[useKey] = {}
+    const before = String(config2.model[useKey].model || '')
+    config2.model[useKey].model = nextModel
+    const ok = cfg.saveConfig(config2)
+    if (!ok) return e.reply(`❌ 保存配置失败，请查看 Yunzai 日志。`)
+
+    const lines = [
+      `✅ 模型切换完成（key=${useKey}）`,
+      `  原模型: ${before || '(未设置)'}`,
+      `  新模型: ${nextModel}`,
+      ``
+    ]
+    if (availableModels.length && availableModels.includes(nextModel)) {
+      lines.push(`✔ 新模型在当前账号可用模型列表内，可直接使用。`)
+    } else {
+      lines.push(`⚠ 新模型"${nextModel}"未出现在 /models 返回的可用列表中（可能是本账号未开通 / 服务商返回列表不全）。`)
+      lines.push(`  若调用失败，可发送 "#ai测试模型" 或 "#切换模型"（无参数）查看本账号实际可用模型。`)
+    }
+    lines.push(``, `💡 上下文不会自动重置，需要新会话可发送 "#ai新会话"。`)
+    return e.reply(lines.join('\n'))
   }
 }
