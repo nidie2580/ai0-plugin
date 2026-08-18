@@ -324,15 +324,21 @@ export function createApp() {
 export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
   return new Promise((resolve, reject) => {
     // ------ 输入规范化（防止 YAML 把 0.0.0.0 解析成数字 0 或其他脏值） ------
-    let p = Number(port)
-    if (!Number.isFinite(p) || p <= 0 || p >= 65536) p = 12580
-    let h = host
-    if (h == null) h = '127.0.0.1'
-    if (typeof h !== 'string') h = String(h)
-    h = h.trim()
-    // 某些 YAML 解析器会把裸写 0.0.0.0 解析成 0；这里纠正回来
-    if (h === '0') h = '0.0.0.0'
-    if (!h) h = '127.0.0.1'
+    const bind = cfg.normalizeWebBind ? cfg.normalizeWebBind({ host, port }) : null
+    let p, h
+    if (bind) {
+      p = bind.port
+      h = bind.host
+    } else {
+      p = Number(port)
+      if (!Number.isFinite(p) || p <= 0 || p >= 65536) p = 12580
+      h = host
+      if (h == null) h = '127.0.0.1'
+      if (typeof h !== 'string') h = String(h)
+      h = h.trim()
+      if (h === '0') h = '0.0.0.0'
+      if (!h) h = '127.0.0.1'
+    }
     const forceRestart = !!options.forceRestart
 
     const doStart = () => {

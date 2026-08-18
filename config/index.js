@@ -100,6 +100,7 @@ web:
 if (!fs.existsSync(DEFAULT_CONFIG)) {
   fs.writeFileSync(DEFAULT_CONFIG, defaultConfigContent, 'utf-8')
 }
+// config.yaml 是用户本地配置：首次不存在才初始化一份默认值，后续绝不写入仓库，避免 git pull/强制覆盖 把用户配置洗掉
 if (!fs.existsSync(USER_CONFIG)) {
   fs.writeFileSync(USER_CONFIG, defaultConfigContent, 'utf-8')
 }
@@ -145,4 +146,36 @@ export function get(key, defaultValue) {
     curr = curr[k]
   }
   return curr === undefined ? defaultValue : curr
+}
+
+/**
+ * 统一解析 web.host / web.port：
+ * - 某些 YAML 解析器会把裸写 host: 0.0.0.0 解析成数字 0；这里做归一化
+ * - 也兼容字符串 "0"/"0.0.0.0"/"::"/"127.0.0.1" 等
+ * 返回 { host, port } 都是"解析后真正会用于绑定的"值，便于 #ai网页启动/初始化/#ai诊断 三处一致。
+ */
+export function normalizeWebBind({ host, port } = {}) {
+  let p = Number(port)
+  if (!Number.isFinite(p) || p <= 0 || p >= 65536) p = 12580
+
+  let h = host
+  if (h == null) h = '127.0.0.1'
+  // 数字 0 / 字符串 "0" 都视为 0.0.0.0（YAML 裸写 0.0.0.0 被当作数字 0 的经典坑）
+  if (typeof h === 'number') {
+    if (h === 0) h = '0.0.0.0'
+    else h = String(h)
+  }
+  if (typeof h !== 'string') h = String(h)
+  h = h.trim()
+  if (h === '0') h = '0.0.0.0'
+  if (h === '::1/128') h = '::1' // 常见脏值兼容
+  if (!h) h = '127.0.0.1'
+
+  return { host: h, port: p }
+}
+
+/** 从当前配置里取出 web 绑定（已经做归一化） */
+export function getWebBindFromConfig() {
+  const c = loadConfig()
+  return normalizeWebBind({ host: c?.web?.host, port: c?.web?.port })
 }

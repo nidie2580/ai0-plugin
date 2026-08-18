@@ -223,12 +223,19 @@ export class AICommands extends plugin {
   }
 
   async _ensureWebStarted(options = {}) {
-    const config = cfg.loadConfig()
-    let port = Number(config.web?.port)
-    if (!Number.isFinite(port) || port <= 0 || port >= 65536) port = 12580
-    let host = (config.web?.host == null) ? '127.0.0.1' : String(config.web?.host).trim()
-    if (host === '0') host = '0.0.0.0'
-    if (!host) host = '127.0.0.1'
+    const bind = cfg.getWebBindFromConfig?.()
+    let port, host
+    if (bind) {
+      port = bind.port
+      host = bind.host
+    } else {
+      const config = cfg.loadConfig()
+      port = Number(config.web?.port)
+      if (!Number.isFinite(port) || port <= 0 || port >= 65536) port = 12580
+      host = (config.web?.host == null) ? '127.0.0.1' : String(config.web?.host).trim()
+      if (host === '0') host = '0.0.0.0'
+      if (!host) host = '127.0.0.1'
+    }
     try {
       await ws.startWebServer(port, host, { forceRestart: !!options.forceRestart })
       return ws.getServerInfo()
@@ -375,10 +382,13 @@ export class AICommands extends plugin {
     } catch (_) {}
 
     const info = ws.getServerInfo()
-    // 配置声明 vs 实际绑定 不一致时，重点提示
-    const declaredHost = (cfgData.web && cfgData.web.host != null) ? String(cfgData.web.host) : '(未填，默认127.0.0.1)'
-    const declaredPort = (cfgData.web && cfgData.web.port != null) ? Number(cfgData.web.port) : '(未填，默认12580)'
-    const bindMismatch = info.running && (info.host !== String(declaredHost).trim() || Number(info.port) !== Number(declaredPort))
+    // 配置声明 vs 归一化 vs 实际绑定 三段展示，彻底排查 "写了0.0.0.0还是127.0.0.1"
+    const declaredHostRaw = (cfgData.web && cfgData.web.host != null) ? String(cfgData.web.host) : '(未填，默认127.0.0.1)'
+    const declaredPortRaw = (cfgData.web && cfgData.web.port != null) ? cfgData.web.port : '(未填，默认12580)'
+    const bind = cfg.normalizeWebBind?.({ host: cfgData.web?.host, port: cfgData.web?.port }) || null
+    const normalizedHost = bind ? bind.host : null
+    const normalizedPort = bind ? bind.port : null
+    const bindMismatch = info.running && ((normalizedHost != null && info.host !== normalizedHost) || (normalizedPort != null && Number(info.port) !== Number(normalizedPort)))
     const webLines = []
     if (info.running) {
       webLines.push(`✅ 运行中（实际绑定 ${info.host}:${info.port}）`)
@@ -387,8 +397,8 @@ export class AICommands extends plugin {
         for (const u of info.publicUrls) webLines.push(`    - ${u}`)
       }
       if (bindMismatch) {
-        webLines.push(`  ⚠️ 实际绑定与配置声明不一致！配置声明 host=${declaredHost} port=${declaredPort}`)
-        webLines.push(`     → 请发送 #ai网页启动 强制重启（会按 config.yaml 重新绑定），或直接重启 Yunzai。`)
+        webLines.push(`  ⚠️ 实际绑定与“归一化后配置”不一致！归一化后 host=${normalizedHost ?? '-'} port=${normalizedPort ?? '-'}`)
+        webLines.push(`     → 请发送 #ai网页启动 强制重启（会关闭旧实例并按最新 config.yaml 重新绑定），或直接重启 Yunzai。`)
       }
       if (info.host === '0.0.0.0' || info.host === '::') {
         webLines.push(`  ⚠️ 已开启对外监听。若仍无法访问：安全组/防火墙放行 TCP ${info.port}，并用真实公网/局域网 IP 访问。`)
@@ -396,7 +406,10 @@ export class AICommands extends plugin {
     } else {
       webLines.push('未启动（发送 #ai网页启动 或 在 config.yaml 中设置 web.autoStart:true）')
     }
-    webLines.push(`  配置声明：host=${declaredHost}  port=${declaredPort}  autoStart=${cfgData.web?.autoStart === false ? 'false' : 'true'}`)
+    webLines.push(`  配置声明(原始)：host=${declaredHostRaw}  port=${declaredPortRaw}  autoStart=${cfgData.web?.autoStart === false ? 'false' : 'true'}`)
+    if (normalizedHost != null || normalizedPort != null) {
+      webLines.push(`  配置声明(归一化后)：host=${normalizedHost ?? '-'}  port=${normalizedPort ?? '-'}`)
+    }
 
     const lines = [
       '🩺 AI0-Plugin 诊断报告',
