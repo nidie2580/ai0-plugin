@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
 import * as helper from './helper.js'
+import * as groupOps from './groupOps.js'
 
 const userSession = new Map()
 
@@ -258,10 +259,20 @@ export async function handleChat(e) {
     history = [{ role: 'system', content: sysPrompt }, ...history]
   }
 
+  // 群聊时注入群操作上下文（主人列表/请求者角色/目标角色/机器人角色/操作规则/动作格式）
+  let groupContext = null
+  if (isGroup && cfg.get('groupOps.enabled', true) !== false) {
+    try {
+      groupContext = await groupOps.buildGroupContext(e)
+    } catch (err) {
+      logger.warn(`[ai0-plugin] 构建群操作上下文失败: ${err.message}`)
+    }
+  }
+
   // 注入引用消息 + 合并转发 + 发件人标签
   history = injectContextIntoHistory({
     history,
-    sysPrompt,
+    sysPrompt: groupContext ? sysPrompt + '\n\n' + groupContext : sysPrompt,
     parsed,
     opts: contextOpts,
     modelConfigName: modelNameCfg
@@ -291,6 +302,24 @@ export async function handleChat(e) {
   }
 
   if (replyText) {
+    // 如果是群聊且开启了群操作，解析AI回复中的操作指令并执行
+    if (isGroup && groupContext) {
+      try {
+        const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId)
+        // 用干净文本（去掉操作指令后的）存入历史和回复
+        replyText = cleanText
+        if (results.length) {
+          const actionReport = results.map(r =>
+            r.ok ? `✅ ${r.msg}` : `❌ ${r.msg}`
+          ).join('\n')
+          replyText = replyText + '\n\n' + actionReport
+          logger.info(`[ai0-plugin] 群操作执行结果: ${JSON.stringify(results)}`)
+        }
+      } catch (err) {
+        logger.error(`[ai0-plugin] 群操作执行异常: ${err.message}`)
+      }
+    }
+
     history.push({ role: 'assistant', content: replyText })
     llm.saveHistory(userId, sessionId, history)
   }
