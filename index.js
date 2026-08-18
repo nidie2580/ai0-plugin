@@ -38,12 +38,23 @@ setTimeout(async () => {
     const config = cfg.loadConfig()
     const autoStart = config.web?.autoStart !== false
     if (autoStart) {
-      const port = Number(config.web?.port) || 12580
-      const host = config.web?.host || '127.0.0.1'
+      let port = Number(config.web?.port)
+      if (!Number.isFinite(port) || port <= 0 || port >= 65536) port = 12580
+      let host = (config.web?.host == null) ? '127.0.0.1' : String(config.web?.host).trim()
+      if (host === '0') host = '0.0.0.0'
+      if (!host) host = '127.0.0.1'
       try {
         await ws.startWebServer(port, host)
         const info = ws.getServerInfo()
-        logger.info(`[ai0-plugin] 网页后台：${info.url}  (主人发送 #ai网页管理 获取直链; 任何人发送 #ai诊断 查看当前状态)`)
+        const lines = [`[ai0-plugin] 网页后台：绑定 ${host}:${port}（主人发送 #ai网页管理 获取直链; 任何人发送 #ai诊断 查看当前状态）`]
+        if (info.publicUrls && info.publicUrls.length) {
+          lines.push(`  可访问地址（${info.publicUrls.length} 个）：`)
+          for (const u of info.publicUrls) lines.push(`    - ${u}`)
+        }
+        if (host === '0.0.0.0' || host === '::') {
+          lines.push(`  ⚠️ 已开启对外监听，请确认安全组/防火墙已放行 TCP ${port} 端口。访问请用真实公网/局域网IP，不要用 0.0.0.0。`)
+        }
+        logger.info(lines.join('\n'))
       } catch (err) {
         logger.warn(`[ai0-plugin] 网页后台启动失败（端口占用？）：${err.message}`)
       }

@@ -215,13 +215,15 @@ export class AICommands extends plugin {
     return this.e.reply('✅ 配置文件已重新加载。')
   }
 
-  async _ensureWebStarted() {
-    if (ws.isRunning()) return ws.getServerInfo()
+  async _ensureWebStarted(options = {}) {
     const config = cfg.loadConfig()
-    const port = Number(config.web?.port) || 12580
-    const host = config.web?.host || '127.0.0.1'
+    let port = Number(config.web?.port)
+    if (!Number.isFinite(port) || port <= 0 || port >= 65536) port = 12580
+    let host = (config.web?.host == null) ? '127.0.0.1' : String(config.web?.host).trim()
+    if (host === '0') host = '0.0.0.0'
+    if (!host) host = '127.0.0.1'
     try {
-      await ws.startWebServer(port, host)
+      await ws.startWebServer(port, host, { forceRestart: !!options.forceRestart })
       return ws.getServerInfo()
     } catch (e) {
       throw new Error(`启动网页后台失败：${e.message}`)
@@ -235,21 +237,32 @@ export class AICommands extends plugin {
     }
     let info
     try {
-      info = await this._ensureWebStarted()
+      // 主人调用此命令时强制重启一次，防止改了 config.yaml 后旧的 127.0.0.1 绑定还在
+      info = await this._ensureWebStarted({ forceRestart: true })
     } catch (e) {
       return this.e.reply(`❌ ${e.message}`)
     }
     const token = auth.generateMagicLink()
-    const url = `${info.url}/magic/${token}`
+    const baseForMagic = (info.publicUrls && info.publicUrls.length) ? info.publicUrls[0] : info.url
+    const url = `${baseForMagic}/magic/${token}`
     const msg = [
       '✅ 网页管理后台已就绪',
+      '',
+      `监听绑定：${info.host}:${info.port}`,
       '',
       `🔗 免登录直链（10分钟有效，一次有效）：`,
       url,
       '',
+      info.publicUrls && info.publicUrls.length > 1
+        ? `其它可访问入口（如需走局域网/公网IP，请自行替换直链中的主机名）：\n${info.publicUrls.slice(1).map(u => `  - ${u}`).join('\n')}`
+        : '',
+      (info.host === '0.0.0.0' || info.host === '::')
+        ? `⚠️ 已开启对外监听。若仍无法访问，请确认：\n   1) 云服务器/面板安全组已放行 TCP ${info.port}；\n   2) 本机防火墙（ufw/iptables/firewalld）已放行；\n   3) 访问地址要用真实公网/局域网IP，不要用 0.0.0.0。`
+        : '',
+      '',
       '⚠️ 请妥善保管该链接，任何持有此链接的人均可访问后台。',
       '如果是群聊环境，建议撤回此消息或私聊使用。'
-    ].join('\n')
+    ].filter(Boolean).join('\n')
     return this.e.reply(msg)
   }
 
@@ -259,8 +272,20 @@ export class AICommands extends plugin {
       return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     try {
-      const info = await this._ensureWebStarted()
-      return this.e.reply(`✅ 网页管理后台已启动：${info.url}\n绑定地址：${info.host}:${info.port}`)
+      // 用户显式「启动」时，若配置变了就自动重启使用新 host/port
+      const info = await this._ensureWebStarted({ forceRestart: true })
+      const lines = [
+        `✅ 网页管理后台：${info.running ? '运行中' : '未运行'}`,
+        `监听绑定：${info.host}:${info.port}`
+      ]
+      if (info.publicUrls && info.publicUrls.length) {
+        lines.push('可访问地址：')
+        for (const u of info.publicUrls) lines.push(`  - ${u}`)
+      }
+      if (info.host === '0.0.0.0' || info.host === '::') {
+        lines.push(`⚠️ 对外监听已开启。若仍无法访问，需要放行 TCP ${info.port} 端口（安全组+系统防火墙）。`)
+      }
+      return this.e.reply(lines.join('\n'))
     } catch (e) {
       return this.e.reply(`❌ ${e.message}`)
     }
@@ -314,7 +339,6 @@ export class AICommands extends plugin {
     if ('isAdmin' in e) eProps.push(`isAdmin=${e.isAdmin}`)
     if ('permission' in e) eProps.push(`permission=${e.permission}`)
 
-    // 模型配置
     const cfgData = cfg.loadConfig()
     const modelDefault = cfgData.model?.default || '(未设置)'
     const mm = cfgData.model?.[modelDefault] || {}
@@ -328,9 +352,28 @@ export class AICommands extends plugin {
     if (mm.model) modelStatus.push(`model=${mm.model}`)
 
     const info = ws.getServerInfo()
-    const webLines = info.running
-      ? `✅ 运行中 ${info.url}（绑定 ${info.host}:${info.port}）`
-      : '未启动（发送 #ai网页启动 或 在 config.yaml 中设置 web.autoStart:true）'
+    // 配置声明 vs 实际绑定 不一致时，重点提示
+    const declaredHost = (cfgData.web && cfgData.web.host != null) ? String(cfgData.web.host) : '(未填，默认127.0.0.1)'
+    const declaredPort = (cfgData.web && cfgData.web.port != null) ? Number(cfgData.web.port) : '(未填，默认12580)'
+    const bindMismatch = info.running && (info.host !== String(declaredHost).trim() || Number(info.port) !== Number(declaredPort))
+    const webLines = []
+    if (info.running) {
+      webLines.push(`✅ 运行中（实际绑定 ${info.host}:${info.port}）`)
+      if (info.publicUrls && info.publicUrls.length) {
+        webLines.push(`  可访问地址（${info.publicUrls.length} 个）：`)
+        for (const u of info.publicUrls) webLines.push(`    - ${u}`)
+      }
+      if (bindMismatch) {
+        webLines.push(`  ⚠️ 实际绑定与配置声明不一致！配置声明 host=${declaredHost} port=${declaredPort}`)
+        webLines.push(`     → 请发送 #ai网页启动 强制重启（会按 config.yaml 重新绑定），或直接重启 Yunzai。`)
+      }
+      if (info.host === '0.0.0.0' || info.host === '::') {
+        webLines.push(`  ⚠️ 已开启对外监听。若仍无法访问：安全组/防火墙放行 TCP ${info.port}，并用真实公网/局域网 IP 访问。`)
+      }
+    } else {
+      webLines.push('未启动（发送 #ai网页启动 或 在 config.yaml 中设置 web.autoStart:true）')
+    }
+    webLines.push(`  配置声明：host=${declaredHost}  port=${declaredPort}  autoStart=${cfgData.web?.autoStart === false ? 'false' : 'true'}`)
 
     const lines = [
       '🩺 AI0-Plugin 诊断报告',
@@ -351,7 +394,13 @@ export class AICommands extends plugin {
       `  状态：${modelStatus.join('、')}`,
       '',
       '【网页后台】',
-      `  ${webLines}`,
+      webLines.join('\n'),
+      '',
+      '💡 常见「0.0.0.0 改了还是 127.0.0.1」快速处理：',
+      '  1) 改完 config.yaml 后发送：#ai网页启动   （会强制按新配置重启，忽略旧绑定）',
+      '  2) 云服务器还需要：安全组入方向放行 TCP 端口、系统防火墙（ufw/firewalld/iptables）放行',
+      '  3) 访问地址不能写 0.0.0.0，要换成服务器真实公网IP或局域网IP（上面的诊断已列出候选）',
+      '  4) 如果 YAML 里写的是裸 host: 0.0.0.0（没加引号），部分解析器会把它当作数字 0，建议写 host: "0.0.0.0" 更稳妥',
       '',
       '💡 如果主人判定一直是❌：',
       '  1) XRK-Yunzai 自带主人系统（config/matcher 中的 master），通常在 Yunzai 根目录 config/ 配置即可。我们会自动读取它。',

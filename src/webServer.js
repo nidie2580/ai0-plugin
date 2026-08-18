@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
@@ -21,14 +22,49 @@ export function isRunning() {
   return !!serverInstance
 }
 
+// 枚举本机非回环 IPv4 地址（供 0.0.0.0 绑定时推荐局域网访问地址）
+function listLanIpv4() {
+  try {
+    const ifaces = os.networkInterfaces()
+    const out = []
+    for (const name of Object.keys(ifaces || {})) {
+      for (const addr of ifaces[name] || []) {
+        if (addr.family === 'IPv4' && !addr.internal) out.push(addr.address)
+      }
+    }
+    return Array.from(new Set(out)).filter(Boolean)
+  } catch (_) {
+    return []
+  }
+}
+
 export function getServerInfo() {
+  const bindHost = currentHost
+  const port = currentPort
+  const running = isRunning()
+  const url = bindHost && port
+    ? `http://${bindHost === '0.0.0.0' ? '127.0.0.1' : (bindHost === '::' ? '[::1]' : bindHost)}:${port}`
+    : null
+
+  const publicUrls = []
+  if (running && port) {
+    if (bindHost === '0.0.0.0' || bindHost === '::' || !bindHost) {
+      // 真实监听在 all 接口 → 同时给出 127.0.0.1 和局域网候选
+      publicUrls.push(`http://127.0.0.1:${port}`)
+      for (const ip of listLanIpv4()) publicUrls.push(`http://${ip}:${port}`)
+    } else if (bindHost === '127.0.0.1' || bindHost === '::1' || bindHost === 'localhost') {
+      publicUrls.push(`http://${bindHost === '::1' ? '[::1]' : bindHost}:${port}`)
+    } else {
+      publicUrls.push(`http://${bindHost}:${port}`)
+    }
+  }
+
   return {
-    running: isRunning(),
-    host: currentHost,
-    port: currentPort,
-    url: currentHost && currentPort
-      ? `http://${currentHost === '0.0.0.0' ? '127.0.0.1' : currentHost}:${currentPort}`
-      : null
+    running,
+    host: bindHost,
+    port,
+    url,
+    publicUrls
   }
 }
 
@@ -152,13 +188,15 @@ export function createApp() {
       const mm = (cfgData.model && def && cfgData.model[def]) || {}
       const apiKeyMasked = !!(mm.apiKey && !/^\s*$/.test(mm.apiKey) && !/sk-your-api|^\*+$/.test(mm.apiKey))
       const info = getServerInfo()
+      const bindFromCfg = (cfgData.web && typeof cfgData.web === 'object')
+        ? { host: (cfgData.web.host == null ? null : String(cfgData.web.host)), port: cfgData.web.port == null ? null : Number(cfgData.web.port) }
+        : null
       res.json({
         ok: true,
         master: {
           frameworkCount: sources.framework.length,
           pluginCount: sources.plugin.length,
           totalMasters: allMasters.length,
-          // 不返回具体账号避免泄露
           frameworkHasAny: sources.framework.length > 0,
           pluginHasAny: sources.plugin.length > 0
         },
@@ -168,7 +206,10 @@ export function createApp() {
           apiKeySet: apiKeyMasked,
           modelName: mm.model || ''
         },
-        web: info
+        web: info,
+        config: {
+          declared: bindFromCfg
+        }
       })
     } catch (e) {
       res.json({ ok: false, msg: String(e && e.message || e) })
@@ -263,29 +304,83 @@ export function createApp() {
   return app
 }
 
-export function startWebServer(port = 12580, host = '127.0.0.1') {
+export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
   return new Promise((resolve, reject) => {
+    // ------ 输入规范化（防止 YAML 把 0.0.0.0 解析成数字 0 或其他脏值） ------
+    let p = Number(port)
+    if (!Number.isFinite(p) || p <= 0 || p >= 65536) p = 12580
+    let h = host
+    if (h == null) h = '127.0.0.1'
+    if (typeof h !== 'string') h = String(h)
+    h = h.trim()
+    // 某些 YAML 解析器会把裸写 0.0.0.0 解析成 0；这里纠正回来
+    if (h === '0') h = '0.0.0.0'
+    if (!h) h = '127.0.0.1'
+    const forceRestart = !!options.forceRestart
+
+    const doStart = () => {
+      try {
+        const app = createApp()
+        serverInstance = app.listen(p, h, () => {
+          currentPort = p
+          currentHost = h
+          const info = getServerInfo()
+          const lines = []
+          lines.push(`[ai0-plugin] 网页管理后台已启动：绑定 ${h}:${p}`)
+          if (info.publicUrls && info.publicUrls.length) {
+            lines.push(`  可访问地址（共 ${info.publicUrls.length} 个）：`)
+            for (const u of info.publicUrls) lines.push(`    - ${u}`)
+          }
+          if (h === '0.0.0.0' || h === '::') {
+            lines.push(`  ⚠️ 已开启对外监听，请确认云服务器/防火墙/安全组已放行 TCP ${p} 端口。`)
+          }
+          const msg = lines.join('\n')
+          if (typeof logger !== 'undefined') logger.info(msg)
+          else console.log(msg)
+          resolve({ ok: true, ...info, already: false })
+        })
+        serverInstance.on('error', (err) => {
+          serverInstance = null
+          reject(err)
+        })
+      } catch (e) {
+        reject(e)
+      }
+    }
+
     if (serverInstance) {
-      return resolve({ ok: true, ...getServerInfo(), already: true })
-    }
-    try {
-      const app = createApp()
-      serverInstance = app.listen(port, host, () => {
-        currentPort = port
-        currentHost = host
-        const info = getServerInfo()
-        const msg = `[ai0-plugin] 网页管理后台已启动：${info.url} (绑定 ${host}:${port})`
-        if (typeof logger !== 'undefined') logger.info(msg)
-        else console.log(msg)
-        resolve({ ok: true, ...info, already: false })
-      })
-      serverInstance.on('error', (err) => {
+      const sameBind = (currentHost === h) && (currentPort === p)
+      if (sameBind && !forceRestart) {
+        return resolve({ ok: true, ...getServerInfo(), already: true })
+      }
+      // 配置变更（或强制重启）→ 先关闭旧的，再启动新的
+      try {
+        serverInstance.close(() => {
+          serverInstance = null
+          currentHost = null
+          currentPort = null
+          doStart()
+        })
+        // 兜底：close 可能不回调（未真正启动/绑定中）
+        const t = setTimeout(() => {
+          if (serverInstance) {
+            try { serverInstance.closeAllConnections?.() } catch (_) {}
+            serverInstance = null
+            currentHost = null
+            currentPort = null
+            doStart()
+          }
+        }, 1500)
+        if (t && t.unref) t.unref()
+      } catch (_) {
         serverInstance = null
-        reject(err)
-      })
-    } catch (e) {
-      reject(e)
+        currentHost = null
+        currentPort = null
+        doStart()
+      }
+      return
     }
+    doStart()
   })
 }
 
