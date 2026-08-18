@@ -140,6 +140,11 @@ export async function handleChat(e) {
   const privateReply = cfg.get('chat.privateReply', true)
   const triggerPrefix = cfg.get('chat.triggerPrefix', []) || []
 
+  // 全局AI模式：开启后在指定群内所有消息都回复，不需要@
+  const globalAI = cfg.get('chat.globalAI', false) === true
+  const globalAIGroups = (cfg.get('chat.globalAIGroups', []) || []).map(String)
+  const globalAIIgnorePrefix = cfg.get('chat.globalAIIgnorePrefix', ['#', '/', '！']) || []
+
   // 先做一次结构化解析（同时会把引用消息/合并转发聊天记录递归展开）
   const parsed = helper.parseMessageWithContext?.(e) || {
     current: { user_id: userId != null ? String(userId) : null, name: '', text, isBot: false },
@@ -153,9 +158,24 @@ export async function handleChat(e) {
   let pureText = text
 
   if (isGroup) {
-    if (!groupAtReply) return false
-    if (helper.isAtBot(e)) {
+    // 全局AI模式：在指定群内，所有非命令消息都触发
+    const inGlobalGroup = globalAI && globalAIGroups.includes(String(groupId))
+    const isIgnored = globalAIIgnorePrefix.some(p => text.startsWith(p))
+
+    if (inGlobalGroup && !isIgnored) {
       matched = true
+    }
+
+    // 原有逻辑：@机器人 或 前缀触发（与全局AI叠加，不会互斥）
+    if (!matched) {
+      if (!groupAtReply && !inGlobalGroup) return false
+      if (helper.isAtBot(e)) {
+        matched = true
+      }
+    }
+
+    // 去掉 @机器人 部分
+    if (matched) {
       pureText = pureText
         .replace(/^@\S+\s*/, '')
         .replace(/\s*@\S+$/, '')

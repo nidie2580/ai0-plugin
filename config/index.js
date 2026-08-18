@@ -58,6 +58,30 @@ chat:
   # false=引用消息按角色注入成普通 user/assistant 对话
   quoteAsSystem: true
 
+  # --- 全局AI模式 ---
+  # 开启后，在下方 globalAIGroups 列表中的群，不需要@机器人也会回复所有消息
+  # 关闭时，群聊中仅回复@机器人的消息（即 groupAtReply 逻辑）
+  globalAI: false
+  # 启用全局AI的群号列表（仅在这些群中，globalAI=true 时生效）
+  globalAIGroups: []
+  # 全局AI模式下忽略的消息前缀（以这些开头的消息不触发AI回复，比如命令）
+  globalAIIgnorePrefix: ['#', '/', '！']
+
+# 群操作设置（踢出/禁言/设置管理员/授头衔）
+groupOps:
+  # 总开关
+  enabled: true
+  # 允许踢出群员（仅群主/管理员/机器人主人可发起；不可对群主/管理员/机器人主人使用）
+  allowKick: true
+  # 允许禁言群员（同上权限限制）
+  allowMute: true
+  # 允许设置/取消管理员（仅机器人主人可发起；机器人必须是群主）
+  allowAdmin: true
+  # 允许授予群成员头衔（群内所有人都能自助申请）
+  allowTitle: true
+  # 默认禁言时长（秒），不指定时使用
+  defaultMuteDuration: 600
+
 # 系统提示词
 system:
   prompt: |
