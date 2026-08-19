@@ -4,6 +4,7 @@ import * as chatSvc from '../src/chatService.js'
 import * as ws from '../src/webServer.js'
 import * as auth from '../src/auth.js'
 import * as llm from '../src/llm.js'
+import * as svgR from '../src/svgRender.js'
 
 export class AICommands extends plugin {
   constructor() {
@@ -93,61 +94,73 @@ export class AICommands extends plugin {
   }
 
   async help() {
-    const info = ws.getServerInfo()
-    const lines = [
-      '🤖 AI0-Plugin 帮助菜单',
-      '',
-      '【对话】',
-      '  群聊艾特我 / 私聊直接发消息即可对话',
-      '  全局AI开启时，指定群内无需@也能回复',
-      '',
-      '【常用命令】',
-      '  #ai帮助        查看此菜单',
-      '  #ai新会话       开启新的对话（清空上下文）',
-      '  #ai模型         查看当前使用的模型配置',
-      '  #切换模型                 查看所有 API 平台及可用模型（按 平台号.模型号 切换）',
-      '  #切换模型 1.3              切换到平台1的第3个模型',
-      '  #切换模型 [平台key] [模型名]   指定平台和模型名（例：#切换模型 kimi kimi-k2.6）',
-      '',
-      '【群管理（AI驱动）】',
-      '  直接和AI对话即可管理群：',
-      '  例：@机器人 禁言一下@某人 10分钟',
-      '  例：@机器人 踢了@某人',
-      '  例：@机器人 给我个头衔 大佬',
-      '  AI会自动判断权限是否合法，合法则回复后执行操作',
-      '',
-      '【图片生成（需在网页管理中开启）】',
-      '  例：@机器人 画一只可爱的猫咪',
-      '  例：@机器人 帮我生成一张风景图',
-      '  AI会自动调用生图模型生成并发送图片',
-      '',
-      '【全局AI】(仅主人)',
-      '  #ai全局ai 开    开启（当前群自动加入列表）',
-      '  #ai全局ai 关    关闭',
-      '  #ai全局ai       查看当前状态',
-      '',
-      '【网页管理后台】(仅主人)',
-      `  #ai网页管理     生成免登录直链（${info.running ? '运行中' : '未启动'}）`,
-      '  #ai网页启动     启动网页后台',
-      '  #ai网页关闭     关闭网页后台',
-      '  #ai验证码       生成终端验证码（用于网页登录）',
-      '',
-      '【管理命令】(仅主人)',
-      '  #切换模型 [n.m|模型名|平台key 模型名]  多API平台切换',
-      '  #ai设置模型 <模型名>          仅修改当前默认平台的模型ID',
-      '  #ai设置apikey <key>          仅修改当前默认平台的 key',
-      '  #ai设置api <apiBaseURL>       仅修改当前默认平台的 apiBase',
-      '  #ai添加主人 <QQ号>',
-      '  #ai重载         重新加载配置文件',
-      '',
-      '',
-      '【诊断命令】',
-      '  #ai诊断        检查权限/主人/配置/后台运行状态（任何人可用）',
-      '  #ai测试模型 [key]    测试默认模型（或指定 key）的 /models 探测 + /chat/completions 调用',
-      '',
-      '💡 详细配置：plugins/ai0-plugin/config/config.yaml'
-    ]
-    return this.e.reply(lines.join('\n'))
+    const e = this.e
+    // 生成 SVG 图片版帮助菜单（内容已内置到 svgRender.js）
+    try {
+      const buf = svgR.renderHelp()
+      await e.reply(segment.image(buf))
+      // 附加一行文字，方便移动端无法显示 SVG 时使用
+      const info = ws.getServerInfo()
+      const fallback = [
+        '🤖 AI0-Plugin 帮助（若上方图片无法显示，请参考以下简版）',
+        '  对话：群聊艾特我 / 私聊直接发消息',
+        '  #ai新会话 · #ai模型 · #切换模型 1.3',
+        '  群管理：@机器人 禁言/踢人/授头衔（AI判断权限后执行）',
+        '  生图：@机器人 画一只猫咪（需网页端开启生图模型）',
+        `  网页后台：#ai网页管理 → 生成直链（${info.running ? '运行中' : '未启动'}）`,
+        '  诊断：#ai诊断 · #ai测试模型 [key]',
+        '💡 详细配置：plugins/ai0-plugin/config/config.yaml'
+      ].join('\n')
+      return e.reply(fallback)
+    } catch (err) {
+      // 图片生成失败时直接回退到文字版
+      const info = ws.getServerInfo()
+      const lines = [
+        '🤖 AI0-Plugin 帮助菜单',
+        '',
+        '【对话】',
+        '  群聊艾特我 / 私聊直接发消息即可对话',
+        '  全局AI开启时，指定群内无需@也能回复',
+        '',
+        '【常用命令】',
+        '  #ai帮助        查看此菜单',
+        '  #ai新会话       开启新的对话（清空上下文）',
+        '  #ai模型         查看当前使用的模型配置',
+        '  #切换模型                 查看所有 API 平台及可用模型（按 平台号.模型号 切换）',
+        '  #切换模型 1.3              切换到平台1的第3个模型',
+        '  #切换模型 [平台key] [模型名]   指定平台和模型名',
+        '',
+        '【群管理（AI驱动）】',
+        '  @机器人 禁言一下@某人 10分钟',
+        '  @机器人 踢了@某人',
+        '  @机器人 给我个头衔 大佬',
+        '',
+        '【图片生成】',
+        '  @机器人 画一只可爱的猫咪',
+        '  @机器人 帮我生成一张风景图',
+        '',
+        '【全局AI】(仅主人)',
+        '  #ai全局ai 开/关/查看',
+        '',
+        '【网页管理后台】(仅主人)',
+        `  #ai网页管理     生成免登录直链（${info.running ? '运行中' : '未启动'}）`,
+        '  #ai网页启动 / 关闭',
+        '  #ai验证码       生成终端验证码',
+        '',
+        '【管理命令】(仅主人)',
+        '  #切换模型 [n.m|模型名|平台key 模型名]',
+        '  #ai设置模型 / #ai设置apikey / #ai设置api',
+        '  #ai添加主人 <QQ号>',
+        '  #ai重载         重新加载配置文件',
+        '',
+        '【诊断命令】',
+        '  #ai诊断         权限/主人/配置/后台检查（任何人可用）',
+        '  #ai测试模型 [key]    测试指定平台的接口',
+        '',
+        '💡 详细配置：plugins/ai0-plugin/config/config.yaml'
+      ]
+      return e.reply(lines.join('\n'))
+    }
   }
 
   async resetSession() {
@@ -647,48 +660,76 @@ export class AICommands extends plugin {
 
     const currentDefaultModel = modelCfg[defaultKey]?.model || ''
 
-    // ---------- 无参数：分组列出所有平台可用模型 ----------
+    // ---------- 无参数：分组列出所有平台可用模型（图片版） ----------
     if (!targetModel && !switchDefaultOnly) {
-      const lines = ['🔁 多平台模型切换助手']
-      lines.push(`  当前默认平台：${defaultKey}`)
-      lines.push(`  当前默认模型：${currentDefaultModel || '(未设置)'}`)
-      lines.push('')
       let totalAvail = 0
-      providerKeys.forEach((key, pIdx) => {
+      for (const key of providerKeys) {
         const pm = providerModels[key]
-        const isDefault = (key === defaultKey)
-        const tag = isDefault ? ' ⭐默认' : ''
-        lines.push(`【${pIdx + 1}. ${key}】${tag}（${pm.ok ? '在线' : '离线'}）`)
-        if (!pm.ok) {
-          lines.push(`  ❌ 探测失败：${pm.error || `HTTP ${pm.status || '-'}`}`)
-          lines.push(`  请求 URL：${pm.url || '-'}`)
-          return
-        }
-        if (!pm.models.length) {
-          lines.push(`  📄 该账号未返回任何可用模型（${pm.url}）`)
-          return
-        }
-        totalAvail += pm.models.length
-        const curModel = modelCfg[key]?.model || ''
-        lines.push(`  当前模型：${curModel || '(未设置)'}${curModel === currentDefaultModel && isDefault ? ' ⭐' : ''}`)
-        lines.push(`  可用模型（共 ${pm.models.length} 个）：`)
-        pm.models.slice(0, 20).forEach((id, idx) => {
-          const cur = (id === curModel) ? '  ← 当前' : ''
-          lines.push(`    ${pIdx + 1}.${idx + 1}) ${id}${cur}`)
+        if (pm.ok && Array.isArray(pm.models)) totalAvail += pm.models.length
+      }
+      const providerData = providerKeys.map((key, pIdx) => ({
+        key,
+        idx: pIdx + 1,
+        isDefault: key === defaultKey,
+        online: !!providerModels[key]?.ok,
+        error: providerModels[key]?.error || (providerModels[key]?.ok ? null : `HTTP ${providerModels[key]?.status || '-'}`),
+        url: providerModels[key]?.url || '',
+        currentModel: modelCfg[key]?.model || '',
+        models: providerModels[key]?.models || []
+      }))
+      const summary = {
+        totalPlatforms: providerKeys.length,
+        totalModels: totalAvail,
+        defaultPlatform: defaultKey,
+        defaultModel: currentDefaultModel || ''
+      }
+      try {
+        const buf = svgR.renderModelList(providerData, summary)
+        await e.reply(segment.image(buf))
+        // 附加一行简要提示（图片无法显示时可参考）
+        const tip = [
+          `🔁 多平台模型切换（共 ${providerKeys.length} 平台 · ${totalAvail} 模型）`,
+          `  默认：${defaultKey} · ${currentDefaultModel || '(未设置)'}`,
+          '',
+          '切换方式：',
+          '  #切换模型 1.3            （平台号.模型号）',
+          '  #切换模型 kimi 1         （指定平台+编号/模型名）',
+          '  #切换模型 kimi           （仅切换默认平台）',
+          '（若上方图片无法显示，请发送 #切换模型 手动按编号切换）'
+        ].join('\n')
+        return e.reply(tip)
+      } catch (err) {
+        // 图片生成失败时退化为文字版
+        const lines = ['🔁 多平台模型切换助手']
+        lines.push(`  当前默认平台：${defaultKey}`)
+        lines.push(`  当前默认模型：${currentDefaultModel || '(未设置)'}`)
+        lines.push('')
+        providerKeys.forEach((key, pIdx) => {
+          const pm = providerModels[key]
+          const isDefault = (key === defaultKey)
+          const tag = isDefault ? ' ⭐默认' : ''
+          lines.push(`【${pIdx + 1}. ${key}】${tag}（${pm.ok ? '在线' : '离线'}）`)
+          if (!pm.ok) {
+            lines.push(`  ❌ 探测失败：${pm.error || `HTTP ${pm.status || '-'}`}`)
+            return
+          }
+          if (!pm.models.length) {
+            lines.push(`  📄 该账号未返回任何可用模型`)
+            return
+          }
+          const curModel = modelCfg[key]?.model || ''
+          lines.push(`  当前模型：${curModel || '(未设置)'}`)
+          lines.push(`  可用模型（共 ${pm.models.length} 个，只列前 15 个）：`)
+          pm.models.slice(0, 15).forEach((id, idx) => {
+            const cur = (id === curModel) ? ' ← 当前' : ''
+            lines.push(`    ${pIdx + 1}.${idx + 1}) ${id}${cur}`)
+          })
+          if (pm.models.length > 15) lines.push(`    ...(${pm.models.length - 15} 个未展示)`)
         })
-        if (pm.models.length > 20) {
-          lines.push(`    ...(${pm.models.length - 20} 个未展示，直接写完整模型名即可切换)`)
-        }
-      })
-      lines.push('')
-      lines.push(`📊 共 ${providerKeys.length} 个平台，${totalAvail} 个可用模型`)
-      lines.push('')
-      lines.push('切换方式：')
-      lines.push('  ① 按编号：#切换模型 [平台编号].[模型编号]（例：#切换模型 1.3）')
-      lines.push('  ② 按名称：#切换模型 [模型名]（自动在所有平台中匹配第一个）')
-      lines.push('  ③ 指定平台：#切换模型 [平台key] [模型名/编号]（例：#切换模型 kimi kimi-k2.6）')
-      lines.push('  ④ 切换默认平台：#切换模型 [平台key]（例：#切换模型 kimi，模型保持不变）')
-      return e.reply(lines.join('\n'))
+        lines.push('')
+        lines.push('切换：#切换模型 1.3 | #切换模型 kimi kimi-k2.6 | #切换模型 kimi')
+        return e.reply(lines.join('\n'))
+      }
     }
 
     // ---------- 仅切换默认平台（不改模型） ----------
