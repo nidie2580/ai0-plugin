@@ -616,3 +616,141 @@ export async function replyText(e, text, options = {}) {
   }
   return e.reply(text, false, options)
 }
+
+/**
+ * 检查「发送者 userId 是否是机器人好友 / 是否可以主动发私信」。
+ *  注意：QQ/NT 协议体系里，"是不是好友" 和 "能不能主动发临时会话" 是两回事。
+ *  我们这里取最实用的语义：只要能成功调用 sendMsg/sendPrivateMsg 就当「ok」，
+ *  真正的「好友关系」再用 pickFriend/isFriend/getFriendMap 兜底判断。
+ */
+export async function isBotFriend(userId) {
+  if (!userId) return { ok: false, reason: '未提供 userId' }
+  const uid = String(userId)
+  const bot = global.Bot || global.bot
+  if (!bot) return { ok: false, reason: 'Bot 对象未就绪' }
+
+  // 1. 显式的好友检查 API（如果有）
+  try {
+    if (typeof bot.isFriend === 'function') {
+      const v = await bot.isFriend(uid).catch(() => null)
+      if (v === true) return { ok: true, kind: 'friend', api: 'bot.isFriend' }
+      if (v === false) return { ok: false, reason: '该用户不是机器人好友', api: 'bot.isFriend' }
+    }
+    if (typeof bot.pickFriend === 'function') {
+      const friend = bot.pickFriend(uid)
+      if (friend && typeof friend.getInfo === 'function') {
+        try {
+          const info = await friend.getInfo()
+          if (info && (info.user_id || info.uin || info.qq)) return { ok: true, kind: 'friend', api: 'bot.pickFriend.getInfo' }
+        } catch (_) {}
+      }
+    }
+    if (typeof bot.getFriendMap === 'function') {
+      try {
+        const map = await Promise.resolve(bot.getFriendMap()).catch(() => null)
+        if (map) {
+          let found = false
+          if (map.get instanceof Function) {
+            found = !!(map.get(uid) || map.get(Number(uid)) || map.get(BigInt(uid).toString()))
+          } else if (typeof map === 'object') {
+            found = !!map[uid] || !!map[Number(uid)]
+          }
+          // 再兜底遍历值，防止 uin/user_id 类型不匹配
+          if (!found && typeof map.values === 'function') {
+            for (const v of map.values()) {
+              const u = String(v?.uin ?? v?.user_id ?? v?.qq ?? v?.userId ?? '')
+              if (u && u === uid) { found = true; break }
+            }
+          }
+          if (found) return { ok: true, kind: 'friend', api: 'bot.getFriendMap' }
+        }
+      } catch (_) {}
+    }
+    if (typeof bot.getFriendList === 'function') {
+      try {
+        const list = await bot.getFriendList().catch(() => null)
+        if (Array.isArray(list)) {
+          const found = list.some(v => String(v?.uin ?? v?.user_id ?? v?.qq ?? v?.userId ?? '') === uid)
+          if (found) return { ok: true, kind: 'friend', api: 'bot.getFriendList' }
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  // 2. 能主动发私信 → 也视为「ok」（有的实现好友/临时会话都能发）
+  try {
+    if (typeof bot.pickUser === 'function') {
+      const user = bot.pickUser(uid)
+      if (user && (typeof user.sendMsg === 'function' || typeof user.sendPrivateMsg === 'function' || typeof user.sendMessage === 'function')) {
+        return { ok: true, kind: 'dm-capable', api: 'bot.pickUser' }
+      }
+    }
+    if (typeof bot.sendPrivateMsg === 'function') {
+      return { ok: true, kind: 'dm-capable', api: 'bot.sendPrivateMsg' }
+    }
+  } catch (_) {}
+
+  return {
+    ok: false,
+    reason: '未查询到好友关系，且主动私信接口也不可用（请先添加机器人为好友或启用临时会话）',
+  }
+}
+
+/**
+ * 主动给用户发私信（不依赖当前事件对象）。
+ *  兼容 bot.sendPrivateMsg / bot.pickUser().sendMsg / bot.pickFriend().sendMsg
+ */
+export async function sendPrivate(userId, content) {
+  if (!userId) return { ok: false, reason: '未提供 userId' }
+  const uid = String(userId)
+  const bot = global.Bot || global.bot
+  if (!bot) return { ok: false, reason: 'Bot 对象未就绪' }
+
+  const asMsg = (c) => (typeof c === 'string' ? [{ type: 'text', text: c }] : c)
+
+  const attempts = [
+    // 1) bot.sendPrivateMsg（ICQQ/ NapCat / Lagrange 通用）
+    async () => {
+      if (typeof bot.sendPrivateMsg !== 'function') return null
+      const r = await bot.sendPrivateMsg(uid, asMsg(content)).catch(err => ({ error: err }))
+      if (r && !r.error) return { ok: true, via: 'bot.sendPrivateMsg', result: r }
+      if (r && r.error) throw r.error
+      return r == null ? null : { ok: true, via: 'bot.sendPrivateMsg', result: r }
+    },
+    // 2) bot.pickUser(uid).sendMsg / sendPrivateMsg
+    async () => {
+      if (typeof bot.pickUser !== 'function') return null
+      const u = bot.pickUser(uid)
+      if (!u) return null
+      for (const m of ['sendMsg', 'sendPrivateMsg', 'sendMessage']) {
+        if (typeof u[m] !== 'function') continue
+        const r = await u[m](asMsg(content)).catch(err => ({ error: err }))
+        if (r && !r.error) return { ok: true, via: `pickUser.${m}`, result: r }
+        if (r && r.error) throw r.error
+      }
+      return null
+    },
+    // 3) bot.pickFriend(uid).sendMsg
+    async () => {
+      if (typeof bot.pickFriend !== 'function') return null
+      const u = bot.pickFriend(uid)
+      if (!u) return null
+      for (const m of ['sendMsg', 'sendPrivateMsg', 'sendMessage']) {
+        if (typeof u[m] !== 'function') continue
+        const r = await u[m](asMsg(content)).catch(err => ({ error: err }))
+        if (r && !r.error) return { ok: true, via: `pickFriend.${m}`, result: r }
+        if (r && r.error) throw r.error
+      }
+      return null
+    },
+  ]
+
+  let lastErr = null
+  for (const fn of attempts) {
+    try {
+      const r = await fn()
+      if (r && r.ok) return r
+    } catch (err) { lastErr = err }
+  }
+  return { ok: false, reason: lastErr ? lastErr.message : '所有主动私信接口均调用失败' }
+}

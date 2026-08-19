@@ -328,21 +328,33 @@ export class AICommands extends plugin {
   }
 
   async webAdmin() {
-    const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId, this.e)) {
-      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+    const e = this.e
+    const userId = helper.getUserId(e)
+    const isGroup = !!e.group_id
+    const isPrivate = !!e.user_id && !isGroup  // 纯私聊
+
+    // —— 第一步：主人身份校验（群聊/私聊都必须过；顺序放最前，防止非主人浪费好友检测成本）
+    if (!helper.isMaster(userId, e)) {
+      const noTip = [
+        '❌ 「#ai网页管理」仅机器人主人可用。',
+        `（当前账号 QQ=${userId ?? '未知'} 未被识别为主人，可发送 #ai诊断 排查）`
+      ]
+      if (isGroup) noTip.push('如你确实是主人，请先把机器人添加为好友后再在群里使用此命令（可提高校验优先级）。')
+      return e.reply(noTip.join('\n'))
     }
+
+    // —— 第二步：确保网页后台已启动
     let info
     try {
-      // 主人调用此命令时强制重启一次，防止改了 config.yaml 后旧的 127.0.0.1 绑定还在
       info = await this._ensureWebStarted({ forceRestart: true })
-    } catch (e) {
-      return this.e.reply(`❌ ${e.message}`)
+    } catch (err) {
+      return e.reply(`❌ ${err.message}`)
     }
+
     const token = auth.generateMagicLink()
     const baseForMagic = (info.publicUrls && info.publicUrls.length) ? info.publicUrls[0] : info.url
     const url = `${baseForMagic}/magic/${token}`
-    const msg = [
+    const msgLines = [
       '✅ 网页管理后台已就绪',
       '',
       `监听绑定：${info.host}:${info.port}`,
@@ -358,9 +370,55 @@ export class AICommands extends plugin {
         : '',
       '',
       '⚠️ 请妥善保管该链接，任何持有此链接的人均可访问后台。',
-      '如果是群聊环境，建议撤回此消息或私聊使用。'
-    ].filter(Boolean).join('\n')
-    return this.e.reply(msg)
+    ].filter(Boolean)
+    const privateMsg = msgLines.join('\n')
+
+    // —— 第三步：私聊 → 直接把直链发回当前会话
+    if (isPrivate) {
+      return e.reply(privateMsg)
+    }
+
+    // —— 群聊分支：必须先发好友检测，通过后把直链「发私信」而不是群里贴链接
+    //    1. 先检测是否好友/能否私信（不是好友无法主动发私信，必须先让用户加好友）
+    //    2. 失败时群内明确提示「先添加好友」
+    //    3. 成功时发送私信，并在群内回「已发送到你的私信」，绝对不把敏感直链落在群消息里
+    const friendCheck = await helper.isBotFriend(userId).catch(err => ({ ok: false, reason: err.message }))
+    if (!friendCheck.ok) {
+      const selfId = String(e.self_id ?? (global.Bot || global.bot)?.uin ?? (global.Bot || global.bot)?.self_id ?? '')
+      const selfNick = String(
+        (global.Bot || global.bot)?.nickname ??
+        (global.Bot || global.bot)?.info?.nickname ??
+        '机器人'
+      )
+      const parts = [
+        '⚠️ 「#ai网页管理」涉及敏感登录信息，群聊中只会发送到你的私信。',
+        `但当前无法主动给你发私信：${friendCheck.reason || '未查询到好友关系'}。`,
+        '',
+        `请先添加机器人 QQ${selfId ? '（' + selfId + '）' : ''}「${selfNick}」为好友，`,
+        `或先私聊机器人发送任意消息建立临时会话后，再回到群里发送「#ai网页管理」。`
+      ]
+      return e.reply(parts.join('\n'))
+    }
+
+    // 能发私信 → 直接发私信
+    const dm = await helper.sendPrivate(userId, privateMsg).catch(err => ({ ok: false, reason: err.message }))
+    if (dm.ok) {
+      const confirmLines = [
+        '✅ 已把网页管理后台的免登录直链发送到你的私信，请切换到私聊窗口查看。',
+        '（为避免敏感直链在群聊中被他人截获，群内不显示链接。）'
+      ]
+      return e.reply(confirmLines.join('\n'))
+    }
+
+    // 最后兜底：理论上 isBotFriend 已经过了不该到这里；但如果发私信真炸了，
+    // 就明确在群里告知「添加好友失败原因」，仍然不把直链发在群里。
+    return e.reply(
+      [
+        '⚠️ 「#ai网页管理」涉及敏感登录信息，仅通过私信发送。',
+        `虽然已检测到你已具备可私信条件，但主动发送私信失败：${dm.reason || '未知错误'}。`,
+        '请先尝试私聊机器人发一句任意话建立会话，或者删除好友重新添加，再重试命令。'
+      ].join('\n')
+    )
   }
 
   async webStart() {
