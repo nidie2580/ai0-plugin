@@ -46,6 +46,41 @@ async function getBotRole(groupId) {
   return null
 }
 
+/** 获取群信息：群名 / 成员数 / 群主 UIN 等 */
+async function getGroupInfo(groupId) {
+  try {
+    const bot = global.Bot || global.bot
+    const group = bot?.pickGroup?.(groupId)
+    if (!group) return null
+    let info = null
+    if (typeof group.getInfo === 'function') {
+      info = await group.getInfo().catch(() => null)
+    }
+    if (!info && typeof group.getGroupInfo === 'function') {
+      info = await group.getGroupInfo().catch(() => null)
+    }
+    // 也可能是 bot 直接挂了 info 对象在 pickGroup 返回上
+    if (!info) info = group.info || null
+    if (!info) return null
+    return {
+      name: info.groupName || info.group_name || info.name || null,
+      memberCount: Number(info.memberCount ?? info.member_count ?? info.memberNum ?? null),
+      maxMember: Number(info.maxMember ?? info.max_member ?? null),
+      ownerUin: info.ownerUin || info.owner || info.owner_id || null
+    }
+  } catch (_) {}
+  return null
+}
+
+/** 角色 → 中文标签 */
+function roleToLabel(role, unknownAsMember = false) {
+  if (role === 'owner') return '群主'
+  if (role === 'admin') return '管理员'
+  if (role === 'member') return '普通群员'
+  if (unknownAsMember) return '普通群员'
+  return '未检测到（机器人接口未返回，不要脑补为普通群员）'
+}
+
 /** 获取机器人自身的 QQ 号和昵称 */
 function getBotSelf() {
   try {
@@ -60,45 +95,83 @@ function getBotSelf() {
 
 /**
  * 构建群身份上下文（无条件注入，与是否开启群操作无关）：
- *  - 机器人本身的 QQ + 昵称 + 群内角色(群主/管理员/普通)
- *  - 当前消息发送者的 QQ + 昵称 + 群内角色(群主/管理员/普通)
- *  - 群号
- *  - 并且明确告诉 AI：当被问"我是群主还是管理员？/你是什么角色？/谁是群主..."
- *    必须严格按照以上真实信息回答，不能瞎猜（不要假设谁是群主谁是管理员）。
+ *  - 群号 / 群名 / 成员数 / 群主 UIN
+ *  - 机器人本身的 QQ + 昵称 + 群内角色(群主/管理员/普通/未检测到)
+ *  - 当前消息发送者的 QQ + 昵称 + 群内角色
+ *  - 明确告诉 AI：信息未检测到时，回答"我这边暂未获取到"，不要脑补成默认的普通群员。
  */
 export async function buildIdentityContext(e) {
   if (!e?.group_id) return null
   const groupId = e.group_id
   const userId = helper.getUserId(e)
 
+  // 从 e 上兜底抓群名（很多适配器会把 group_name 挂在事件对象上）
+  const eGroupName = e.groupName || e.group_name || e.group?.groupName || e.group?.name || null
+
   const botSelf = getBotSelf()
-  const [botRole, requesterInfo] = await Promise.all([
+  const [botRoleRaw, requesterInfo, groupInfo] = await Promise.all([
     getBotRole(groupId),
-    userId ? getMemberInfo(groupId, userId) : null
+    userId ? getMemberInfo(groupId, userId) : null,
+    getGroupInfo(groupId)
   ])
 
-  const requesterRole = requesterInfo?.role || requesterInfo?.type || 'member'
-  const requesterName = requesterInfo?.nickname || requesterInfo?.card || (userId ? `QQ${userId}` : '')
-  const botRoleLabel = botRole === 'owner' ? '群主' : botRole === 'admin' ? '管理员' : '普通群员'
-  const requesterRoleLabel = requesterRole === 'owner' ? '群主' : requesterRole === 'admin' ? '管理员' : '普通群员'
+  const requesterRoleRaw = requesterInfo?.role || requesterInfo?.type || null
+  const requesterName = requesterInfo?.nickname || requesterInfo?.card || e.sender?.card || e.sender?.nickname || (userId ? `QQ${userId}` : '')
+  const groupName = groupInfo?.name || eGroupName || null
+  const memberCount = groupInfo?.memberCount || null
+  const ownerUin = groupInfo?.ownerUin != null ? String(groupInfo.ownerUin) : null
+
+  // 重点：拿不到角色时 DON'T fallback 为 member，而是明确标记「未检测到」
+  // 这是之前出现"你们两个都是普通群员"这种错误回答的根因。
+  const botRoleLabel = roleToLabel(botRoleRaw, false)
+  const requesterRoleLabel = roleToLabel(requesterRoleRaw, false)
+  const botRoleDesc = (() => {
+    if (botRoleRaw === 'owner') return '（群主，可设置管理员）'
+    if (botRoleRaw === 'admin') return '（群管理员，可踢出/禁言）'
+    if (botRoleRaw === 'member') return '（普通群成员，没有管理权限）'
+    return '（接口未返回，不要臆测）'
+  })()
+  const requesterRoleDesc = (() => {
+    if (requesterRoleRaw === 'owner') return '（本群群主）'
+    if (requesterRoleRaw === 'admin') return '（本群管理员）'
+    if (requesterRoleRaw === 'member') return '（普通群成员）'
+    return '（接口未返回，不要臆测）'
+  })()
 
   const lines = [
-    '【当前群的真实身份信息（重要：必须严格按此信息如实回答，不要瞎猜！）】',
+    '【当前群的真实信息（重要：必须严格按此信息如实回答，信息未检测到时就说未检测到，不要瞎猜！）】',
     `群号：${groupId}`,
-    `你（AI / 机器人）：QQ=${botSelf.uin || '未知'}，昵称=${botSelf.nickname}，在本群角色=${botRoleLabel}${botRole === 'owner' ? '（群主）' : botRole === 'admin' ? '（群管理员）' : '（普通群成员，没有管理权限）'}`,
-    `当前消息发送者：QQ=${userId || '未知'}，昵称=${requesterName}，在本群角色=${requesterRoleLabel}${requesterRole === 'owner' ? '（本群群主）' : requesterRole === 'admin' ? '（本群管理员）' : '（普通群成员）'}`
+    `群名：${groupName ? groupName : '未检测到（机器人接口未返回群名称字段）'}`,
+    `群成员数：${Number.isFinite(memberCount) ? memberCount + ' 人' : '未检测到'}`,
+    `群主 UIN：${ownerUin ? ownerUin : '未检测到'}`
   ]
 
   lines.push('')
-  lines.push('【身份问答规则（必须严格遵守）】')
-  lines.push('当用户询问任何与"群内身份/角色"相关的问题时（包括但不限于：')
-  lines.push('  "我是群主还是管理员？"、"我是谁？"、"你是群主还是管理员？"、')
-  lines.push('  "你是什么角色？"、"谁是群主？"、"谁是管理员？"、"我有管理权限吗？"等），')
-  lines.push('你必须严格根据上面提供的真实身份信息来回答，不要靠猜测或假设。')
-  lines.push('  - 如果用户问"我是群主还是管理员？"，根据"当前消息发送者"的 role 如实回答。')
-  lines.push('  - 如果用户问"你是管理员还是群员？"，根据"你（AI / 机器人）"的 role 如实回答。')
-  lines.push('  - 群角色 owner=群主、admin=管理员、member=普通群员，不要搞混。')
-  lines.push('  - 没有被问到的第三方身份不要瞎编，说"我只知道当前群里你和我的身份"即可。')
+  lines.push(`你（AI / 机器人）：QQ=${botSelf.uin || '未知'}，昵称=${botSelf.nickname}，在本群角色=${botRoleLabel}${botRoleDesc}`)
+  lines.push(`当前消息发送者：QQ=${userId || '未知'}，昵称=${requesterName}，在本群角色=${requesterRoleLabel}${requesterRoleDesc}`)
+
+  // 如果发送者 QQ 与群主 UIN 一致、但接口没有返回 owner，仍然显式提示"根据群主UIN匹配，发送者就是群主"
+  if (ownerUin && userId && String(userId) === String(ownerUin) && requesterRoleRaw !== 'owner') {
+    lines.push(`⚠️ 补充：当前消息发送者的QQ(${userId})与本群群主UIN(${ownerUin})完全一致，因此发送者一定是本群群主。即使接口返回的角色不是 owner，也请按"发送者 = 群主"来回答。`)
+  }
+  // 如果机器人 QQ 与群主 UIN 一致同理
+  if (ownerUin && botSelf.uin && String(botSelf.uin) === String(ownerUin) && botRoleRaw !== 'owner') {
+    lines.push(`⚠️ 补充：你（机器人）的QQ(${botSelf.uin})与本群群主UIN(${ownerUin})完全一致，因此你就是本群群主。即使接口返回的角色不是 owner，也请按"你 = 群主"来回答。`)
+  }
+
+  lines.push('')
+  lines.push('【身份问答规则（必须严格遵守！违反 = 回答错误）】')
+  lines.push('当用户询问任何与"群身份 / 角色 / 基本信息"相关的问题时：')
+  lines.push('  - 问题示例："我是群主还是管理员？"、"我是谁？"、"你是群主还是管理员？"')
+  lines.push('            "你是什么角色？"、"谁是群主？"、"我有管理权限吗？"')
+  lines.push('            "这个群叫啥？"、"群名叫什么？"、"群里有多少人？"、"群里还有谁？"')
+  lines.push('  - 严格根据上方真实信息回答。')
+  lines.push('  - 只有当上方明确写了"群主" / "管理员" / "普通群员"时才能这么答；')
+  lines.push('    写的是"未检测到（接口未返回）"时，必须回答"我这边暂未获取到你的角色信息"，绝对不能脑补成普通群员！')
+  lines.push('  - "群名"未检测到时，回答"我这边没拿到群名"，不要编。')
+  lines.push('  - "群里还有谁？" / "都有谁？"：除非把群成员列表也注入给你了，否则一律回答"我只知道你和我在群里，其他成员信息没拿到不能瞎编。"')
+  lines.push('  - 回答语气要自然，可以用 emoji、加一些可爱的口癖，但不能改变事实本身。')
+  lines.push('  - owner = 群主，admin = 管理员，member = 普通群员，三者不要搞混。')
 
   return lines.join('\n')
 }
@@ -151,16 +224,39 @@ export async function buildGroupContext(e) {
   const targetUid = extractAtTarget(e)
 
   // 并行获取角色信息
-  const [botRole, requesterInfo, targetInfo] = await Promise.all([
+  const [botRoleRaw, requesterInfo, targetInfo, groupInfoRaw] = await Promise.all([
     getBotRole(groupId),
     userId ? getMemberInfo(groupId, userId) : null,
-    targetUid ? getMemberInfo(groupId, targetUid) : null
+    targetUid ? getMemberInfo(groupId, targetUid) : null,
+    getGroupInfo(groupId)
   ])
-
-  const requesterRole = requesterInfo?.role || requesterInfo?.type || 'member'
+  const botRole = botRoleRaw || 'unknown'  // owner/admin/member/unknown
+  const requesterRole = requesterInfo?.role || requesterInfo?.type || 'unknown'
+  const targetRole = targetInfo?.role || targetInfo?.type || 'unknown'
   const requesterName = requesterInfo?.nickname || requesterInfo?.card || `QQ${userId}`
-  const targetRole = targetInfo?.role || targetInfo?.type || 'member'
   const targetName = targetInfo?.nickname || targetInfo?.card || (targetUid ? `QQ${targetUid}` : '')
+
+  // 群主 UIN 兜底：如果能拿到 ownerUin，即使角色未知也能反向推断
+  const ownerUin = groupInfoRaw?.ownerUin != null ? String(groupInfoRaw.ownerUin) : null
+  let requesterInferred = requesterRole
+  let botInferred = botRole
+  if (ownerUin && userId && String(userId) === ownerUin && requesterRole === 'unknown') requesterInferred = 'owner'
+  if (ownerUin) {
+    const bSelf = getBotSelf()
+    if (bSelf.uin && String(bSelf.uin) === ownerUin && botRole === 'unknown') botInferred = 'owner'
+  }
+
+  // 身份规则：只有明确是 owner/admin/member 才允许；unknown 一律当作"角色未知 → 不能执行操作 / 只能保守放行"
+  const isRequesterElevated = requesterInferred === 'owner' || requesterInferred === 'admin' || masters.includes(String(userId))
+  const botCanManage = botInferred === 'owner' || botInferred === 'admin'
+  const targetIsProtected = (() => {
+    if (!targetUid) return false
+    if (masters.includes(targetUid)) return true
+    if (targetRole === 'owner' || targetRole === 'admin') return true
+    // ownerUin 反向兜底：目标 UIN 就是群主 → 受保护
+    if (ownerUin && String(targetUid) === ownerUin) return true
+    return false
+  })()
 
   const allowKick = cfg.get('groupOps.allowKick', true) !== false
   const allowMute = cfg.get('groupOps.allowMute', true) !== false
@@ -168,33 +264,38 @@ export async function buildGroupContext(e) {
   const allowTitle = cfg.get('groupOps.allowTitle', true) !== false
   const defaultMute = cfg.get('groupOps.defaultMuteDuration', 600)
 
+  const botRoleZh = botInferred === 'owner' ? '群主' : botInferred === 'admin' ? '管理员' : botInferred === 'member' ? '普通成员' : '未知（接口未返回，执行操作时保守处理）'
+  const reqRoleZh = requesterInferred === 'owner' ? '群主' : requesterInferred === 'admin' ? '管理员' : requesterInferred === 'member' ? '普通群员' : masters.includes(String(userId)) ? '机器人主人' : '未知（接口未返回）'
+  const tgtRoleZh = targetRole === 'owner' ? '群主' : targetRole === 'admin' ? '管理员' : targetRole === 'member' ? '普通群员' : (targetUid ? '未知' : '-')
+
   const lines = [
     '【群操作能力】',
     `当前群号：${groupId}`,
-    `机器人角色：${botRole || '未知'}${botRole === 'owner' ? '（群主，可设置管理员）' : botRole === 'admin' ? '（管理员，可踢出/禁言）' : '（普通成员，无法执行管理操作）'}`,
+    `机器人角色：${botRoleZh}${botInferred === 'owner' ? '（群主，可设置管理员）' : botInferred === 'admin' ? '（管理员，可踢出/禁言）' : botInferred === 'member' ? '（普通成员，无法执行管理操作）' : '（身份未知，按保守策略不允许执行管理操作）'}`,
     `机器人主人QQ：${masters.length ? masters.join(', ') : '(无)'}`,
     `机器人主人说明：以上QQ号是机器人主人，任何人（包括群主）都不能对他们执行踢出/禁言操作。`,
+    `说明：接口未返回明确角色时一律按 unknown 处理，不要脑补为普通成员。` + (ownerUin ? `（已确认群主UIN=${ownerUin}）` : ''),
     '',
-    `当前请求者：QQ=${userId}，昵称=${requesterName}，群内角色=${requesterRole}`,
-    `  → 请求者${requesterRole === 'owner' ? '是群主，有权踢出/禁言普通群员和管理员' : requesterRole === 'admin' ? '是管理员，有权踢出/禁言普通群员' : masters.includes(String(userId)) ? '是机器人主人，有权踢出/禁言普通群员' : '是普通群员，无权管理群员'}`,
+    `当前请求者：QQ=${userId}，昵称=${requesterName}，群内角色=${reqRoleZh}`,
+    `  → 请求者${isRequesterElevated ? (requesterInferred === 'owner' ? '是群主，有权踢出/禁言普通群员和管理员' : requesterInferred === 'admin' ? '是管理员，有权踢出/禁言普通群员' : '是机器人主人，有权踢出/禁言普通群员') : '身份非群主/管理员/主人，无权管理群员'}`
   ]
 
   if (targetUid) {
     lines.push('')
-    lines.push(`被@目标：QQ=${targetUid}，昵称=${targetName}，群内角色=${targetRole}`)
-    const isProtected = masters.includes(targetUid) || targetRole === 'owner' || targetRole === 'admin'
-    lines.push(`  → 目标${isProtected ? '⚠️ 受保护（群主/管理员/机器人主人），不可对其执行踢出/禁言' : '是普通群员，可被踢出/禁言'}`)
+    lines.push(`被@目标：QQ=${targetUid}，昵称=${targetName}，群内角色=${tgtRoleZh}`)
+    lines.push(`  → 目标${targetIsProtected ? '⚠️ 受保护（群主/管理员/机器人主人），不可对其执行踢出/禁言' : '是普通群员，可被踢出/禁言（前提：请求者有权限、且机器人有管理权限）'}`)
   }
 
   lines.push('', '【可用操作与规则】')
-  if (allowKick && botRole !== 'member') {
-    lines.push('  - 踢出：需要请求者是群主/管理员/机器人主人，且目标不是群主/管理员/机器人主人')
+  // 只有明确知道 bot 是 owner/admin 才允许它执行管理操作；身份 unknown 时一律禁止（宁可保守，不能越权）
+  if (allowKick && botCanManage) {
+    lines.push('  - 踢出：需要请求者是群主/管理员/机器人主人，且目标不是群主/管理员/机器人主人。机器人身份不明确时不得执行。')
   }
-  if (allowMute && botRole !== 'member') {
+  if (allowMute && botCanManage) {
     lines.push(`  - 禁言：同上权限限制。不指定时长时默认${formatDuration(defaultMute)}。可解禁（时长设为0）`)
   }
-  if (allowAdmin && botRole === 'owner') {
-    lines.push('  - 设置/取消管理员：仅机器人主人可发起（机器人必须是群主）')
+  if (allowAdmin && botInferred === 'owner') {
+    lines.push('  - 设置/取消管理员：仅机器人主人可发起（机器人必须明确是群主）')
   }
   if (allowTitle) {
     lines.push('  - 设置头衔：所有人可给自己设；群主/管理员/主人可给他人设')
