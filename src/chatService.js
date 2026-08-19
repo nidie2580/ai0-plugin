@@ -6,12 +6,33 @@ import * as groupOps from './groupOps.js'
 import * as imageGen from './imageGen.js'
 
 const userSession = new Map()
+// 按用户+会话维度记录正在飞的请求，新请求进来时取消旧的（防"先发后到"串上下文）
+const inflightChat = new Map()   // key=`${userId}/${sessionId}` → { controller, at }
+// 防内存泄漏：Map 总容量上限；超出时随机丢弃最旧条目
+const MAX_INFLIGHT = 500
+const MAX_USER_SESSION_MAP = 2000
+function pruneMapToSize(map, max) {
+  if (map.size <= max) return
+  // Map.keys() 返回按插入顺序，直接删最早的一批
+  let need = map.size - max
+  for (const k of map.keys()) {
+    if (need <= 0) break
+    // 如果是 controller，先取消
+    const v = map.get(k)
+    if (v && v.controller && typeof v.controller.abort === 'function') {
+      try { v.controller.abort('cancelled-by-newer-request') } catch (_) {}
+    }
+    map.delete(k)
+    need--
+  }
+}
 
 function getUserSessionKey(userId) {
   return `current:${userId}`
 }
 
 export function getCurrentSession(userId) {
+  pruneMapToSize(userSession, MAX_USER_SESSION_MAP)
   const k = getUserSessionKey(userId)
   let sid = userSession.get(k)
   if (!sid) {
@@ -22,6 +43,13 @@ export function getCurrentSession(userId) {
 }
 
 export function newSession(userId) {
+  // 新会话 → 顺便取消该用户之前所有正在飞的请求
+  for (const [k, v] of inflightChat) {
+    if (k.startsWith(`${userId}/`)) {
+      try { v?.controller?.abort?.('new-session') } catch (_) {}
+      inflightChat.delete(k)
+    }
+  }
   const sid = randomUUID()
   userSession.set(getUserSessionKey(userId), sid)
   return sid
@@ -315,13 +343,40 @@ export async function handleChat(e) {
 
   let replyText = ''
   let modelName = ''
+
+  // 并发控制：同一用户同一会话的新请求 → 取消正在飞的旧请求（防止"先发后到"的串上下文）
+  // 再做一层超时保险：AbortController 配合 axios 的 signal，同时给 model timeout 留余地
+  const modelCfg2 = cfg.loadConfig().model?.[defaultKey] || {}
+  const rawTimeout = Number(modelCfg2.timeout)
+  const hardTimeout = Number.isFinite(rawTimeout) && rawTimeout > 500 ? Math.min(rawTimeout * 1.3 + 5000, 180_000) : 90_000
+  pruneMapToSize(inflightChat, MAX_INFLIGHT)
+  const inflightKey = `${userId}/${sessionId}`
+  const prev = inflightChat.get(inflightKey)
+  if (prev?.controller) {
+    try { prev.controller.abort('cancelled-by-newer-request') } catch (_) {}
+    inflightChat.delete(inflightKey)
+  }
+  const ac = new AbortController()
+  const timeoutTimer = setTimeout(() => {
+    try { ac.abort('hard-timeout') } catch (_) {}
+  }, hardTimeout)
+  inflightChat.set(inflightKey, { controller: ac, at: Date.now() })
+
   try {
-    const res = await llm.chatCompletions(history)
+    const res = await llm.chatCompletions(history, { signal: ac.signal })
     replyText = res.text
     modelName = res.modelName
   } catch (err) {
-    logger.error(`[ai0-plugin] LLM 调用失败: ${err.message}`)
-    replyText = `(调用失败：${err.message?.replace(/sk-[A-Za-z0-9]+/g, 'sk-***') || '未知错误'})`
+    if (err?.name === 'CanceledError' || /cancel|abort/i.test(err?.message || err?.code || '')) {
+      replyText = ''  // 被新请求取代时静默吞掉，不回用户发错误文本
+    } else {
+      logger.error(`[ai0-plugin] LLM 调用失败: ${err.message}`)
+      replyText = `(调用失败：${err.message?.replace(/sk-[A-Za-z0-9]+/g, 'sk-***') || '未知错误'})`
+    }
+  } finally {
+    clearTimeout(timeoutTimer)
+    // 只清理自己登记的（可能在执行期间又被新请求替换并 abort 过了，不能删新的那条）
+    if (inflightChat.get(inflightKey)?.controller === ac) inflightChat.delete(inflightKey)
   }
 
   if (replyText) {

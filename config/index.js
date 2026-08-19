@@ -147,6 +147,12 @@ web:
   #   "0.0.0.0"    允许局域网/公网访问（请同时放行 云服务器安全组 + 系统防火墙 TCP 端口）
   #   "::"         IPv6 all（同上）
   host: "127.0.0.1"
+  # 当 web.port 被占用时，是否自动尝试下一个端口（范围 [port, port+20]）。
+  # false=占用直接报错；true=自动找下一个可用端口（默认 true，防止 Yunzai 启动时因端口被占整体崩溃）
+  autoPortScan: true
+  # 是否信任反向代理的 X-Forwarded-For / X-Real-IP / CF-Connecting-IP 头。
+  #  仅当你已经在前面架了 Nginx/Caddy/Cloudflare 并正确设置头时才设为 true。
+  trustProxy: false
 `
 
 if (!fs.existsSync(DEFAULT_CONFIG)) {
@@ -154,37 +160,97 @@ if (!fs.existsSync(DEFAULT_CONFIG)) {
 }
 // config.yaml 是用户本地配置：首次不存在才初始化一份默认值，后续绝不写入仓库，避免 git pull/强制覆盖 把用户配置洗掉
 if (!fs.existsSync(USER_CONFIG)) {
-  fs.writeFileSync(USER_CONFIG, defaultConfigContent, 'utf-8')
+  try {
+    fs.writeFileSync(USER_CONFIG, defaultConfigContent, 'utf-8')
+  } catch (err) {
+    console.error('[ai0-plugin] 初始化 config.yaml 失败：', err.message)
+  }
 }
 
 let cachedConfig = null
 let lastMtime = 0
+let lastParseError = null   // 最近一次 YAML 解析失败信息（给 #ai诊断 展示）
+
+// 以原子方式保存到 config.yaml（与 llm.saveHistory 相同策略：先 tmp→rename，成功后写 .bak）
+function atomicWriteYaml(filePath, content) {
+  const dir = path.dirname(filePath)
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  const tmp = filePath + `.tmp.${process.pid}.${Date.now()}`
+  const bak = filePath + '.bak'
+  fs.writeFileSync(tmp, content, 'utf-8')
+  // 存在旧文件 → 先写 .bak
+  try {
+    if (fs.existsSync(filePath)) fs.copyFileSync(filePath, bak)
+  } catch (_) {}
+  fs.renameSync(tmp, filePath)
+}
 
 export function loadConfig() {
+  // #ai重载 可强制绕过 mtime 缓存
+  const force = !!loadConfig.__forceLoad || !!cfg.__forceLoad
+  if (!force && cachedConfig && fs.existsSync(USER_CONFIG)) {
+    try {
+      const mtime = fs.statSync(USER_CONFIG).mtimeMs
+      if (mtime === lastMtime) return cachedConfig
+    } catch (_) {}
+  }
+  // 1. 尝试默认（config.yaml）
   try {
-    const mtime = fs.statSync(USER_CONFIG).mtimeMs
-    if (cachedConfig && mtime === lastMtime) {
-      return cachedConfig
-    }
+    let mtime = 0
+    try { mtime = fs.statSync(USER_CONFIG).mtimeMs } catch (_) {}
     const userContent = fs.readFileSync(USER_CONFIG, 'utf-8')
-    cachedConfig = YAML.parse(userContent) || {}
+    const parsed = YAML.parse(userContent) || {}
+    cachedConfig = parsed
     lastMtime = mtime
+    lastParseError = null
     return cachedConfig
   } catch (err) {
-    logger.error(`[ai0-plugin] 读取配置失败: ${err.message}`)
-    return {}
+    const primaryErr = err
+    lastParseError = { file: USER_CONFIG, msg: err.message, at: Date.now() }
+    // 2. YAML 格式损坏 → 尝试 .bak 自动恢复
+    const bak = USER_CONFIG + '.bak'
+    if (fs.existsSync(bak)) {
+      try {
+        const raw = fs.readFileSync(bak, 'utf-8')
+        const parsed = YAML.parse(raw) || {}
+        logger.warn && logger.warn(`[ai0-plugin] config.yaml 格式损坏（${primaryErr.message}），已自动从 config.yaml.bak 恢复`)
+        try { atomicWriteYaml(USER_CONFIG, raw) } catch (_) {}
+        cachedConfig = parsed
+        try { lastMtime = fs.statSync(USER_CONFIG).mtimeMs } catch (_) { lastMtime = 0 }
+        lastParseError = null
+        return cachedConfig
+      } catch (bakErr) {
+        logger.warn && logger.warn(`[ai0-plugin] config.yaml.bak 也解析失败：${bakErr.message}`)
+      }
+    }
+    // 3. 实在不行 → 退回默认模板（绝不让 YAML 坏了把 Yunzai 启动也拖崩；但不会覆写坏文件，方便人工修复）
+    logger.error && logger.error(`[ai0-plugin] 配置解析失败，退回内置默认模板（请修复 config.yaml：${primaryErr.message}）`)
+    try {
+      const parsed = YAML.parse(defaultConfigContent) || {}
+      cachedConfig = parsed
+      lastMtime = 0
+      return cachedConfig
+    } catch (_) {
+      return {}
+    }
   }
+}
+
+/** 最近一次配置解析错误（#ai诊断 展示用） */
+export function getLastConfigError() {
+  return lastParseError
 }
 
 export function saveConfig(config) {
   try {
     const content = YAML.stringify(config)
-    fs.writeFileSync(USER_CONFIG, content, 'utf-8')
+    atomicWriteYaml(USER_CONFIG, content)
     cachedConfig = config
-    lastMtime = fs.statSync(USER_CONFIG).mtimeMs
+    try { lastMtime = fs.statSync(USER_CONFIG).mtimeMs } catch (_) { lastMtime = Date.now() }
+    lastParseError = null
     return true
   } catch (err) {
-    logger.error(`[ai0-plugin] 保存配置失败: ${err.message}`)
+    logger.error && logger.error(`[ai0-plugin] 保存配置失败: ${err.message}`)
     return false
   }
 }

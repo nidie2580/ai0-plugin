@@ -9,30 +9,94 @@ const __dirname = path.dirname(__filename)
 const HISTORY_DIR = path.join(__dirname, '..', 'data', 'history')
 if (!fs.existsSync(HISTORY_DIR)) fs.mkdirSync(HISTORY_DIR, { recursive: true })
 
+// ————————————————————————————————————————————————————————————
+// 每用户串行化队列 & 原子写入 + 崩溃恢复
+// 防止：①并发写同一个 JSON → 数据损坏  ②断电写一半 → 空JSON
+// ————————————————————————————————————————————————————————————
+const userQueues = new Map()                 // userId → Promise 链
+const inflightSaves = new Map()              // userId/sessionId → 最新 messages（去抖合并）
+
+function runInUserQueue(userId, fn) {
+  const prev = userQueues.get(userId) || Promise.resolve()
+  const next = prev.then(() => Promise.resolve().then(fn)).catch(() => {})
+  userQueues.set(userId, next)
+  return next
+}
+
 function historyFile(userId, sessionId) {
   const dir = path.join(HISTORY_DIR, String(userId))
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   return path.join(dir, `${sessionId}.json`)
 }
 
+/** 安全读：读不到/损坏时尝试 .bak 恢复；再不行返回空数组 */
 export function loadHistory(userId, sessionId) {
   const file = historyFile(userId, sessionId)
-  if (!fs.existsSync(file)) return []
-  try {
-    const raw = fs.readFileSync(file, 'utf-8')
-    return JSON.parse(raw)
-  } catch {
-    return []
+  // 1. 优先读正式文件
+  if (fs.existsSync(file)) {
+    try {
+      const raw = fs.readFileSync(file, 'utf-8')
+      if (!raw || raw.trim().length < 2) throw new Error('empty file')
+      return JSON.parse(raw)
+    } catch (err) {
+      // 主文件损坏 → 尝试 .bak 备份
+      const bak = file + '.bak'
+      try {
+        if (fs.existsSync(bak)) {
+          const raw = fs.readFileSync(bak, 'utf-8')
+          const arr = JSON.parse(raw)
+          // 备份有效 → 把备份回写到主文件
+          try {
+            const tmp = file + '.tmp.' + Date.now()
+            fs.writeFileSync(tmp, JSON.stringify(arr, null, 2), 'utf-8')
+            fs.renameSync(tmp, file)
+            logger.warn && logger.warn(`[ai0-plugin] ${file} 已损坏，已从 .bak 恢复`)
+          } catch (_) {}
+          return arr
+        }
+      } catch (_) {}
+      logger.warn && logger.warn(`[ai0-plugin] 会话历史损坏且无备份，已丢弃: ${file} (${err.message})`)
+      return []
+    }
   }
+  return []
 }
 
+/**
+ * 安全写：先 .tmp 再 rename（原子替换），成功后写 .bak
+ * 同一 userId 内串行化；如果用户会话在排队期间又有新 save，合并成最后一次写。
+ */
 export function saveHistory(userId, sessionId, messages) {
-  const file = historyFile(userId, sessionId)
-  try {
-    fs.writeFileSync(file, JSON.stringify(messages, null, 2), 'utf-8')
-  } catch (err) {
-    logger.error(`[ai0-plugin] 保存历史失败: ${err.message}`)
-  }
+  // 1) 只保留最后一次写入（避免连续对话触发成百上千次 fs.writeFileSync）
+  const key = `${userId}/${sessionId}`
+  inflightSaves.set(key, messages)
+
+  runInUserQueue(userId, async () => {
+    const latest = inflightSaves.get(key)
+    if (latest === undefined) return
+    inflightSaves.delete(key)
+
+    const file = historyFile(userId, sessionId)
+    const tmp = file + `.tmp.${process.pid}.${Date.now()}`
+    const bak = file + '.bak'
+    try {
+      const data = JSON.stringify(latest, null, 2)
+      // 先写到 tmp
+      fs.writeFileSync(tmp, data, 'utf-8')
+      fs.fsyncSync?.(fs.openSync(tmp, 'r'))   // 尽量刷盘（兼容旧 node 忽略）
+      // 主文件存在时 → 覆盖 .bak
+      try {
+        if (fs.existsSync(file)) {
+          fs.copyFileSync(file, bak)
+        }
+      } catch (_) {}
+      // 原子 rename
+      fs.renameSync(tmp, file)
+    } catch (err) {
+      logger.error && logger.error(`[ai0-plugin] 保存历史失败: ${err.message}`)
+      try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch (_) {}
+    }
+  })
 }
 
 export function cleanupOldSessions(userId, maxSessions, timeoutMs) {

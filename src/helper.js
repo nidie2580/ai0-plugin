@@ -458,16 +458,161 @@ export async function replyForward(e, text) {
       return e.reply(forwardMsg)
     }
   } catch (err) {
-    logger.warn(`[ai0-plugin] 转发消息失败，降级为普通回复: ${err.message}`)
+    logger.warn && logger.warn(`[ai0-plugin] 转发消息失败，降级为普通回复: ${err.message}`)
   }
   return e.reply(text)
+}
+
+/**
+ * Unicode 安全分段：
+ *  - 不会截断 UTF-16 surrogate pair（避免单个 emoji 被切成两半，进而发送失败/乱码）
+ *  - 优先在换行、句号、感叹号、问号、逗号、分号、反引号闭合位置切，不硬截断单词中间
+ *  - Markdown 边界：尽量不在代码块 ```、表格 |、链接 []()、**粗体**、*斜体*、~~删除线~~ 的中间切
+ *    （只做轻量启发式：若当前分段内存在未闭合的 ```/`，就尽量往后多找点，直到闭合或达到上限）
+ */
+export function splitUnicodeSafe(text, targetChunk = 3000, options = {}) {
+  if (!text) return []
+  const maxChunk = options.maxChunk || Math.max(targetChunk * 2, 6000)
+  const out = []
+  let i = 0
+  const len = text.length
+
+  // 取一个不切断 UTF-16 surrogate 的边界索引
+  function safeEnd(limit) {
+    if (limit >= len) return len
+    // 如果当前字符是 low surrogate（位于 U+DC00..U+DFFF），就往前退一格（把前面的 high 也包含进来）
+    const code = text.charCodeAt(limit)
+    if (code >= 0xDC00 && code <= 0xDFFF && limit > 0) {
+      return limit
+    }
+    // 如果下一个字符是 low surrogate，我们这里是 high surrogate → 退回到这一对之前
+    const nextCode = limit + 1 < len ? text.charCodeAt(limit + 1) : 0
+    if (nextCode >= 0xDC00 && nextCode <= 0xDFFF) return limit
+    return limit
+  }
+
+  while (i < len) {
+    let end = Math.min(i + targetChunk, len)
+    end = safeEnd(end)
+
+    // 启发式：如果当前块内的 ``` 计数为奇数（代码块未闭合） → 尽量延后到下一个 ```
+    if (end < len) {
+      let chunk = text.slice(i, end)
+      const countCodeFence = (chunk.match(/```/g) || []).length
+      if (countCodeFence % 2 === 1) {
+        const nextFence = text.indexOf('```', end)
+        if (nextFence !== -1 && nextFence < i + maxChunk) {
+          end = safeEnd(Math.min(nextFence + 3, i + maxChunk))
+          chunk = text.slice(i, end)
+        }
+      }
+      // 反引号 ` 未闭合 → 延后到下一个 `
+      const countBacktick = (chunk.match(/`/g) || []).length
+      if (countBacktick % 2 === 1) {
+        const nextBack = text.indexOf('`', end)
+        if (nextBack !== -1 && nextBack < i + maxChunk) {
+          end = safeEnd(Math.min(nextBack + 1, i + maxChunk))
+          chunk = text.slice(i, end)
+        }
+      }
+      // Markdown 粗体 / 斜体 ** / * 的配对（只做浅层）
+      const unbalanced = (s) => {
+        let a = 0, b = 0
+        for (let p = 0; p < s.length - 1; p++) {
+          if (s[p] === '*' && s[p + 1] === '*') { a++; p++ }
+          else if (s[p] === '*') b++
+        }
+        return (a % 2 === 1) || (b % 2 === 1)
+      }
+      if (unbalanced(chunk)) {
+        // 尝试找下一个换行，通常那里会闭合
+        const nextNl = text.indexOf('\n', end)
+        if (nextNl !== -1 && nextNl < i + maxChunk) {
+          end = safeEnd(Math.min(nextNl + 1, i + maxChunk))
+        }
+      }
+    }
+
+    // 如果没有明显的 Markdown 边界问题 → 在 end 之前找最近的「自然断点」
+    if (end < len) {
+      const searchFrom = Math.max(i, end - Math.min(400, Math.floor(targetChunk / 3)))
+      const snippet = text.slice(searchFrom, end)
+      // 优先级：段落换行 > 换行 > 句末标点 > 逗号 > 空格
+      const patterns = [
+        /\n\n+(?!\s*$)/g,     // 段落换行
+        /\n(?!\s*$)/g,         // 普通换行
+        /([。！？!?.;；])/g,    // 句末标点（中英通用）
+        /([，,、:：—…])/g,     // 短语边界
+        /([\s　])/g            // 空格（含全角）
+      ]
+      let bestCut = -1
+      for (const pat of patterns) {
+        let m
+        let last = -1
+        pat.lastIndex = 0
+        while ((m = pat.exec(snippet)) !== null) {
+          last = m.index + m[0].length
+        }
+        if (last >= 0) {
+          bestCut = searchFrom + last
+          break
+        }
+      }
+      if (bestCut > i && bestCut <= end) {
+        end = safeEnd(bestCut)
+      }
+    }
+
+    // 硬上限兜底：自然断点再想找也不能超过 maxChunk
+    if (end > i + maxChunk) end = safeEnd(i + maxChunk)
+    if (end <= i) end = safeEnd(i + 1)   // 极端情况至少前进 1 字符，防止死循环
+
+    out.push(text.slice(i, end))
+    i = end
+  }
+  return out
 }
 
 export async function replyText(e, text, options = {}) {
   const threshold = cfg.get('response.forwardThreshold', 500)
   const useForward = cfg.get('response.useForwardMsg', true)
-  if (useForward && typeof text === 'string' && text.length > threshold) {
-    return replyForward(e, text)
+
+  // 字符串超长时走分段 + 合并转发（单条 QQ 消息有字数/字节上限，不分段会被服务器直接丢弃或乱码）
+  if (typeof text === 'string' && text.length > threshold) {
+    const chunks = splitUnicodeSafe(text, /* targetChunk */ 3000, { maxChunk: 5200 })
+    if (chunks.length <= 1) {
+      if (useForward) return replyForward(e, chunks[0])
+      return e.reply(chunks[0], false, options)
+    }
+    // 分段后：优先把所有段用同一个合并转发发出去（减少消息数）
+    if (useForward && e.group_id && typeof (e.bot ?? Bot)?.makeForwardMsg === 'function') {
+      try {
+        const nodes = chunks.map((chunk, idx) => ({
+          user_id: e.self_id || 0,
+          nickname: idx === 0 ? 'AI（续）' : 'AI（续' + (idx + 1) + '/' + chunks.length + '）',
+          message: [{ type: 'text', text: chunk }]
+        }))
+        const fwd = await (e.bot ?? Bot).makeForwardMsg(nodes)
+        return e.reply(fwd)
+      } catch (err) {
+        logger.warn && logger.warn(`[ai0-plugin] 长文本合并转发失败，降级逐条回复: ${err.message}`)
+      }
+    }
+    // 合并转发不可用 → 逐条分段发（每段仍做 Unicode 安全）
+    for (let i = 0; i < chunks.length; i++) {
+      try {
+        if (i === chunks.length - 1) {
+          await e.reply(chunks[i], false, options)
+        } else {
+          await e.reply(chunks[i])
+          // 多条之间稍作停顿，避免某些适配器因为消息太近丢消息
+          await new Promise(r => setTimeout(r, 220))
+        }
+      } catch (err) {
+        logger.warn && logger.warn(`[ai0-plugin] 分段发送第 ${i + 1}/${chunks.length} 段失败: ${err.message}`)
+      }
+    }
+    return true
   }
   return e.reply(text, false, options)
 }

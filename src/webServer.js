@@ -123,6 +123,46 @@ export function createApp() {
   app.use(express.json({ limit: '10mb' }))
   app.use(express.urlencoded({ extended: true }))
 
+  // —— 反向代理真实 IP 识别（给限速用）：兼容 Cloudflare / X-Forwarded-For / X-Real-IP
+  function getClientIp(req) {
+    const trustProxy = cfg.get('web.trustProxy', false)
+    let ip = req.socket?.remoteAddress || req.ip || 'unknown'
+    if (trustProxy) {
+      const pickFromHeaders = [
+        'cf-connecting-ip',       // Cloudflare
+        'x-forwarded-for',        // 标准
+        'x-real-ip',              // Nginx
+        'x-client-ip',
+        'forwarded-for',
+        'x-cluster-client-ip'
+      ]
+      for (const h of pickFromHeaders) {
+        const v = req.headers?.[h]
+        if (typeof v === 'string' && v.trim()) {
+          const first = v.split(',')[0].trim()
+          if (first) { ip = first; break }
+        }
+      }
+    }
+    // 去 IPv6 包装，如 ::ffff:127.0.0.1 → 127.0.0.1
+    if (ip && ip.startsWith('::ffff:')) ip = ip.slice(7)
+    return ip || 'unknown'
+  }
+  // 每请求挂一个 req.clientIp
+  app.use((req, res, next) => {
+    req.clientIp = getClientIp(req)
+    next()
+  })
+
+  // 全局基础安全头
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+    res.setHeader('Referrer-Policy', 'no-referrer')
+    res.removeHeader('X-Powered-By')
+    next()
+  })
+
   // 首页 / 静态资源
   app.get('/', (req, res) => {
     const token = req.cookies?.ai0_session
@@ -136,7 +176,7 @@ export function createApp() {
   app.use('/assets', express.static(path.join(WEB_DIR, 'assets')))
 
   app.get('/magic/:token', (req, res) => {
-    const r = auth.verifyMagicLink(req.params.token)
+    const r = auth.verifyMagicLink(req.params.token, req.clientIp)
     if (!r.ok) {
       const f = path.join(WEB_DIR, 'login.html')
       if (fs.existsSync(f)) return res.sendFile(f)
@@ -156,7 +196,7 @@ export function createApp() {
     const { codeId, code } = req.body || {}
     const id = codeId || auth.getPendingCodeId()
     if (!id) return res.json({ ok: false, msg: '当前没有待验证的验证码，请先在终端生成' })
-    const r = auth.verifyCode(id, code)
+    const r = auth.verifyCode(id, code, req.clientIp)
     if (!r.ok) return res.json(r)
     const session = auth.issueSession()
     res.cookie('ai0_session', session, {
@@ -422,13 +462,13 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
   return new Promise((resolve, reject) => {
     // ------ 输入规范化（防止 YAML 把 0.0.0.0 解析成数字 0 或其他脏值） ------
     const bind = cfg.normalizeWebBind ? cfg.normalizeWebBind({ host, port }) : null
-    let p, h
+    let startPort, h
     if (bind) {
-      p = bind.port
+      startPort = bind.port
       h = bind.host
     } else {
-      p = Number(port)
-      if (!Number.isFinite(p) || p <= 0 || p >= 65536) p = 12580
+      startPort = Number(port)
+      if (!Number.isFinite(startPort) || startPort <= 0 || startPort >= 65536) startPort = 12580
       h = host
       if (h == null) h = '127.0.0.1'
       if (typeof h !== 'string') h = String(h)
@@ -437,35 +477,73 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
       if (!h) h = '127.0.0.1'
     }
     const forceRestart = !!options.forceRestart
+    // 用户允许端口递增自动寻找（可配置）
+    const allowScan = cfg.get('web.autoPortScan', true) !== false
+    const scanEndPort = Math.min(startPort + 20, 65535)
 
-    const doStart = () => {
+    const afterBound = (actualPort) => {
+      currentPort = actualPort
+      currentHost = h
+      const info = getServerInfo()
+      const lines = []
+      lines.push(`[ai0-plugin] 网页管理后台已启动：绑定 ${h}:${actualPort}`)
+      if (info.publicUrls && info.publicUrls.length) {
+        lines.push(`  可访问地址（共 ${info.publicUrls.length} 个）：`)
+        for (const u of info.publicUrls) lines.push(`    - ${u}`)
+      }
+      if (h === '0.0.0.0' || h === '::') {
+        lines.push(`  ⚠️ 已开启对外监听（0.0.0.0），请确认以下安全措施：`)
+        lines.push(`    · 云服务器安全组 / iptables/防火墙已放行 TCP ${actualPort}，但务必仅放行受信任的来源 IP；`)
+        lines.push(`    · 公网暴露强烈建议套反代（Nginx/Caddy）+ HTTPS，并在插件配置 web.trustProxy=true 以读取真实 IP；`)
+        lines.push(`    · 主人专属免登录链接（有效期10分钟）仅发私聊，请勿转发到公开群/频道；`)
+        lines.push(`    · 默认验证码仅终端可查看，但已开启速率限制（每IP 60秒最多10次）+ 单ID错误5次即作废。`)
+      }
+      const msg = lines.join('\n')
+      if (typeof logger !== 'undefined') logger.info(msg)
+      else console.log(msg)
+      resolve({ ok: true, ...info, already: false })
+    }
+
+    let p = startPort
+    const tryBind = () => {
       try {
         const app = createApp()
-        serverInstance = app.listen(p, h, () => {
-          currentPort = p
-          currentHost = h
-          const info = getServerInfo()
-          const lines = []
-          lines.push(`[ai0-plugin] 网页管理后台已启动：绑定 ${h}:${p}`)
-          if (info.publicUrls && info.publicUrls.length) {
-            lines.push(`  可访问地址（共 ${info.publicUrls.length} 个）：`)
-            for (const u of info.publicUrls) lines.push(`    - ${u}`)
-          }
-          if (h === '0.0.0.0' || h === '::') {
-            lines.push(`  ⚠️ 已开启对外监听，请确认云服务器/防火墙/安全组已放行 TCP ${p} 端口。`)
-          }
-          const msg = lines.join('\n')
-          if (typeof logger !== 'undefined') logger.info(msg)
-          else console.log(msg)
-          resolve({ ok: true, ...info, already: false })
+        serverInstance = app.listen(p, h)
+        let bound = false
+        serverInstance.once('listening', () => {
+          bound = true
+          afterBound(p)
         })
         serverInstance.on('error', (err) => {
+          if (bound) return
+          const code = (err && err.code) || String(err.message).slice(0, 40)
+          // EADDRINUSE → 允许时自动尝试下一个端口
+          if (String(code) === 'EADDRINUSE' && allowScan && p < scanEndPort) {
+            const warn = `[ai0-plugin] 端口 ${p} 已占用，自动尝试下一个端口...`
+            if (typeof logger !== 'undefined') logger.warn(warn)
+            else console.warn(warn)
+            try { serverInstance.removeAllListeners(); serverInstance.close?.() } catch (_) {}
+            serverInstance = null
+            p += 1
+            // 退避 100ms，连续占满也不会打满 CPU
+            setTimeout(tryBind, 100)
+            return
+          }
           serverInstance = null
-          reject(err)
+          if (String(code) === 'EADDRINUSE') {
+            reject(new Error(`端口 ${startPort}${startPort !== p ? '-' + p : ''} 全部被占用，请手动释放或修改 config.yaml 中的 web.port`))
+          } else {
+            reject(err)
+          }
         })
       } catch (e) {
         reject(e)
       }
+    }
+
+    const doStart = () => {
+      p = startPort
+      tryBind()
     }
 
     if (serverInstance) {
@@ -475,16 +553,18 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
       }
       // 配置变更（或强制重启）→ 先关闭旧的，再启动新的
       try {
+        try { serverInstance.closeAllConnections?.() } catch (_) {}
         serverInstance.close(() => {
           serverInstance = null
           currentHost = null
           currentPort = null
           doStart()
         })
-        // 兜底：close 可能不回调（未真正启动/绑定中）
+        // 兜底：close 可能不回调
         const t = setTimeout(() => {
           if (serverInstance) {
             try { serverInstance.closeAllConnections?.() } catch (_) {}
+            try { serverInstance.unref?.() } catch (_) {}
             serverInstance = null
             currentHost = null
             currentPort = null

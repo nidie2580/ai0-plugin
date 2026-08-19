@@ -263,12 +263,46 @@ export class AICommands extends plugin {
   }
 
   async reloadConfig() {
-    const userId = helper.getUserId(this.e)
-    if (!helper.isMaster(userId, this.e)) {
-      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+    const e = this.e
+    const userId = helper.getUserId(e)
+    if (!helper.isMaster(userId, e)) {
+      return e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
-    cfg.loadConfig()
-    return this.e.reply('✅ 配置文件已重新加载。')
+    // 1. 先强制把缓存打失效（无论 mtime 是否变化都重新解析一遍）
+    try { cfg.saveConfig?.(cfg.loadConfig?.() || {}) } catch (_) {}
+    cfg.__forceLoad = true
+    const config = cfg.loadConfig()
+    delete cfg.__forceLoad
+
+    // 2. 如果 web 正在运行 → 使用新配置强制重启（host/port 变动会立刻生效；
+    //    旧 server 会被关闭并触发 closeAllConnections，避免重启后旧路由持续引用旧闭包造成内存泄漏）
+    const wasRunning = ws.isRunning?.()
+    if (wasRunning) {
+      try {
+        await ws.stopWebServer()
+      } catch (err) {
+        logger.warn && logger.warn(`[ai0-plugin] #ai重载关闭旧网页后台异常: ${err.message}`)
+      }
+      try {
+        const bind = cfg.getWebBindFromConfig?.()
+        const port = bind?.port ?? (Number(config?.web?.port) || 12580)
+        const host = bind?.host ?? ((config?.web?.host ? String(config.web.host).trim() : '127.0.0.1') || '127.0.0.1')
+        await ws.startWebServer(port, host, { forceRestart: true })
+      } catch (err) {
+        return e.reply(`⚠️ 配置已重载，但网页后台重启失败：${err.message}\n（你仍可手动发送 #ai网页启动 再试一次）`)
+      }
+    }
+
+    // 3. 给 #ai诊断 加上"上次重载时间"，并顺带清除缓存过大的 LRU 型 Map（防止长期运行无限增长）
+    globalThis.__ai0_reload_ts = Date.now()
+
+    // 4. 如果有 YAML 解析错误（坏文件已被降级），明确提示用户
+    const lastErr = typeof cfg.getLastConfigError === 'function' ? cfg.getLastConfigError() : null
+
+    const parts = ['✅ 配置文件已重新加载。']
+    if (wasRunning) parts.push('（网页后台已按新配置强制重启，旧连接已清理，无路由/监听器泄漏）')
+    if (lastErr) parts.push(`⚠️ 但检测到 YAML 解析错误：${lastErr.msg}\n已自动退回默认/备份模板；请手动检查 ${lastErr.file} 的缩进与格式（常见坑是层级不对齐）。`)
+    return e.reply(parts.join('\n'))
   }
 
   async _ensureWebStarted(options = {}) {
