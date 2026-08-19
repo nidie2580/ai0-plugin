@@ -95,28 +95,32 @@ export class AICommands extends plugin {
 
   async help() {
     const e = this.e
-    // 生成 SVG 图片版帮助菜单（内容已内置到 svgRender.js）
+    const info = ws.getServerInfo()
+    // 生成 SVG 图片：本地文件绝对路径，用 segment.image(绝对路径) 发送
+    // （避免直接塞 Buffer 触发 NapCat "rich media transfer failed"）
     try {
-      const buf = svgR.renderHelp()
-      await e.reply(segment.image(buf))
-      // 附加一行文字，方便移动端无法显示 SVG 时使用
-      const info = ws.getServerInfo()
-      const fallback = [
-        '🤖 AI0-Plugin 帮助（若上方图片无法显示，请参考以下简版）',
-        '  对话：群聊艾特我 / 私聊直接发消息',
-        '  #ai新会话 · #ai模型 · #切换模型 1.3',
-        '  群管理：@机器人 禁言/踢人/授头衔（AI判断权限后执行）',
-        '  生图：@机器人 画一只猫咪（需网页端开启生图模型）',
-        `  网页后台：#ai网页管理 → 生成直链（${info.running ? '运行中' : '未启动'}）`,
-        '  诊断：#ai诊断 · #ai测试模型 [key]',
-        '💡 详细配置：plugins/ai0-plugin/config/config.yaml'
-      ].join('\n')
-      return e.reply(fallback)
+      // 清理过旧的临时文件（每个用户发帮助时轻量执行一次）
+      svgR.cleanupOldTmp?.()
+      const svgPath = svgR.renderHelp()
+      // 注意：e.reply 参数必须是「纯单个 segment.image(path)」，不要混发 text，
+      //       否则 NapCat/LLOneBot 会被判为富媒体复合消息导致转换失败。
+      await e.reply(segment.image(svgPath))
+      // 如果需要提示信息，单独再发一条（中间换行隔断）
+      setTimeout(() => {
+        e.reply([
+          '💡 如果上方图片无法正常显示，请参考简版：',
+          '  · 对话：群聊@机器人 / 私聊直接发消息',
+          '  · 常用：#ai新会话 · #ai模型 · #切换模型 1.3',
+          '  · 群管：@机器人 禁言/踢人/授头衔（AI判断权限后执行）',
+          '  · 生图：@机器人 画一只猫咪（需网页端开启生图模型）',
+          `  · 网页：#ai网页管理（${info.running ? '运行中' : '未启动'}）`,
+          '  · 诊断：#ai诊断 · #ai测试模型 [平台key]'
+        ].join('\n')).catch(() => {})
+      }, 1200)
+      return true
     } catch (err) {
-      // 图片生成失败时直接回退到文字版
-      const info = ws.getServerInfo()
       const lines = [
-        '🤖 AI0-Plugin 帮助菜单',
+        '🤖 AI0-Plugin 帮助菜单（图片生成失败，回退文字版）',
         '',
         '【对话】',
         '  群聊艾特我 / 私聊直接发消息即可对话',
@@ -126,9 +130,10 @@ export class AICommands extends plugin {
         '  #ai帮助        查看此菜单',
         '  #ai新会话       开启新的对话（清空上下文）',
         '  #ai模型         查看当前使用的模型配置',
-        '  #切换模型                 查看所有 API 平台及可用模型（按 平台号.模型号 切换）',
-        '  #切换模型 1.3              切换到平台1的第3个模型',
+        '  #切换模型                 查看所有 API 平台及可用模型',
+        '  #切换模型 1.3              平台号.模型号 切换',
         '  #切换模型 [平台key] [模型名]   指定平台和模型名',
+        '  #切换模型 上一页/下一页    模型过多时翻页',
         '',
         '【群管理（AI驱动）】',
         '  @机器人 禁言一下@某人 10分钟',
@@ -137,7 +142,6 @@ export class AICommands extends plugin {
         '',
         '【图片生成】',
         '  @机器人 画一只可爱的猫咪',
-        '  @机器人 帮我生成一张风景图',
         '',
         '【全局AI】(仅主人)',
         '  #ai全局ai 开/关/查看',
@@ -623,6 +627,7 @@ export class AICommands extends plugin {
     let targetKey = null              // 显式指定的 provider key
     let targetModel = ''             // 模型名或编号字符串
     let switchDefaultOnly = false    // 仅切换默认平台，不改模型
+    let pageNav = null               // 'prev' | 'next' | number(目标页码)
 
     if (args.length >= 2) {
       if (providerKeys.includes(args[0])) {
@@ -632,11 +637,20 @@ export class AICommands extends plugin {
         targetModel = argStr
       }
     } else if (args.length === 1) {
-      if (providerKeys.includes(args[0])) {
-        targetKey = args[0]
+      const a = args[0]
+      if (providerKeys.includes(a)) {
+        targetKey = a
         switchDefaultOnly = true
+      } else if (/^上一页$/i.test(a) || /^prev$/i.test(a)) {
+        pageNav = 'prev'
+      } else if (/^下一页$/i.test(a) || /^next$/i.test(a)) {
+        pageNav = 'next'
+      } else if (/^第\s*(\d+)\s*页$/.test(a)) {
+        pageNav = parseInt(RegExp.$1, 10)
+      } else if (/^(\d+)\/(\d+)$/.test(a)) {
+        pageNav = parseInt(RegExp.$1, 10)
       } else {
-        targetModel = args[0]
+        targetModel = a
       }
     }
 
@@ -660,49 +674,64 @@ export class AICommands extends plugin {
 
     const currentDefaultModel = modelCfg[defaultKey]?.model || ''
 
-    // ---------- 无参数：分组列出所有平台可用模型（图片版） ----------
-    if (!targetModel && !switchDefaultOnly) {
-      let totalAvail = 0
-      for (const key of providerKeys) {
-        const pm = providerModels[key]
-        if (pm.ok && Array.isArray(pm.models)) totalAvail += pm.models.length
-      }
-      const providerData = providerKeys.map((key, pIdx) => ({
-        key,
-        idx: pIdx + 1,
-        isDefault: key === defaultKey,
-        online: !!providerModels[key]?.ok,
-        error: providerModels[key]?.error || (providerModels[key]?.ok ? null : `HTTP ${providerModels[key]?.status || '-'}`),
-        url: providerModels[key]?.url || '',
-        currentModel: modelCfg[key]?.model || '',
-        models: providerModels[key]?.models || []
-      }))
-      const summary = {
-        totalPlatforms: providerKeys.length,
-        totalModels: totalAvail,
-        defaultPlatform: defaultKey,
-        defaultModel: currentDefaultModel || ''
-      }
+    // 构建统一 providerData（复用）
+    let totalAvail = 0
+    for (const key of providerKeys) {
+      const pm = providerModels[key]
+      if (pm.ok && Array.isArray(pm.models)) totalAvail += pm.models.length
+    }
+    const providerData = providerKeys.map((key, pIdx) => ({
+      key,
+      idx: pIdx + 1,
+      isDefault: key === defaultKey,
+      online: !!providerModels[key]?.ok,
+      error: providerModels[key]?.error || (providerModels[key]?.ok ? null : `HTTP ${providerModels[key]?.status || '-'}`),
+      url: providerModels[key]?.url || '',
+      currentModel: modelCfg[key]?.model || '',
+      models: providerModels[key]?.models || []
+    }))
+
+    // 读取用户上次查看页码（每个用户独立保存，临时 Map，重启失效）
+    const PAGE_SESSION_KEY = '__switch_model_page'
+    if (!globalThis[PAGE_SESSION_KEY]) globalThis[PAGE_SESSION_KEY] = new Map()
+    const pageStore = globalThis[PAGE_SESSION_KEY]
+    const totalPages = svgR.countPages?.(providerData) ?? 1
+    let currentPage = 1
+    try {
+      if (pageNav === 'prev') currentPage = (pageStore.get(userId) || 1) - 1
+      else if (pageNav === 'next') currentPage = (pageStore.get(userId) || 1) + 1
+      else if (typeof pageNav === 'number') currentPage = pageNav
+      currentPage = Math.max(1, Math.min(currentPage, totalPages))
+    } catch (_) { currentPage = 1 }
+
+    // ---------- 无参数 / 翻页：列出（图片版，支持分页） ----------
+    if ((!targetModel && !switchDefaultOnly) || pageNav) {
+      pageStore.set(userId, currentPage)
       try {
-        const buf = svgR.renderModelList(providerData, summary)
-        await e.reply(segment.image(buf))
-        // 附加一行简要提示（图片无法显示时可参考）
-        const tip = [
-          `🔁 多平台模型切换（共 ${providerKeys.length} 平台 · ${totalAvail} 模型）`,
-          `  默认：${defaultKey} · ${currentDefaultModel || '(未设置)'}`,
-          '',
-          '切换方式：',
-          '  #切换模型 1.3            （平台号.模型号）',
-          '  #切换模型 kimi 1         （指定平台+编号/模型名）',
-          '  #切换模型 kimi           （仅切换默认平台）',
-          '（若上方图片无法显示，请发送 #切换模型 手动按编号切换）'
-        ].join('\n')
-        return e.reply(tip)
+        const { svgPath, pageNum, totalPages: actualTotal, hasPrev, hasNext } = svgR.renderModelListPages(providerData, currentPage)
+        // 清理旧临时文件
+        svgR.cleanupOldTmp?.()
+        // 只发图片，不要和 text 混发
+        await e.reply(segment.image(svgPath))
+        setTimeout(() => {
+          const navHint = []
+          if (hasPrev) navHint.push('← #切换模型 上一页')
+          if (hasNext) navHint.push('#切换模型 下一页 →')
+          if (actualTotal > 1) navHint.push(`（#切换模型 第 N 页 可直跳）`)
+          const hint = [
+            `🔁 多平台模型切换 · 当前 ${pageNum}/${actualTotal} 页`,
+            `  默认：${defaultKey} · ${currentDefaultModel || '(未设置)'}  共 ${totalAvail} 可用模型`,
+            '',
+            '切换：① #切换模型 1.3    ② #切换模型 kimi-k2.6    ③ #切换模型 kimi 1',
+            (navHint.length ? '翻页：' + navHint.join('  ·  ') : '')
+          ].filter(Boolean).join('\n')
+          e.reply(hint).catch(() => {})
+        }, 1200)
+        return true
       } catch (err) {
-        // 图片生成失败时退化为文字版
-        const lines = ['🔁 多平台模型切换助手']
-        lines.push(`  当前默认平台：${defaultKey}`)
-        lines.push(`  当前默认模型：${currentDefaultModel || '(未设置)'}`)
+        // 图片生成失败时退化为文字版（单平台最多显示 15 条）
+        const lines = ['🔁 多平台模型切换助手（图片生成失败，退化为文字版）']
+        lines.push(`  当前页：${currentPage}/${totalPages} · 默认：${defaultKey} · ${currentDefaultModel || '(未设置)'}`)
         lines.push('')
         providerKeys.forEach((key, pIdx) => {
           const pm = providerModels[key]
@@ -718,16 +747,16 @@ export class AICommands extends plugin {
             return
           }
           const curModel = modelCfg[key]?.model || ''
-          lines.push(`  当前模型：${curModel || '(未设置)'}`)
-          lines.push(`  可用模型（共 ${pm.models.length} 个，只列前 15 个）：`)
+          lines.push(`  当前模型：${curModel || '(未设置)'}  共 ${pm.models.length} 个可用模型`)
+          lines.push(`  （单平台只列前 15 条）：`)
           pm.models.slice(0, 15).forEach((id, idx) => {
             const cur = (id === curModel) ? ' ← 当前' : ''
             lines.push(`    ${pIdx + 1}.${idx + 1}) ${id}${cur}`)
           })
-          if (pm.models.length > 15) lines.push(`    ...(${pm.models.length - 15} 个未展示)`)
+          if (pm.models.length > 15) lines.push(`    ...(${pm.models.length - 15} 个未展示，直接 "#切换模型 模型名" 切换)`)
         })
         lines.push('')
-        lines.push('切换：#切换模型 1.3 | #切换模型 kimi kimi-k2.6 | #切换模型 kimi')
+        lines.push('切换：#切换模型 1.3 | #切换模型 kimi 1 | #切换模型 kimi  | 翻页：#切换模型 上一页/下一页')
         return e.reply(lines.join('\n'))
       }
     }
