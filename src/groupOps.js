@@ -46,6 +46,63 @@ async function getBotRole(groupId) {
   return null
 }
 
+/** 获取机器人自身的 QQ 号和昵称 */
+function getBotSelf() {
+  try {
+    const bot = global.Bot || global.bot
+    const uin = bot?.uin || bot?.self_id
+    const nickname = bot?.nickname || bot?.nickName || bot?.info?.nickname || '机器人'
+    return { uin: uin != null ? String(uin) : null, nickname: String(nickname) }
+  } catch (_) {
+    return { uin: null, nickname: '机器人' }
+  }
+}
+
+/**
+ * 构建群身份上下文（无条件注入，与是否开启群操作无关）：
+ *  - 机器人本身的 QQ + 昵称 + 群内角色(群主/管理员/普通)
+ *  - 当前消息发送者的 QQ + 昵称 + 群内角色(群主/管理员/普通)
+ *  - 群号
+ *  - 并且明确告诉 AI：当被问"我是群主还是管理员？/你是什么角色？/谁是群主..."
+ *    必须严格按照以上真实信息回答，不能瞎猜（不要假设谁是群主谁是管理员）。
+ */
+export async function buildIdentityContext(e) {
+  if (!e?.group_id) return null
+  const groupId = e.group_id
+  const userId = helper.getUserId(e)
+
+  const botSelf = getBotSelf()
+  const [botRole, requesterInfo] = await Promise.all([
+    getBotRole(groupId),
+    userId ? getMemberInfo(groupId, userId) : null
+  ])
+
+  const requesterRole = requesterInfo?.role || requesterInfo?.type || 'member'
+  const requesterName = requesterInfo?.nickname || requesterInfo?.card || (userId ? `QQ${userId}` : '')
+  const botRoleLabel = botRole === 'owner' ? '群主' : botRole === 'admin' ? '管理员' : '普通群员'
+  const requesterRoleLabel = requesterRole === 'owner' ? '群主' : requesterRole === 'admin' ? '管理员' : '普通群员'
+
+  const lines = [
+    '【当前群的真实身份信息（重要：必须严格按此信息如实回答，不要瞎猜！）】',
+    `群号：${groupId}`,
+    `你（AI / 机器人）：QQ=${botSelf.uin || '未知'}，昵称=${botSelf.nickname}，在本群角色=${botRoleLabel}${botRole === 'owner' ? '（群主）' : botRole === 'admin' ? '（群管理员）' : '（普通群成员，没有管理权限）'}`,
+    `当前消息发送者：QQ=${userId || '未知'}，昵称=${requesterName}，在本群角色=${requesterRoleLabel}${requesterRole === 'owner' ? '（本群群主）' : requesterRole === 'admin' ? '（本群管理员）' : '（普通群成员）'}`
+  ]
+
+  lines.push('')
+  lines.push('【身份问答规则（必须严格遵守）】')
+  lines.push('当用户询问任何与"群内身份/角色"相关的问题时（包括但不限于：')
+  lines.push('  "我是群主还是管理员？"、"我是谁？"、"你是群主还是管理员？"、')
+  lines.push('  "你是什么角色？"、"谁是群主？"、"谁是管理员？"、"我有管理权限吗？"等），')
+  lines.push('你必须严格根据上面提供的真实身份信息来回答，不要靠猜测或假设。')
+  lines.push('  - 如果用户问"我是群主还是管理员？"，根据"当前消息发送者"的 role 如实回答。')
+  lines.push('  - 如果用户问"你是管理员还是群员？"，根据"你（AI / 机器人）"的 role 如实回答。')
+  lines.push('  - 群角色 owner=群主、admin=管理员、member=普通群员，不要搞混。')
+  lines.push('  - 没有被问到的第三方身份不要瞎编，说"我只知道当前群里你和我的身份"即可。')
+
+  return lines.join('\n')
+}
+
 /** 从消息中提取被@的用户QQ号（排除@机器人本身） */
 function extractAtTarget(e) {
   if (!e?.message) return null

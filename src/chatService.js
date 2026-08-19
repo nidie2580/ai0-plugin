@@ -260,6 +260,16 @@ export async function handleChat(e) {
     history = [{ role: 'system', content: sysPrompt }, ...history]
   }
 
+  // 群聊：无条件注入身份信息（回答"我是群主吗 / 你是管理员吗"这类问题用，不依赖 groupOps 开关）
+  let identityContext = null
+  if (isGroup) {
+    try {
+      identityContext = await groupOps.buildIdentityContext(e)
+    } catch (err) {
+      logger.warn(`[ai0-plugin] 构建群身份上下文失败: ${err.message}`)
+    }
+  }
+
   // 群聊时注入群操作上下文（主人列表/请求者角色/目标角色/机器人角色/操作规则/动作格式）
   let groupContext = null
   if (isGroup && cfg.get('groupOps.enabled', true) !== false) {
@@ -278,8 +288,8 @@ export async function handleChat(e) {
     logger.warn(`[ai0-plugin] 构建图片上下文失败: ${err.message}`)
   }
 
-  // 合并所有上下文到 system prompt
-  const extraContext = [groupContext, imageContext].filter(Boolean).join('\n\n')
+  // 合并所有上下文到 system prompt（身份信息放最前面，让 AI 优先记住真实数据）
+  const extraContext = [identityContext, groupContext, imageContext].filter(Boolean).join('\n\n')
   const finalSysPrompt = extraContext ? sysPrompt + '\n\n' + extraContext : sysPrompt
 
   // 注入引用消息 + 合并转发 + 发件人标签
