@@ -14,6 +14,7 @@
   </div>
   <nav class="nav">
     <a class="nav-item active" data-view="config">📝 配置</a>
+    <a class="nav-item" data-view="providers">🔌 多API平台</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
     <a class="nav-item" data-view="image">🎨 图片管理</a>
@@ -86,6 +87,30 @@
         <button class="btn" id="resetCfg">↺ 重新加载</button>
         <span id="saveMsg" class="save-msg"></span>
       </div>
+    </div>
+  </section>
+
+  <!-- ==================== 多API平台视图 ==================== -->
+  <section id="view-providers" class="view">
+    <div class="card">
+      <h2>🔌 多API平台管理 <span class="tag" id="provTag">加载中…</span></h2>
+      <p class="hint">添加任意多个 OpenAI 兼容的 API 服务商（如 OpenAI / Kimi / DeepSeek / 智谱 / 自建反代 等），保存后即可在 <code>#切换模型</code> 中按 <b>平台编号.模型编号</b> 切换。API Key 显示为脱敏，未修改时不会被覆盖。</p>
+
+      <div class="row space-between">
+        <div>
+          <label class="inline-label">默认平台
+            <input id="prov_default" placeholder="如 openai-compatible" />
+          </label>
+        </div>
+        <div class="actions" style="margin-top:0">
+          <button class="btn primary" id="saveProviders">💾 保存全部</button>
+          <button class="btn" id="addProviderBtn">➕ 添加平台</button>
+          <button class="btn" id="probeAllBtn">🔍 探测所有平台</button>
+          <span id="provMsg" class="save-msg"></span>
+        </div>
+      </div>
+
+      <div id="providersList" class="providers-list"></div>
     </div>
   </section>
 

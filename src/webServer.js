@@ -287,6 +287,51 @@ export function createApp() {
     res.json({ ok: true, data: arr })
   })
 
+  // ---- 多 API 平台：探测某 provider 的 /models ----
+  app.post('/api/providers/probe', requireAuth, async (req, res) => {
+    const { modelKey = null } = req.body || {}
+    try {
+      const t0 = Date.now()
+      const info = await llm.listAvailableModels({ modelKey })
+      const latencyMs = Date.now() - t0
+      res.json({ ok: true, info: { ...info, latencyMs } })
+    } catch (e) {
+      res.json({ ok: false, msg: e.message || String(e) })
+    }
+  })
+
+  // ---- 多 API 平台：并发探测所有 provider 的 /models ----
+  app.post('/api/providers/probe-all', requireAuth, async (req, res) => {
+    try {
+      const c = cfg.loadConfig()
+      const modelCfg = c.model || {}
+      const keys = Object.keys(modelCfg).filter(k =>
+        k !== 'default' && modelCfg[k] && typeof modelCfg[k] === 'object'
+      )
+      const results = await Promise.all(keys.map(async (key) => {
+        const t0 = Date.now()
+        try {
+          const info = await llm.listAvailableModels({ modelKey: key })
+          return {
+            key,
+            ok: !!info.ok,
+            status: info.status,
+            url: info.url,
+            models: info.models || [],
+            count: info.count || 0,
+            latencyMs: Date.now() - t0,
+            error: info.error || null
+          }
+        } catch (e) {
+          return { key, ok: false, models: [], latencyMs: Date.now() - t0, error: e.message || String(e) }
+        }
+      }))
+      res.json({ ok: true, results })
+    } catch (e) {
+      res.json({ ok: false, msg: e.message || String(e) })
+    }
+  })
+
   app.post('/api/test-model', requireAuth, async (req, res) => {
     const { message = '请用一句话介绍你自己', modelKey = null } = req.body || {}
     try {

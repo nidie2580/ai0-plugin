@@ -70,6 +70,7 @@ if (route === 'dashboard') {
       document.getElementById('view-' + a.dataset.view).classList.add('active')
       if (a.dataset.view === 'sessions') loadSessions()
       if (a.dataset.view === 'image') loadImageConfig()
+      if (a.dataset.view === 'providers') loadProviders()
       if (a.dataset.view === 'about') loadAbout()
     })
   })
@@ -354,6 +355,300 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       </div>
       <p class="hint">如需长期开启，可在 config.yaml 中配置端口与绑定地址（绑定 0.0.0.0 可局域网访问）。</p>
     `
+  }
+
+  // ---- Multi-API providers ----
+  let providersCache = null  // 完整 config 缓存（含 model 字段）
+  let providersList = []     // [{ key, name, apiBase, apiKey, model, temperature, maxTokens, timeout, _origKey }]
+  let providersDefault = ''
+
+  $('#saveProviders')?.addEventListener('click', saveProviders)
+  $('#addProviderBtn')?.addEventListener('click', () => addProvider())
+  $('#probeAllBtn')?.addEventListener('click', probeAllProviders)
+
+  async function loadProviders() {
+    const msg = $('#provMsg')
+    if (msg) { msg.className = 'save-msg'; msg.textContent = '' }
+    const resp = await api('/api/config')
+    if (!resp.ok) { $('#provTag').textContent = '加载失败'; return }
+    providersCache = resp.config
+    const modelCfg = resp.config.model || {}
+    providersDefault = modelCfg.default || ''
+    providersList = []
+    for (const k of Object.keys(modelCfg)) {
+      if (k === 'default') continue
+      const m = modelCfg[k]
+      if (!m || typeof m !== 'object') continue
+      providersList.push({
+        _origKey: k,
+        key: k,
+        name: m.name || '',
+        apiBase: m.apiBase || '',
+        apiKey: m.apiKey || '',
+        model: m.model || '',
+        temperature: m.temperature ?? 0.8,
+        maxTokens: m.maxTokens ?? 2000,
+        timeout: m.timeout ?? 60000
+      })
+    }
+    $('#prov_default').value = providersDefault
+    $('#provTag').textContent = `${providersList.length} 个平台`
+    renderProviders()
+  }
+
+  function renderProviders() {
+    const wrap = $('#providersList')
+    if (!providersList.length) {
+      wrap.innerHTML = '<p class="hint">暂无 API 平台。点击「➕ 添加平台」开始配置。</p>'
+      return
+    }
+    wrap.innerHTML = ''
+    providersList.forEach((p, idx) => {
+      const isDefault = (p.key === providersDefault)
+      const card = document.createElement('div')
+      card.className = 'provider-card' + (isDefault ? ' default' : '')
+      card.innerHTML = `
+        <div class="provider-head">
+          <span class="provider-idx">#${idx + 1}</span>
+          <input class="provider-key" data-idx="${idx}" data-field="key" value="${escapeHtml(p.key)}" placeholder="平台 key（唯一标识，如 kimi）"/>
+          ${isDefault ? '<span class="tag">默认</span>' : `<button class="btn sm" data-act="default" data-idx="${idx}">设为默认</button>`}
+          <button class="btn sm warn" data-act="del" data-idx="${idx}">删除</button>
+        </div>
+        <div class="provider-body">
+          <label>显示名称<input data-idx="${idx}" data-field="name" value="${escapeHtml(p.name)}" placeholder="如 Kimi"/></label>
+          <label>API Base<input data-idx="${idx}" data-field="apiBase" value="${escapeHtml(p.apiBase)}" placeholder="https://api.moonshot.cn/v1"/></label>
+          <label>API Key<input data-idx="${idx}" data-field="apiKey" value="${escapeHtml(p.apiKey)}" placeholder="sk-..." autocomplete="off"/></label>
+          <label>模型 ID
+            <div class="model-row">
+              <input data-idx="${idx}" data-field="model" value="${escapeHtml(p.model)}" placeholder="如 kimi-k2.6"/>
+              <button class="btn sm" data-act="probe" data-idx="${idx}">🔍 探测</button>
+            </div>
+            <select class="model-select hidden" data-idx="${idx}"></select>
+          </label>
+          <label>温度<input data-idx="${idx}" data-field="temperature" type="number" step="0.1" min="0" max="2" value="${p.temperature}"/></label>
+          <label>Max Tokens<input data-idx="${idx}" data-field="maxTokens" type="number" min="1" value="${p.maxTokens}"/></label>
+          <label>超时(ms)<input data-idx="${idx}" data-field="timeout" type="number" min="1000" value="${p.timeout}"/></label>
+        </div>
+        <div class="provider-probe hidden" data-idx="${idx}"></div>
+      `
+      wrap.appendChild(card)
+    })
+
+    // 字段编辑：实时同步到 providersList
+    $$('#providersList input[data-idx], #providersList [data-field]').forEach(el => {
+      el.addEventListener('input', () => {
+        const idx = parseInt(el.dataset.idx, 10)
+        const f = el.dataset.field
+        if (!providersList[idx] || !f) return
+        let v = el.value
+        if (f === 'temperature' || f === 'maxTokens' || f === 'timeout') v = parseFloat(v) || 0
+        providersList[idx][f] = v
+      })
+    })
+
+    // 操作按钮
+    $$('#providersList button[data-act]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx, 10)
+        const act = btn.dataset.act
+        if (act === 'del') removeProvider(idx)
+        else if (act === 'default') setDefaultProvider(idx)
+        else if (act === 'probe') probeProvider(idx)
+      })
+    })
+
+    // 模型选择 select 变化
+    $$('#providersList select.model-select').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const idx = parseInt(sel.dataset.idx, 10)
+        if (!providersList[idx]) return
+        providersList[idx].model = sel.value
+        const inp = $(`#providersList input[data-idx="${idx}"][data-field="model"]`)
+        if (inp) inp.value = sel.value
+      })
+    })
+  }
+
+  function addProvider() {
+    // 生成不重复的 key
+    let base = 'new-provider'
+    let n = 1
+    const existing = new Set(providersList.map(p => p.key))
+    let key = base
+    while (existing.has(key)) {
+      n++
+      key = `${base}-${n}`
+    }
+    providersList.push({
+      _origKey: key,
+      key,
+      name: '',
+      apiBase: '',
+      apiKey: '',
+      model: '',
+      temperature: 0.8,
+      maxTokens: 2000,
+      timeout: 60000
+    })
+    if (!providersDefault) providersDefault = key
+    $('#provTag').textContent = `${providersList.length} 个平台`
+    renderProviders()
+    const msg = $('#provMsg')
+    if (msg) { msg.className = 'save-msg'; msg.textContent = `已新增平台「${key}」，记得填写 API Base / Key 后点击「保存全部」。` }
+  }
+
+  function removeProvider(idx) {
+    if (!providersList[idx]) return
+    const k = providersList[idx].key
+    if (!confirm(`删除平台「${k}」？该平台的模型配置会被移除。`)) return
+    providersList.splice(idx, 1)
+    if (providersDefault === k) {
+      providersDefault = providersList[0]?.key || ''
+    }
+    $('#prov_default').value = providersDefault
+    $('#provTag').textContent = `${providersList.length} 个平台`
+    renderProviders()
+  }
+
+  function setDefaultProvider(idx) {
+    if (!providersList[idx]) return
+    providersDefault = providersList[idx].key
+    $('#prov_default').value = providersDefault
+    renderProviders()
+  }
+
+  async function saveProviders() {
+    const msg = $('#provMsg')
+    if (!providersCache) { msg.textContent = '配置尚未加载'; return }
+    // 同步默认平台输入框
+    providersDefault = $('#prov_default').value.trim() || providersList[0]?.key || ''
+    // 校验：key 唯一且非空
+    const seen = new Set()
+    for (const p of providersList) {
+      p.key = String(p.key || '').trim()
+      if (!p.key) { msg.className = 'save-msg err'; msg.textContent = '❌ 存在 key 为空的平台，请填写后再保存。'; return }
+      if (seen.has(p.key)) { msg.className = 'save-msg err'; msg.textContent = `❌ 平台 key「${p.key}」重复，请改名后再保存。`; return }
+      seen.add(p.key)
+    }
+    // 构建 model 段：保留 _origKey 不在的对象直接丢弃
+    const c = JSON.parse(JSON.stringify(providersCache))
+    const newModel = { default: providersDefault }
+    for (const p of providersList) {
+      newModel[p.key] = {
+        name: p.name || '',
+        apiBase: p.apiBase || '',
+        apiKey: p.apiKey || '',
+        model: p.model || '',
+        temperature: Number(p.temperature) || 0.8,
+        maxTokens: Number(p.maxTokens) || 2000,
+        timeout: Number(p.timeout) || 60000
+      }
+    }
+    c.model = newModel
+
+    msg.className = 'save-msg'
+    msg.textContent = '保存中…'
+    const r = await api('/api/config', { method: 'POST', body: { config: c } })
+    if (r.ok) {
+      msg.className = 'save-msg ok'
+      msg.textContent = '✅ ' + (r.msg || '保存成功')
+      await loadProviders()
+    } else {
+      msg.className = 'save-msg err'
+      msg.textContent = '❌ ' + (r.msg || '保存失败')
+    }
+  }
+
+  async function probeProvider(idx) {
+    const p = providersList[idx]
+    if (!p) return
+    // 先保存当前编辑（避免探测的是旧 key）
+    const box = $(`#providersList .provider-probe[data-idx="${idx}"]`)
+    if (box) {
+      box.classList.remove('hidden')
+      box.innerHTML = '<span class="hint">🔍 正在探测 /models ...</span>'
+    }
+    // 直接读取当前页面输入的临时数据（不强制先保存到后端）
+    const card = $$('#providersList .provider-card')[idx]
+    const apiBase = card?.querySelector(`[data-field="apiBase"]`)?.value?.trim() || p.apiBase
+    const apiKey = card?.querySelector(`[data-field="apiKey"]`)?.value?.trim() || p.apiKey
+    const key = card?.querySelector(`[data-field="key"]`)?.value?.trim() || p.key
+    // 如果 key/apiBase/apiKey 跟现有 config 里的不一致，需要先临时保存到后端再探测
+    const cfgResp = await api('/api/config')
+    const modelCfg = cfgResp.config?.model || {}
+    const exist = modelCfg[key]
+    const needSave = !exist || exist.apiBase !== apiBase || (apiKey && !apiKey.includes('****') && exist.apiKey !== apiKey)
+    if (needSave) {
+      // 临时保存一下，方便后端用最新的 key 探测
+      await saveProviders()
+    }
+    const r = await api('/api/providers/probe', { method: 'POST', body: { modelKey: key } })
+    if (box) {
+      if (r.ok && r.info?.ok) {
+        const models = r.info.models || []
+        if (!models.length) {
+          box.innerHTML = `<span class="hint">✅ /models 可达（HTTP ${r.info.status || '-'}），但本账号未返回任何模型。URL: ${escapeHtml(r.info.url || '-')}</span>`
+        } else {
+          const sel = $(`#providersList select.model-select[data-idx="${idx}"]`)
+          if (sel) {
+            sel.innerHTML = `<option value="">— 选择模型 (${models.length} 个可用) —</option>` +
+              models.map(m => `<option value="${escapeHtml(m)}"${m === p.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')
+            sel.classList.remove('hidden')
+          }
+          box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${r.info.latencyMs ?? '-'} ms）。可在上方"模型 ID"下拉中选择。</span>`
+        }
+      } else {
+        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml(r.info?.error || r.info?.status ? `HTTP ${r.info.status}` : (r.msg || '未知错误'))}<br>URL: ${escapeHtml(r.info?.url || '-')}</span>`
+      }
+    }
+  }
+
+  async function probeAllProviders() {
+    const msg = $('#provMsg')
+    msg.className = 'save-msg'
+    msg.textContent = '🔍 探测中…'
+    // 先保存（让后端用最新配置）
+    await saveProviders()
+    const r = await api('/api/providers/probe-all', { method: 'POST' })
+    if (!r.ok) {
+      msg.className = 'save-msg err'
+      msg.textContent = '❌ ' + (r.msg || '探测失败')
+      return
+    }
+    const results = r.results || []
+    let okCount = 0
+    let totalModels = 0
+    for (const item of results) {
+      if (item.ok) {
+        okCount++
+        totalModels += (item.models || []).length
+      }
+    }
+    // 在每个卡片下面渲染结果
+    providersList.forEach((p, idx) => {
+      const box = $(`#providersList .provider-probe[data-idx="${idx}"]`)
+      const item = results.find(x => x.key === p.key)
+      if (!box || !item) return
+      box.classList.remove('hidden')
+      if (item.ok) {
+        const models = item.models || []
+        if (!models.length) {
+          box.innerHTML = `<span class="hint">✅ /models 可达（HTTP ${item.status || '-'}），但未返回任何模型。</span>`
+        } else {
+          const sel = $(`#providersList select.model-select[data-idx="${idx}"]`)
+          if (sel) {
+            sel.innerHTML = `<option value="">— 选择模型 (${models.length} 个可用) —</option>` +
+              models.map(m => `<option value="${escapeHtml(m)}"${m === p.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')
+            sel.classList.remove('hidden')
+          }
+          box.innerHTML = `<span class="hint">✅ ${models.length} 个模型（${item.latencyMs ?? '-'} ms）</span>`
+        }
+      } else {
+        box.innerHTML = `<span class="err">❌ ${escapeHtml(item.error || `HTTP ${item.status}`)}</span>`
+      }
+    })
+    msg.className = 'save-msg ok'
+    msg.textContent = `✅ 探测完成：${okCount}/${results.length} 个平台在线，共 ${totalModels} 个可用模型`
   }
 
   // ---- Image management ----
