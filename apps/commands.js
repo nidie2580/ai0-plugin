@@ -80,6 +80,11 @@ export class AICommands extends plugin {
           permission: 'all'
         },
         {
+          reg: '^#ai(群诊断|检查群|群检查)$',
+          fnc: 'groupDiagnose',
+          permission: 'all'
+        },
+        {
           reg: '^#ai(测试模型|模型测试|测模型)(\\s+\\S+)?$',
           fnc: 'testModel',
           permission: 'all'
@@ -500,6 +505,168 @@ export class AICommands extends plugin {
     // 对不是主人且调用了 master 命令的人，顺手给出 tips
     if (!isMasterNow && allMasters.length === 0) {
       lines.push('', '⚠️ 没有任何主人！请先配置主人，再使用 #ai网页管理 等命令。')
+    }
+
+    return e.reply(lines.join('\n'))
+  }
+
+  /** #ai群诊断：输出群+成员接口的原始数据与可用方法清单 */
+  async groupDiagnose() {
+    const e = this.e
+    if (!e.group_id) return e.reply('⚠️ 此命令仅在群聊中可用。')
+    const groupId = e.group_id
+    const userId = helper.getUserId(e)
+    const bot = global.Bot || global.bot
+
+    const lines = ['🩺 AI0-Plugin 群诊断报告', '']
+
+    // 1) 事件对象上现成的信息
+    lines.push('【1. 事件对象 e 上的群信息（适配器直接注入）】')
+    lines.push(`  e.group_id = ${e.group_id}`)
+    lines.push(`  e.group_name / groupName = ${e.group_name ?? e.groupName ?? e.group?.groupName ?? '(无)'}`)
+    lines.push(`  e.self_id / 机器人QQ = ${e.self_id ?? bot?.uin ?? bot?.self_id ?? '(无)'}`)
+    lines.push(`  e.sender = ${JSON.stringify({
+      user_id: e.sender?.user_id,
+      nickname: e.sender?.nickname,
+      card: e.sender?.card,
+      role: e.sender?.role,
+      permission: e.sender?.permission,
+      group_role: e.sender?.group_role,
+      memberRole: e.sender?.memberRole,
+      type: e.sender?.type,
+    }, null, 2).replace(/\n/g, '\n  ')}`)
+    lines.push('')
+
+    // 2) pickGroup 的方法清单
+    lines.push('【2. pickGroup 返回对象可用方法 / 属性（前 50 条）】')
+    let group = null
+    try {
+      group = bot?.pickGroup?.(groupId) ?? bot?.getGroup?.(groupId) ?? bot?.Group?.pick?.(groupId) ?? null
+    } catch (_) { group = null }
+    if (!group) {
+      lines.push('  ❌ 取不到 group 对象（pickGroup 返回 null/undefined）')
+    } else {
+      const protoKeys = Object.getOwnPropertyNames(Object.getPrototypeOf(group)).filter(k => typeof group[k] === 'function').slice(0, 40)
+      const ownKeys = Object.keys(group).filter(k => typeof group[k] !== 'function').slice(0, 20)
+      lines.push(`  方法：${protoKeys.join(', ') || '(无)'}`)
+      lines.push(`  属性：${ownKeys.join(', ') || '(无)'}`)
+      // 直接访问属性：部分适配器直接挂在 group 根上
+      const direct = {
+        name: group.name ?? group.groupName ?? group.group_name ?? null,
+        ownerUin: group.ownerUin ?? group.owner ?? group.owner_id ?? null,
+        memberCount: group.memberCount ?? group.member_count ?? group.memberNum ?? null,
+        members: Array.isArray(group.members) ? `Array(${group.members.length})` : (group.members ? typeof group.members : null),
+        memberList: Array.isArray(group.memberList) ? `Array(${group.memberList.length})` : null,
+        info: group.info ? `typeof=${typeof group.info},keys=${JSON.stringify(Object.keys(group.info).slice(0, 20))}` : null,
+      }
+      lines.push(`  group.直接属性 = ${JSON.stringify(direct, null, 2).replace(/\n/g, '\n  ')}`)
+    }
+    lines.push('')
+
+    // 3) 手动调用本插件内部封装的 getGroupInfo / getMemberInfo（导出给诊断用）
+    lines.push('【3. 插件内部封装 getGroupInfo() 结果】')
+    try {
+      const info = await import('../src/groupOps.js').then(async (m) => {
+        // 由于 getGroupInfo 没导出，只能重新调用一次内部函数；这里直接走导出的 _roleOf 路径不适用，
+        // 因此我们直接在下面手动再调 pickGroup 来重现，为了不新增 export 影响 chatService
+        return '(需结合下方第4/5条手动判断)'
+      })
+      lines.push(`  ${info}`)
+    } catch (err) {
+      lines.push(`  错误: ${err.message}`)
+    }
+    lines.push('')
+
+    // 4) 手动调用 pickGroup.getInfo / getGroupInfo 等方法
+    lines.push('【4. 手动调用 pickGroup.*Info* 方法（逐个尝试，含原始返回字段）】')
+    if (group) {
+      const methods = ['getInfo', 'getGroupInfo', 'info', 'fetchInfo', 'refreshInfo', 'getDetail']
+      for (const m of methods) {
+        if (typeof group[m] !== 'function') continue
+        try {
+          const t0 = Date.now()
+          const r = await group[m]()
+          const dt = Date.now() - t0
+          const rtype = Object.prototype.toString.call(r).slice(8, -1)
+          if (r && typeof r === 'object') {
+            const keys = Object.keys(r)
+            const sample = {}
+            for (const k of keys.slice(0, 18)) sample[k] = typeof r[k] === 'object' ? (Array.isArray(r[k]) ? `Array(${r[k].length})` : '{...}') : r[k]
+            lines.push(`  ✅ group.${m}() → ${rtype} · ${dt}ms · keys=[${keys.join(', ')}]`)
+            lines.push(`     sample: ${JSON.stringify(sample).slice(0, 260)}`)
+          } else {
+            lines.push(`  ✅ group.${m}() → ${rtype} · ${dt}ms · 值=${String(r).slice(0, 120)}`)
+          }
+        } catch (err) {
+          lines.push(`  ❌ group.${m}() → 异常: ${err.message}`)
+        }
+      }
+    }
+    lines.push('')
+
+    // 5) 手动调用 getMemberInfo(userId)
+    lines.push(`【5. 手动调用 pickGroup.getMemberInfo(发送者=${userId}) → 原始返回】`)
+    if (group && userId) {
+      const methods = ['getMemberInfo', 'getMember', 'getGroupMemberInfo']
+      for (const m of methods) {
+        if (typeof group[m] !== 'function') continue
+        try {
+          const t0 = Date.now()
+          const r = await group[m](userId)
+          const dt = Date.now() - t0
+          if (r && typeof r === 'object') {
+            const sample = {}
+            for (const k of Object.keys(r).slice(0, 20)) {
+              sample[k] = typeof r[k] === 'object' ? (Array.isArray(r[k]) ? `Array(${r[k].length})` : '{...}') : r[k]
+            }
+            lines.push(`  ✅ group.${m}(${userId}) → ${Date.now() - t0}ms`)
+            lines.push(`     ${JSON.stringify(sample).slice(0, 400)}`)
+          } else {
+            lines.push(`  ⚠️ group.${m}(${userId}) → 返回=${String(r).slice(0, 100)} · ${dt}ms`)
+          }
+        } catch (err) {
+          lines.push(`  ❌ group.${m}(${userId}) → 异常: ${err.message}`)
+        }
+      }
+      // getMemberMap 尝试
+      if (typeof group.getMemberMap === 'function') {
+        try {
+          const map = await group.getMemberMap()
+          let count = 0
+          if (map) {
+            count = map.size ?? Object.keys(map).length ?? 0
+            // 找发送者
+            let hit = null
+            if (map.get) hit = map.get(userId) ?? map.get(String(userId)) ?? map.get(Number(userId))
+            else hit = map[userId] ?? map[String(userId)]
+            lines.push(`  ✅ group.getMemberMap() → size=${count}`)
+            lines.push(`     get(userId) = ${hit ? JSON.stringify(hit).slice(0, 300) : '(未找到该用户条目)'}`)
+          } else {
+            lines.push(`  ⚠️ group.getMemberMap() → null`)
+          }
+        } catch (err) {
+          lines.push(`  ❌ group.getMemberMap() → 异常: ${err.message}`)
+        }
+      }
+    }
+    lines.push('')
+
+    // 6) 插件 buildIdentityContext 最终注入的内容（验证全链路）
+    lines.push('【6. 插件实际注入到 system prompt 的身份信息（buildIdentityContext 结果）】')
+    try {
+      const go = await import('../src/groupOps.js')
+      const ctx = typeof go.buildIdentityContext === 'function' ? await go.buildIdentityContext(e) : '(未导出)'
+      if (!ctx) {
+        lines.push('  (空)')
+      } else {
+        // 分段输出，避免太长刷屏
+        const parts = String(ctx).split('\n')
+        lines.push(` （共 ${parts.length} 行，仅展示前 25 行）`)
+        for (const line of parts.slice(0, 25)) lines.push('  ' + line)
+        if (parts.length > 25) lines.push(`  ...(${parts.length - 25} 行省略)`)
+      }
+    } catch (err) {
+      lines.push(`  错误: ${err.message}`)
     }
 
     return e.reply(lines.join('\n'))

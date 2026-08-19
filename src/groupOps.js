@@ -16,22 +16,93 @@ import * as helper from './helper.js'
  *  3) AI 回复后，chatService 调用 parseAndExecuteActions() 解析回复中的动作标签并执行
  */
 
-/** 获取群成员信息（role: owner/admin/member） */
+/** 获取群成员信息（role: owner/admin/member）
+ *  尝试多种适配器实现，兼容 XRK-Yunzai + NapCat/LLOneBot/ICQQ/QSign 等不同后端
+ */
 async function getMemberInfo(groupId, userId) {
+  if (!groupId || !userId) return null
   try {
     const bot = global.Bot || global.bot
-    const group = bot?.pickGroup?.(groupId)
+    if (!bot) return null
+    const group = bot.pickGroup?.(groupId) || bot.getGroup?.(groupId) || bot.Group?.pick?.(groupId)
     if (!group) return null
+
+    // 1) 标准方法
     if (typeof group.getMemberInfo === 'function') {
-      return await group.getMemberInfo(userId)
+      const r = await group.getMemberInfo(userId).catch(() => null)
+      if (r) return r
     }
+    // 2) 别名
+    for (const fn of ['getMember', 'getGroupMemberInfo', 'getMemberInfoV2']) {
+      if (typeof group[fn] === 'function') {
+        const r = await group[fn](userId).catch(() => null)
+        if (r) return r
+      }
+    }
+    // 3) getMemberMap（同步/异步都兼容）再兜底
     if (typeof group.getMemberMap === 'function') {
-      const map = await group.getMemberMap()
-      const entry = map?.get?.(userId) || map?.[userId]
-      if (entry) return entry
+      const map = await Promise.resolve(group.getMemberMap()).catch(() => null)
+      if (map) {
+        const entry = map.get?.(userId) ?? map?.[userId] ?? map.get?.(String(userId)) ?? map.get?.(Number(userId))
+        if (entry) return entry
+        // 有些实现是 Map<Number,Object>；遍历值找 uid/uin/user_id 匹配
+        if (typeof map.values === 'function') {
+          for (const v of map.values()) {
+            const u = String(v?.uin ?? v?.uid ?? v?.user_id ?? v?.qq ?? v?.userId ?? '')
+            if (u && u === String(userId)) return v
+          }
+        }
+      }
     }
+    // 4) bot 直接方法
+    for (const fn of ['getGroupMemberInfo', 'getMemberInfo']) {
+      if (typeof bot[fn] === 'function') {
+        const r = await bot[fn](groupId, userId).catch(() => null)
+        if (r) return r
+      }
+    }
+    // 5) group.info.members 数组兜底（极少数情况）
+    const members = group?.info?.members || group?.memberList || group?.members || []
+    if (Array.isArray(members) && members.length) {
+      const hit = members.find(m => String(m?.uin ?? m?.uid ?? m?.user_id ?? m?.qq ?? '') === String(userId))
+      if (hit) return hit
+    }
+    // 6) 部分适配器（ICQQ/真寻）把群员缓存在 group成员数组字段上（通过 Object.getOwnPropertyNames 猜测）
+    try {
+      const keys = Object.getOwnPropertyNames(Object.getPrototypeOf(group)).concat(Object.keys(group))
+      const cacheKey = keys.find(k => /(member|cache|list|map|all).{0,10}(member|cache|list|map|info)/i.test(k) && typeof group[k] !== 'function')
+      if (cacheKey) {
+        const v = group[cacheKey]
+        if (v?.get instanceof Function) {
+          const maybe = v.get(userId) || v.get(String(userId))
+          if (maybe) return maybe
+        } else if (Array.isArray(v)) {
+          const hit = v.find(m => String(m?.uin ?? m?.uid ?? m?.user_id ?? m?.qq ?? '') === String(userId))
+          if (hit) return hit
+        } else if (typeof v === 'object' && v) {
+          const maybe = v[userId] || v[String(userId)]
+          if (maybe) return maybe
+        }
+      }
+    } catch (_) {}
   } catch (_) {}
   return null
+}
+
+/** 提取 owner/role 字段（兼容多种字段命名） */
+export function _roleOf(obj) {
+  if (!obj) return null
+  const r = obj.role ?? obj.type ?? obj.permission ?? obj.user_role ?? obj.group_role ?? obj.memberRole ?? null
+  if (r == null) return null
+  const s = String(r).toLowerCase()
+  if (s === 'owner' || s.includes('群主') || s === '1' || s === 1) return 'owner'
+  if (s === 'admin' || s === 'administrator' || s.includes('管理') || s === '2' || s === 2) return 'admin'
+  if (s === 'member' || s === 'common' || s.includes('普通') || s === '0' || s === 0) return 'member'
+  // 数字：ICQQ/NapCat 常见 0=普通 1=群主 2=管理员
+  if (s === '1') return 'owner'
+  if (s === '2') return 'admin'
+  if (s === '0') return 'member'
+  return s || null
 }
 
 /** 获取机器人在群内的角色 */
@@ -41,32 +112,76 @@ async function getBotRole(groupId) {
     const selfId = bot?.uin || bot?.self_id
     if (!selfId) return null
     const info = await getMemberInfo(groupId, selfId)
-    return info?.role || info?.type || null
+    return _roleOf(info)
   } catch (_) {}
   return null
 }
 
-/** 获取群信息：群名 / 成员数 / 群主 UIN 等 */
+/** 获取群信息：群名 / 成员数 / 群主 UIN 等
+ *  同样做多层适配，覆盖 NapCat/LLOneBot/ICQQ 各种字段命名
+ */
 async function getGroupInfo(groupId) {
+  if (!groupId) return null
   try {
     const bot = global.Bot || global.bot
-    const group = bot?.pickGroup?.(groupId)
+    if (!bot) return null
+    const group = bot.pickGroup?.(groupId) || bot.getGroup?.(groupId) || bot.Group?.pick?.(groupId)
     if (!group) return null
+
     let info = null
-    if (typeof group.getInfo === 'function') {
-      info = await group.getInfo().catch(() => null)
+    // A) pickGroup 上的标准方法
+    for (const fn of ['getInfo', 'getGroupInfo', 'info', 'fetchInfo', 'refreshInfo']) {
+      if (typeof group[fn] === 'function') {
+        const r = await group[fn]().catch(() => null)
+        if (r && typeof r === 'object') { info = r; break }
+      }
     }
-    if (!info && typeof group.getGroupInfo === 'function') {
-      info = await group.getGroupInfo().catch(() => null)
+    // B) bot 直接方法
+    if (!info) {
+      for (const fn of ['getGroupInfo', 'getGroup', 'pickGroupInfo', 'getGroupDetail']) {
+        if (typeof bot[fn] === 'function') {
+          const r = await bot[fn](groupId).catch(() => null)
+          if (r && typeof r === 'object') { info = r; break }
+        }
+      }
     }
-    // 也可能是 bot 直接挂了 info 对象在 pickGroup 返回上
-    if (!info) info = group.info || null
-    if (!info) return null
+    // C) 已经挂在 group.info / group.groupInfo / group.$info 上
+    if (!info) {
+      for (const k of ['info', 'groupInfo', '$info', '_info', 'rawInfo']) {
+        const v = group[k]
+        if (v && typeof v === 'object' && (v.groupName || v.name || v.group_name)) { info = v; break }
+      }
+    }
+    // D) 事件对象 e 上会挂，但这里没法直接取；调用方会再兜底 e.group_name
+
+    // 同步属性兜底（有些实现直接挂在 group 上）
+    const name =
+      info?.groupName ?? info?.group_name ?? info?.name ?? info?.groupName2 ?? info?.GroupName ??
+      group.name ?? group.groupName ?? group.group_name ??
+      null
+    const memberCount = Number(
+      info?.memberCount ?? info?.member_count ?? info?.memberNum ?? info?.memberNumber ??
+      info?.member_size ?? info?.memberCount ?? info?.members?.length ??
+      group.memberCount ?? group.member_count ?? group.memberNum ??
+      null
+    )
+    const maxMember = Number(info?.maxMember ?? info?.max_member ?? info?.maxMemberCount ?? group.maxMember ?? null)
+    const ownerUin =
+      info?.ownerUin ?? info?.owner ?? info?.owner_id ?? info?.ownerUin2 ?? info?.OwnerUin ??
+      info?.owner_qq ?? info?.creatorUin ?? info?.creator ??
+      group.ownerUin ?? group.owner ?? group.owner_id ??
+      null
+
+    if (!name && memberCount == null && ownerUin == null) {
+      // 信息全部取不到，返回 null 让上层统一标"未检测到"
+      return null
+    }
     return {
-      name: info.groupName || info.group_name || info.name || null,
-      memberCount: Number(info.memberCount ?? info.member_count ?? info.memberNum ?? null),
-      maxMember: Number(info.maxMember ?? info.max_member ?? null),
-      ownerUin: info.ownerUin || info.owner || info.owner_id || null
+      name,
+      memberCount: Number.isFinite(memberCount) ? memberCount : null,
+      maxMember: Number.isFinite(maxMember) ? maxMember : null,
+      ownerUin: ownerUin != null ? String(ownerUin) : null,
+      _rawInfoKeys: info ? Object.keys(info).slice(0, 30) : null   // 诊断时方便
     }
   } catch (_) {}
   return null
@@ -115,7 +230,7 @@ export async function buildIdentityContext(e) {
     getGroupInfo(groupId)
   ])
 
-  const requesterRoleRaw = requesterInfo?.role || requesterInfo?.type || null
+  const requesterRoleRaw = _roleOf(requesterInfo)
   const requesterName = requesterInfo?.nickname || requesterInfo?.card || e.sender?.card || e.sender?.nickname || (userId ? `QQ${userId}` : '')
   const groupName = groupInfo?.name || eGroupName || null
   const memberCount = groupInfo?.memberCount || null
@@ -231,8 +346,8 @@ export async function buildGroupContext(e) {
     getGroupInfo(groupId)
   ])
   const botRole = botRoleRaw || 'unknown'  // owner/admin/member/unknown
-  const requesterRole = requesterInfo?.role || requesterInfo?.type || 'unknown'
-  const targetRole = targetInfo?.role || targetInfo?.type || 'unknown'
+  const requesterRole = _roleOf(requesterInfo) || 'unknown'
+  const targetRole = _roleOf(targetInfo) || 'unknown'
   const requesterName = requesterInfo?.nickname || requesterInfo?.card || `QQ${userId}`
   const targetName = targetInfo?.nickname || targetInfo?.card || (targetUid ? `QQ${targetUid}` : '')
 
@@ -346,6 +461,10 @@ export async function parseAndExecuteActions(replyText, groupId) {
 
   const masters = helper.listMasters()
   const botRole = await getBotRole(groupId)
+  // 预取一次群信息（含 ownerUin）用于保护判断
+  let groupInfoForAction = null
+  try { groupInfoForAction = await getGroupInfo(groupId) } catch (_) {}
+  const ownerUinForAction = groupInfoForAction?.ownerUin
 
   for (const match of matches) {
     const { type, args } = match
@@ -358,16 +477,18 @@ export async function parseAndExecuteActions(replyText, groupId) {
 
       // 获取目标信息
       const targetInfo = await getMemberInfo(groupId, targetUid)
-      const targetRole = targetInfo?.role || targetInfo?.type || 'member'
-      const isProtected = masters.includes(targetUid) || targetRole === 'owner' || targetRole === 'admin'
+      const targetRole = _roleOf(targetInfo) || 'unknown'
+      // 保护判定：ownerUin 也反向匹配（即使 targetRole 没返回）
+      const isOwnerByUin = ownerUinForAction && String(targetUid) === String(ownerUinForAction)
+      const isProtected = masters.includes(targetUid) || targetRole === 'owner' || targetRole === 'admin' || isOwnerByUin
 
       if (type === 'mute') {
         if (cfg.get('groupOps.allowMute', true) === false) {
           results.push({ type, ok: false, msg: '禁言功能未启用' })
           continue
         }
-        if (botRole === 'member') {
-          results.push({ type, ok: false, msg: '机器人不是管理员/群主' })
+        if (botRole !== 'owner' && botRole !== 'admin') {
+          results.push({ type, ok: false, msg: '机器人不是管理员/群主（身份接口未返回）' })
           continue
         }
         if (isProtected) {
@@ -385,8 +506,8 @@ export async function parseAndExecuteActions(replyText, groupId) {
           results.push({ type, ok: false, msg: '踢出功能未启用' })
           continue
         }
-        if (botRole === 'member') {
-          results.push({ type, ok: false, msg: '机器人不是管理员/群主' })
+        if (botRole !== 'owner' && botRole !== 'admin') {
+          results.push({ type, ok: false, msg: '机器人不是管理员/群主（身份接口未返回）' })
           continue
         }
         if (isProtected) {
