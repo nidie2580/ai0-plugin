@@ -3,6 +3,7 @@ import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
 import * as helper from './helper.js'
 import * as groupOps from './groupOps.js'
+import * as imageGen from './imageGen.js'
 
 const userSession = new Map()
 
@@ -269,10 +270,22 @@ export async function handleChat(e) {
     }
   }
 
+  // 注入图片生成能力上下文
+  let imageContext = null
+  try {
+    imageContext = imageGen.buildImageContext()
+  } catch (err) {
+    logger.warn(`[ai0-plugin] 构建图片上下文失败: ${err.message}`)
+  }
+
+  // 合并所有上下文到 system prompt
+  const extraContext = [groupContext, imageContext].filter(Boolean).join('\n\n')
+  const finalSysPrompt = extraContext ? sysPrompt + '\n\n' + extraContext : sysPrompt
+
   // 注入引用消息 + 合并转发 + 发件人标签
   history = injectContextIntoHistory({
     history,
-    sysPrompt: groupContext ? sysPrompt + '\n\n' + groupContext : sysPrompt,
+    sysPrompt: finalSysPrompt,
     parsed,
     opts: contextOpts,
     modelConfigName: modelNameCfg
@@ -302,11 +315,10 @@ export async function handleChat(e) {
   }
 
   if (replyText) {
-    // 如果是群聊且开启了群操作，解析AI回复中的操作指令并执行
+    // 群聊且开启了群操作，解析AI回复中的群操作指令并执行
     if (isGroup && groupContext) {
       try {
         const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId)
-        // 用干净文本（去掉操作指令后的）存入历史和回复
         replyText = cleanText
         if (results.length) {
           const actionReport = results.map(r =>
@@ -317,6 +329,39 @@ export async function handleChat(e) {
         }
       } catch (err) {
         logger.error(`[ai0-plugin] 群操作执行异常: ${err.message}`)
+      }
+    }
+
+    // 解析图片生成指令并执行
+    if (imageContext) {
+      try {
+        const imgResult = await parseAndExecuteImageAction(replyText)
+        if (imgResult) {
+          replyText = imgResult.cleanText
+          if (imgResult.ok) {
+            // 先发送文本回复
+            if (replyText.trim()) {
+              await helper.replyText(e, replyText)
+            }
+            // 再发送图片
+            if (imgResult.imageBuffer) {
+              try {
+                await e.reply(segment.image(imgResult.imageBuffer))
+              } catch (imgErr) {
+                logger.error(`[ai0-plugin] 发送图片失败: ${imgErr.message}`)
+                await helper.replyText(e, '图片生成成功但发送失败，请查看日志。')
+              }
+            }
+            // 存入历史（不含操作指令）
+            history.push({ role: 'assistant', content: replyText + '\n[已生成并发送图片]' })
+            llm.saveHistory(userId, sessionId, history)
+            return true
+          } else {
+            replyText = replyText + '\n\n❌ 图片生成失败：' + imgResult.error
+          }
+        }
+      } catch (err) {
+        logger.error(`[ai0-plugin] 图片生成执行异常: ${err.message}`)
       }
     }
 
@@ -332,4 +377,44 @@ export async function handleChat(e) {
 
   await helper.replyText(e, finalText)
   return true
+}
+
+/**
+ * 从 AI 回复中解析图片生成指令 [action:image:提示词] 并执行
+ * 返回 null 表示没有图片指令；否则返回 { cleanText, ok, imageBuffer?, error? }
+ */
+async function parseAndExecuteImageAction(replyText) {
+  const re = /\[action:image:([^\]]+)\]/i
+  const m = replyText.match(re)
+  if (!m) return null
+
+  const prompt = m[1].trim()
+  const full = m[0]
+  const cleanText = replyText.replace(full, '').trim()
+
+  if (!prompt) {
+    return { cleanText, ok: false, error: '图片提示词为空' }
+  }
+
+  logger.info(`[ai0-plugin] 解析到图片生成指令，提示词：${prompt.slice(0, 100)}`)
+  const result = await imageGen.generateImage(prompt)
+  if (!result.ok) {
+    return { cleanText, ok: false, error: result.error }
+  }
+
+  // 下载图片为 Buffer
+  let imageBuffer = null
+  if (result.url) {
+    const dl = await imageGen.downloadImage(result.url)
+    if (!dl.ok) {
+      return { cleanText, ok: false, error: dl.error }
+    }
+    imageBuffer = dl.buffer
+  } else if (result.b64) {
+    imageBuffer = Buffer.from(result.b64, 'base64')
+  } else {
+    return { cleanText, ok: false, error: 'API 未返回图片 URL 或 base64' }
+  }
+
+  return { cleanText, ok: true, imageBuffer }
 }

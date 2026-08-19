@@ -65,6 +65,23 @@ groupOps:
   # 默认禁言时长（秒），不指定时使用
   defaultMuteDuration: 600
 
+# 图片生成设置
+imageGen:
+  # 是否启用图片生成功能
+  enabled: false
+  # 生图模型 API 地址（OpenAI 兼容 /images/generations 接口）
+  apiBase: "https://api.openai.com/v1"
+  # API 密钥
+  apiKey: ""
+  # 模型 ID（如 dall-e-3、dall-e-2、或其他兼容服务提供的模型名）
+  model: "dall-e-3"
+  # 默认图片尺寸（部分模型支持 1024x1024、1792x1024、1024x1792）
+  defaultSize: "1024x1024"
+  # 默认图片质量（仅 dall-e-3 支持 standard/hd，其他模型忽略）
+  quality: "standard"
+  # 生成超时（毫秒）
+  timeout: 120000
+
 # 系统提示词
 system:
   prompt: |

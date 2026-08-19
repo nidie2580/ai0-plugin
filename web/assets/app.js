@@ -69,6 +69,7 @@ if (route === 'dashboard') {
       a.classList.add('active')
       document.getElementById('view-' + a.dataset.view).classList.add('active')
       if (a.dataset.view === 'sessions') loadSessions()
+      if (a.dataset.view === 'image') loadImageConfig()
       if (a.dataset.view === 'about') loadAbout()
     })
   })
@@ -353,6 +354,81 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       </div>
       <p class="hint">如需长期开启，可在 config.yaml 中配置端口与绑定地址（绑定 0.0.0.0 可局域网访问）。</p>
     `
+  }
+
+  // ---- Image management ----
+  $('#saveImgCfg')?.addEventListener('click', saveImageConfig)
+  $('#testImgBtn')?.addEventListener('click', testImageGen)
+
+  async function loadImageConfig() {
+    const r = await api('/api/image-config')
+    if (!r.ok) { $('#imgTag').textContent = '加载失败'; return }
+    const ic = r.config || {}
+    $('#imgTag').textContent = ic.enabled ? '已启用' : '未启用'
+    $('#img_enabled').value = String(ic.enabled ?? false)
+    $('#img_apiBase').value = ic.apiBase || ''
+    $('#img_apiKey').value = ic.apiKey || ''
+    $('#img_model').value = ic.model || 'dall-e-3'
+    $('#img_defaultSize').value = ic.defaultSize || '1024x1024'
+    $('#img_quality').value = ic.quality || 'standard'
+    $('#img_timeout').value = ic.timeout ?? 120000
+  }
+
+  async function saveImageConfig() {
+    const msg = $('#imgSaveMsg')
+    msg.className = 'save-msg'
+    msg.textContent = '保存中…'
+    const ic = {
+      enabled: $('#img_enabled').value === 'true',
+      apiBase: $('#img_apiBase').value.trim(),
+      apiKey: $('#img_apiKey').value.trim(),
+      model: $('#img_model').value.trim() || 'dall-e-3',
+      defaultSize: $('#img_defaultSize').value.trim() || '1024x1024',
+      quality: $('#img_quality').value || 'standard',
+      timeout: parseInt($('#img_timeout').value, 10) || 120000
+    }
+    const r = await api('/api/image-config', { method: 'POST', body: { config: ic } })
+    if (r.ok) {
+      msg.className = 'save-msg ok'
+      msg.textContent = '✅ ' + (r.msg || '保存成功')
+      await loadImageConfig()
+    } else {
+      msg.className = 'save-msg err'
+      msg.textContent = '❌ ' + (r.msg || '保存失败')
+    }
+  }
+
+  async function testImageGen() {
+    const info = $('#imgSaveMsg')
+    const out = $('#imgTestOut')
+    const preview = $('#imgTestPreview')
+    const prompt = $('#img_test_prompt').value.trim()
+    if (!prompt) { info.textContent = '请输入测试提示词'; return }
+    info.className = 'save-msg'
+    info.textContent = '生成中…（可能需要 10-30 秒）'
+    out.classList.add('hidden')
+    preview.classList.add('hidden')
+    const t0 = Date.now()
+    const r = await api('/api/test-image', { method: 'POST', body: { prompt } })
+    const dur = Date.now() - t0
+    out.classList.remove('hidden')
+    if (r.ok) {
+      info.className = 'save-msg ok'
+      info.textContent = `✅ 生成成功（${dur}ms）`
+      out.textContent =
+        `模型: ${r.raw?.model || '-'}\n` +
+        `耗时: ${dur} ms\n` +
+        (r.revisedPrompt ? `优化后的提示词: ${r.revisedPrompt}\n` : '') +
+        (r.url ? `图片URL: ${r.url}` : (r.b64 ? '图片已返回(base64)' : ''))
+      if (r.url) {
+        preview.classList.remove('hidden')
+        preview.innerHTML = `<img src="${escapeHtml(r.url)}" style="max-width:100%;border-radius:8px" />`
+      }
+    } else {
+      info.className = 'save-msg err'
+      info.textContent = `❌ 失败（${dur}ms）`
+      out.textContent = `错误详情：\n${r.error || r.msg || '未知错误'}`
+    }
   }
 
   // ---- helpers ----

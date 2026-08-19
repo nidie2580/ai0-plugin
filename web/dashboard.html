@@ -16,6 +16,7 @@
     <a class="nav-item active" data-view="config">📝 配置</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
+    <a class="nav-item" data-view="image">🎨 图片管理</a>
     <a class="nav-item" data-view="about">ℹ️ 关于</a>
   </nav>
   <button id="logoutBtn" class="btn ghost sm">退出登录</button>
@@ -128,6 +129,41 @@
         <span id="testInfo" class="save-msg"></span>
       </div>
       <pre id="testOut" class="test-out hidden"></pre>
+    </div>
+  </section>
+
+  <!-- ==================== 图片管理 ==================== -->
+  <section id="view-image" class="view">
+    <div class="card">
+      <h2>🎨 图片生成管理 <span class="tag" id="imgTag">加载中…</span></h2>
+      <p class="hint">配置生图模型后，AI可在对话中根据用户请求自动生成并发送图片。</p>
+
+      <div class="grid-2">
+        <label>启用图片生成
+          <select id="img_enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+        </label>
+        <label>&nbsp;</label>
+        <label>API 地址 <input id="img_apiBase" placeholder="https://api.openai.com/v1"/></label>
+        <label>API Key <input id="img_apiKey" placeholder="sk-..." autocomplete="off"/></label>
+        <label>模型 ID <input id="img_model" placeholder="dall-e-3"/></label>
+        <label>默认尺寸 <input id="img_defaultSize" placeholder="1024x1024"/></label>
+        <label>图片质量 <select id="img_quality"><option value="standard">standard</option><option value="hd">hd</option></select></label>
+        <label>生成超时(ms) <input id="img_timeout" type="number" min="10000"/></label>
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" id="saveImgCfg">💾 保存图片配置</button>
+        <button class="btn" id="testImgBtn">🧪 测试生图</button>
+        <span id="imgSaveMsg" class="save-msg"></span>
+      </div>
+
+      <hr>
+      <h3>生图测试</h3>
+      <label>测试提示词
+        <textarea id="img_test_prompt" rows="3">A cute fluffy kitten with big eyes, sitting on a windowsill with sunlight, digital art</textarea>
+      </label>
+      <pre id="imgTestOut" class="test-out hidden"></pre>
+      <div id="imgTestPreview" class="hidden" style="margin-top:12px"></div>
     </div>
   </section>
 

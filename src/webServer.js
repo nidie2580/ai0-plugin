@@ -8,6 +8,7 @@ import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
 import * as auth from './auth.js'
 import * as helper from './helper.js'
+import * as imageGen from './imageGen.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -316,6 +317,57 @@ export function createApp() {
 
   app.get('/api/server-info', (req, res) => {
     res.json({ ok: true, info: getServerInfo() })
+  })
+
+  // ---- 图片生成配置 ----
+  app.get('/api/image-config', requireAuth, (req, res) => {
+    const c = cfg.loadConfig()
+    const ic = c.imageGen || {}
+    // 脱敏 apiKey
+    const safe = JSON.parse(JSON.stringify(ic))
+    if (safe.apiKey && safe.apiKey.length > 8) {
+      safe.apiKey = safe.apiKey.slice(0, 4) + '****' + safe.apiKey.slice(-4)
+    } else if (safe.apiKey) {
+      safe.apiKey = '****'
+    }
+    res.json({ ok: true, config: safe })
+  })
+
+  app.post('/api/image-config', requireAuth, (req, res) => {
+    const { config: ic } = req.body || {}
+    if (!ic || typeof ic !== 'object') {
+      return res.json({ ok: false, msg: '配置格式错误' })
+    }
+    const full = cfg.loadConfig()
+    // 脱敏 apiKey 还原
+    const oldKey = full.imageGen?.apiKey
+    if (typeof ic.apiKey === 'string' && ic.apiKey.includes('****') && typeof oldKey === 'string') {
+      ic.apiKey = oldKey
+    }
+    full.imageGen = {
+      enabled: ic.enabled === true || ic.enabled === 'true',
+      apiBase: ic.apiBase || '',
+      apiKey: ic.apiKey || '',
+      model: ic.model || 'dall-e-3',
+      defaultSize: ic.defaultSize || '1024x1024',
+      quality: ic.quality || 'standard',
+      timeout: parseInt(ic.timeout, 10) || 120000
+    }
+    const ok = cfg.saveConfig(full)
+    res.json({ ok, msg: ok ? '图片配置已保存' : '保存失败' })
+  })
+
+  app.post('/api/test-image', requireAuth, async (req, res) => {
+    const { prompt } = req.body || {}
+    if (!prompt || typeof prompt !== 'string') {
+      return res.json({ ok: false, msg: '请提供测试提示词' })
+    }
+    try {
+      const result = await imageGen.generateImage(prompt)
+      res.json(result)
+    } catch (err) {
+      res.json({ ok: false, error: err.message })
+    }
   })
 
   return app
