@@ -105,14 +105,34 @@ export function _roleOf(obj) {
   return s || null
 }
 
-/** 获取机器人在群内的角色 */
+/** 获取机器人在群内的角色
+ *  兼容：group.is_owner（XRK适配器直接布尔字段）+ getMemberMap 查自己条目
+ */
 async function getBotRole(groupId) {
+  if (!groupId) return null
   try {
     const bot = global.Bot || global.bot
-    const selfId = bot?.uin || bot?.self_id
+    const selfId = String(bot?.uin || bot?.self_id || '')
     if (!selfId) return null
+    const group = bot.pickGroup?.(groupId) || bot.getGroup?.(groupId) || bot.Group?.pick?.(groupId)
+    if (!group) return null
+
+    // 0 成本布尔兜底：XRK适配器在 group.is_owner（true/false）上直接给出"机器人是否群主"
+    if (group.is_owner === true) return 'owner'
+    if (typeof group.is_owner !== 'undefined' && group.is_owner === false) {
+      // 群主是 false → 但可能是 admin；继续往下查
+    }
+    // 也有 isOwner 驼峰写法
+    if (group.isOwner === true) return 'owner'
+
+    // 查 getMemberInfo 自己条目（老逻辑 + 新兼容）
     const info = await getMemberInfo(groupId, selfId)
-    return _roleOf(info)
+    const r = _roleOf(info)
+    if (r) return r
+
+    // 最后：如果 is_owner=false 但我们又没拿到角色，默认至少是 member 吗？
+    // 不返回 null，先保持未知 → 交给上层 unknown 保守处理
+    return null
   } catch (_) {}
   return null
 }
@@ -155,22 +175,51 @@ async function getGroupInfo(groupId) {
     // D) 事件对象 e 上会挂，但这里没法直接取；调用方会再兜底 e.group_name
 
     // 同步属性兜底（有些实现直接挂在 group 上）
+    // XRK 诊断：group.group_name / group.member_count / group.max_member_count 直接挂在根上（下划线风格）
     const name =
       info?.groupName ?? info?.group_name ?? info?.name ?? info?.groupName2 ?? info?.GroupName ??
       group.name ?? group.groupName ?? group.group_name ??
       null
     const memberCount = Number(
       info?.memberCount ?? info?.member_count ?? info?.memberNum ?? info?.memberNumber ??
-      info?.member_size ?? info?.memberCount ?? info?.members?.length ??
+      info?.member_size ?? info?.members?.length ??
       group.memberCount ?? group.member_count ?? group.memberNum ??
       null
     )
-    const maxMember = Number(info?.maxMember ?? info?.max_member ?? info?.maxMemberCount ?? group.maxMember ?? null)
-    const ownerUin =
+    const maxMember = Number(
+      info?.maxMember ?? info?.max_member ?? info?.maxMemberCount ??
+      group.maxMember ?? group.max_member_count ?? group.maxMemberCount ??
+      null
+    )
+    let ownerUin =
       info?.ownerUin ?? info?.owner ?? info?.owner_id ?? info?.ownerUin2 ?? info?.OwnerUin ??
       info?.owner_qq ?? info?.creatorUin ?? info?.creator ??
       group.ownerUin ?? group.owner ?? group.owner_id ??
       null
+
+    // E) 终极兜底：getGroupInfo 没有 owner 字段（XRK就是这个情况），
+    //    那就扫 getMemberMap() 找第一个 role==='owner' 的 user_id 作为群主 UIN。
+    //    为避免大群卡死，上限 500 人；超过 500 人时不做此兜底。
+    if (ownerUin == null && typeof group.getMemberMap === 'function') {
+      try {
+        const map = await Promise.resolve(group.getMemberMap()).catch(() => null)
+        if (map) {
+          const size = map.size ?? Object.keys(map).length ?? 0
+          if (size > 0 && size <= 500) {
+            const values = typeof map.values === 'function'
+              ? Array.from(map.values())
+              : Object.values(map)
+            for (const v of values) {
+              const role = _roleOf(v)
+              if (role === 'owner') {
+                const uid = String(v?.user_id ?? v?.uin ?? v?.qq ?? v?.uid ?? v?.userId ?? '')
+                if (uid) { ownerUin = uid; break }
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
 
     if (!name && memberCount == null && ownerUin == null) {
       // 信息全部取不到，返回 null 让上层统一标"未检测到"
@@ -230,7 +279,10 @@ export async function buildIdentityContext(e) {
     getGroupInfo(groupId)
   ])
 
-  const requesterRoleRaw = _roleOf(requesterInfo)
+  // 发送者角色：0成本优先从事件对象 e.sender.role / permission / group_role 取
+  // （XRK诊断已证实 e.sender.role = "owner" 直接有值，无需API请求）
+  const senderRoleFromE = e.sender ? _roleOf(e.sender) : null
+  const requesterRoleRaw = senderRoleFromE || _roleOf(requesterInfo)
   const requesterName = requesterInfo?.nickname || requesterInfo?.card || e.sender?.card || e.sender?.nickname || (userId ? `QQ${userId}` : '')
   const groupName = groupInfo?.name || eGroupName || null
   const memberCount = groupInfo?.memberCount || null
