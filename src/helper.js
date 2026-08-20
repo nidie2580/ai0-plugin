@@ -58,7 +58,14 @@ async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 30000)
   try {
-    const resp = await fetch(url, { signal: controller.signal })
+    // 不自动跟随重定向，避免由 Location 绕过校验
+    const resp = await fetch(url, { signal: controller.signal, redirect: 'manual' })
+    // 如果服务器返回 3xx 且带 Location → 拒绝（更安全）
+    if (resp.status >= 300 && resp.status < 400) {
+      const loc = resp.headers.get('location')
+      if (loc) return { ok: false, error: '拒绝重定向以防 SSRF' }
+      return { ok: false, error: `HTTP ${resp.status}` }
+    }
     if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` }
     const declared = Number(resp.headers.get('content-length') || 0)
     if (declared > maxBytes) return { ok: false, error: `图片过大(${Math.round(declared / 1024 / 1024)}MB)已拒绝` }
