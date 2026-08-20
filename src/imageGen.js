@@ -142,21 +142,43 @@ export async function generateImage(prompt, opts = {}) {
 /**
  * 下载图片 URL 为 Buffer
  */
-export async function downloadImage(url) {
+export async function downloadImage(url, maxBytes = 20 * 1024 * 1024) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 60000)
 
   try {
     const resp = await fetch(url, { signal: controller.signal })
-    clearTimeout(timer)
     if (!resp.ok) {
       return { ok: false, error: `下载图片失败: HTTP ${resp.status}` }
     }
-    const buf = Buffer.from(await resp.arrayBuffer())
+    const declared = Number(resp.headers.get('content-length') || 0)
+    if (declared > maxBytes) return { ok: false, error: `下载图片失败: 图片过大(${Math.round(declared / 1024 / 1024)}MB)已拒绝` }
+    let buf
+    if (resp.body && typeof resp.body.getReader === 'function') {
+      // 流式读取并限制总大小，防止恶意 URL 返回超大响应拖垮内存
+      const reader = resp.body.getReader()
+      const chunks = []
+      let total = 0
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        total += value.length
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {})
+          return { ok: false, error: `下载图片失败: 图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
+        }
+        chunks.push(value)
+      }
+      buf = Buffer.concat(chunks)
+    } else {
+      buf = Buffer.from(await resp.arrayBuffer())
+      if (buf.length > maxBytes) return { ok: false, error: '下载图片失败: 图片过大已拒绝' }
+    }
     return { ok: true, buffer: buf }
   } catch (err) {
-    clearTimeout(timer)
     return { ok: false, error: `下载图片失败: ${err.message}` }
+  } finally {
+    clearTimeout(timer)
   }
 }
 

@@ -4,6 +4,7 @@ config/config.yaml
 config/config.yaml.bak
 data/history/*
 !data/history/.gitkeep
+data/tmp-stickers/
 *.log
 .env
 .env.local

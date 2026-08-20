@@ -270,9 +270,9 @@ export class AICommands extends plugin {
     }
     // 1. 先强制把缓存打失效（无论 mtime 是否变化都重新解析一遍）
     try { cfg.saveConfig?.(cfg.loadConfig?.() || {}) } catch (_) {}
-    cfg.__forceLoad = true
+    cfg.setForceLoad?.(true)
     const config = cfg.loadConfig()
-    delete cfg.__forceLoad
+    cfg.setForceLoad?.(false)
 
     // 2. 如果 web 正在运行 → 使用新配置强制重启（host/port 变动会立刻生效；
     //    旧 server 会被关闭并触发 closeAllConnections，避免重启后旧路由持续引用旧闭包造成内存泄漏）

@@ -83,7 +83,11 @@ export function saveHistory(userId, sessionId, messages) {
       const data = JSON.stringify(latest, null, 2)
       // 先写到 tmp
       fs.writeFileSync(tmp, data, 'utf-8')
-      fs.fsyncSync?.(fs.openSync(tmp, 'r'))   // 尽量刷盘（兼容旧 node 忽略）
+      // 尽量刷盘（兼容旧 node 忽略）；fd 用完必须 close，避免句柄泄漏
+      try {
+        const fd = fs.openSync(tmp, 'r')
+        try { fs.fsyncSync?.(fd) } finally { fs.closeSync(fd) }
+      } catch (_) {}
       // 主文件存在时 → 覆盖 .bak
       try {
         if (fs.existsSync(file)) {

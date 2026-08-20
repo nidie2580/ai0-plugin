@@ -492,8 +492,9 @@ export async function buildGroupContext(e) {
 /**
  * 从 AI 回复中解析操作指令并执行
  * 返回 { cleanText, results }
+ * @param {object} e - 消息事件对象（用于执行层的请求者权限校验，防止 AI 被诱导越权执行）
  */
-export async function parseAndExecuteActions(replyText, groupId) {
+export async function parseAndExecuteActions(replyText, groupId, e = null) {
   const results = []
   // 匹配 [action:type:arg1:arg2...]
   const actionRe = /\[action:(\w+):([^\]]*)\]/g
@@ -518,6 +519,26 @@ export async function parseAndExecuteActions(replyText, groupId) {
   try { groupInfoForAction = await getGroupInfo(groupId) } catch (_) {}
   const ownerUinForAction = groupInfoForAction?.ownerUin
 
+  // —— 请求者权限（防御层）——
+  // AI 可能被 prompt injection / 社会工程诱导输出操作指令，这里按真实身份做二次校验。
+  const requesterUid = e ? helper.getUserId(e) : null
+  let requesterRole = 'unknown'
+  if (requesterUid != null) {
+    try {
+      const info = await getMemberInfo(groupId, String(requesterUid))
+      requesterRole = _roleOf(info) || 'unknown'
+    } catch (_) {}
+    // ownerUin 反向推断：请求者 QQ 与群主 UIN 一致但接口未返回角色时按群主处理
+    if (ownerUinForAction && String(requesterUid) === String(ownerUinForAction) && requesterRole === 'unknown') {
+      requesterRole = 'owner'
+    }
+  }
+  const requesterIsMaster = requesterUid != null && masters.includes(String(requesterUid))
+  // 管理类操作（踢/禁言/给他人设头衔）：群主 / 管理员 / 机器人主人
+  const requesterElevated = requesterIsMaster || requesterRole === 'owner' || requesterRole === 'admin'
+  // 设置管理员：仅机器人主人 / 群主
+  const requesterCanSetAdmin = requesterIsMaster || requesterRole === 'owner'
+
   for (const match of matches) {
     const { type, args } = match
     try {
@@ -535,6 +556,10 @@ export async function parseAndExecuteActions(replyText, groupId) {
       const isProtected = masters.includes(targetUid) || targetRole === 'owner' || targetRole === 'admin' || isOwnerByUin
 
       if (type === 'mute') {
+        if (!requesterElevated) {
+          results.push({ type, ok: false, msg: '请求者无权限（仅群主/管理员/机器人主人可发起禁言）' })
+          continue
+        }
         if (cfg.get('groupOps.allowMute', true) === false) {
           results.push({ type, ok: false, msg: '禁言功能未启用' })
           continue
@@ -554,6 +579,10 @@ export async function parseAndExecuteActions(replyText, groupId) {
         results.push({ type, ok: true, msg: `已${display} ${targetUid}` })
 
       } else if (type === 'kick') {
+        if (!requesterElevated) {
+          results.push({ type, ok: false, msg: '请求者无权限（仅群主/管理员/机器人主人可发起踢出）' })
+          continue
+        }
         if (cfg.get('groupOps.allowKick', true) === false) {
           results.push({ type, ok: false, msg: '踢出功能未启用' })
           continue
@@ -570,6 +599,10 @@ export async function parseAndExecuteActions(replyText, groupId) {
         results.push({ type, ok: true, msg: `已踢出 ${targetUid}` })
 
       } else if (type === 'set_admin') {
+        if (!requesterCanSetAdmin) {
+          results.push({ type, ok: false, msg: '仅机器人主人/群主可设置管理员' })
+          continue
+        }
         if (cfg.get('groupOps.allowAdmin', true) === false) {
           results.push({ type, ok: false, msg: '管理员功能未启用' })
           continue
@@ -582,6 +615,14 @@ export async function parseAndExecuteActions(replyText, groupId) {
         results.push({ type, ok: true, msg: `已将 ${targetUid} 设为管理员` })
 
       } else if (type === 'remove_admin') {
+        if (!requesterCanSetAdmin) {
+          results.push({ type, ok: false, msg: '仅机器人主人/群主可取消管理员' })
+          continue
+        }
+        if (cfg.get('groupOps.allowAdmin', true) === false) {
+          results.push({ type, ok: false, msg: '管理员功能未启用' })
+          continue
+        }
         if (botRole !== 'owner') {
           results.push({ type, ok: false, msg: '机器人不是群主' })
           continue
@@ -601,6 +642,12 @@ export async function parseAndExecuteActions(replyText, groupId) {
         const titleText = args.slice(1).join(':').trim()
         if (!titleText) {
           results.push({ type, ok: false, msg: '未指定头衔内容' })
+          continue
+        }
+        // 自助设头衔：仅允许给自己设；给他人设需要群主/管理员/主人
+        const isSelfTitle = requesterUid != null && String(targetUid) === String(requesterUid)
+        if (!isSelfTitle && !requesterElevated) {
+          results.push({ type, ok: false, msg: '仅群主/管理员/机器人主人可给他人设置头衔' })
           continue
         }
         await executeSetTitle(groupId, targetUid, titleText.slice(0, 18))

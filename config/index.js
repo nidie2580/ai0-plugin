@@ -212,9 +212,13 @@ function atomicWriteYaml(filePath, content) {
   fs.renameSync(tmp, filePath)
 }
 
+export function setForceLoad(v) {
+  loadConfig.__forceLoad = !!v
+}
+
 export function loadConfig() {
-  // #ai重载 可强制绕过 mtime 缓存
-  const force = !!loadConfig.__forceLoad || !!cfg.__forceLoad
+  // #ai重载 可强制绕过 mtime 缓存（用 setForceLoad 设置，避免引用 ESM 模块内不存在的 cfg 标识符）
+  const force = !!loadConfig.__forceLoad
   if (!force && cachedConfig && fs.existsSync(USER_CONFIG)) {
     try {
       const mtime = fs.statSync(USER_CONFIG).mtimeMs

@@ -817,6 +817,10 @@ export async function getImageSegment(src) {
       if (!m) return null
       const ext = m[1] ? '.' + (m[1].split('+')[0].replace('jpeg', 'jpg')) : '.img'
       const buf = Buffer.from(m[2], 'base64')
+      if (buf.length > 20 * 1024 * 1024) {
+        logger && logger.warn && logger.warn(`[ai0-plugin] data:URL 图片过大(${Math.round(buf.length / 1024 / 1024)}MB)，已拒绝`)
+        return null
+      }
       const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
       fs.writeFileSync(tmp, buf)
       return safeSegmentImage(tmp)
@@ -886,18 +890,40 @@ function guessExtFromBuffer(buf) {
   return null
 }
 
-async function downloadImageViaFetch(url) {
+async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 30000)
   try {
     const resp = await fetch(url, { signal: controller.signal })
-    clearTimeout(timer)
     if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` }
-    const buf = Buffer.from(await resp.arrayBuffer())
+    const declared = Number(resp.headers.get('content-length') || 0)
+    if (declared > maxBytes) return { ok: false, error: `图片过大(${Math.round(declared / 1024 / 1024)}MB)已拒绝` }
+    let buf
+    if (resp.body && typeof resp.body.getReader === 'function') {
+      // 流式读取并限制总大小，防止恶意 URL 返回超大响应拖垮内存
+      const reader = resp.body.getReader()
+      const chunks = []
+      let total = 0
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        total += value.length
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {})
+          return { ok: false, error: `图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
+        }
+        chunks.push(value)
+      }
+      buf = Buffer.concat(chunks)
+    } else {
+      buf = Buffer.from(await resp.arrayBuffer())
+      if (buf.length > maxBytes) return { ok: false, error: '图片过大已拒绝' }
+    }
     if (!buf || buf.length < 16) return { ok: false, error: '图片为空或过小' }
     return { ok: true, buffer: buf }
   } catch (err) {
-    clearTimeout(timer)
     return { ok: false, error: err.message || String(err) }
+  } finally {
+    clearTimeout(timer)
   }
 }

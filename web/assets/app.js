@@ -262,7 +262,7 @@ if (route === 'dashboard') {
       card.className = 'sess-user'
       card.innerHTML = `
         <div class="sess-user-head">
-          <b>用户 <code>${u.userId}</code></b>
+          <b>用户 <code>${escapeHtml(u.userId)}</code></b>
           <span class="tag">${u.sessions.length} 会话 / ${u.totalMessages} 条</span>
         </div>
         <div class="sess-list"></div>

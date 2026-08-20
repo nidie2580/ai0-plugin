@@ -355,9 +355,9 @@ export async function handleChat(e) {
     const sendHint = () => {
       try {
         if (isGroup && e.group_id) {
-          (e.bot || Bot).pickGroup?.(e.group_id).sendMsg?.('我正在思考中...').catch(() => {})
+          (e.bot || Bot).pickGroup?.(e.group_id)?.sendMsg?.('我正在思考中...')?.catch?.(() => {})
         } else if (userId) {
-          (e.bot || Bot).pickFriend?.(userId).sendMsg?.('我正在思考中...').catch(() => {})
+          (e.bot || Bot).pickFriend?.(userId)?.sendMsg?.('我正在思考中...')?.catch?.(() => {})
         }
       } catch {}
     }
@@ -484,7 +484,7 @@ export async function handleChat(e) {
     // 群聊且开启了群操作，解析AI回复中的群操作指令并执行
     if (isGroup && groupContext) {
       try {
-        const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId)
+        const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId, e)
         replyText = cleanText
         if (results.length) {
           const actionReport = results.map(r =>

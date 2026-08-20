@@ -22,7 +22,7 @@ function randomId(len = 32) {
 
 function randomDigits(len = 6) {
   let s = ''
-  for (let i = 0; i < len; i++) s += Math.floor(Math.random() * 10)
+  for (let i = 0; i < len; i++) s += crypto.randomInt(10)
   return s
 }
 
@@ -34,7 +34,7 @@ function cleanup() {
   for (const [k, v] of rateLimit) if (v.resetAt < now) rateLimit.delete(k)
 }
 
-setInterval(cleanup, 30_000)
+setInterval(cleanup, 30_000).unref?.()
 
 /** 简单滑动窗口限速：允许 pass=true 放行并计数；超过阈值返回 false。
  *  scope='code' | 'magic' | 'login'；id 是 IP/验证码id 等

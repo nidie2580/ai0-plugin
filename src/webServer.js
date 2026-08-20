@@ -109,6 +109,15 @@ function listSessions() {
   return out
 }
 
+// 会话接口路径参数校验：防止路径遍历（../）读取/删除插件目录外的任意文件。
+// userId 为 QQ 号（纯数字），sessionId 为 randomUUID（十六进制 + 连字符）。
+function isValidUserId(v) {
+  return v != null && /^\d{1,20}$/.test(String(v))
+}
+function isValidSessionId(v) {
+  return v != null && /^[0-9a-fA-F-]{1,64}$/.test(String(v))
+}
+
 function requireAuth(req, res, next) {
   const token = req.cookies?.ai0_session || req.headers['x-ai0-session']
   if (!auth.verifySession(token)) {
@@ -304,6 +313,12 @@ export function createApp() {
 
   app.delete('/api/sessions/:userId/:sessionId?', requireAuth, (req, res) => {
     const { userId, sessionId } = req.params
+    if (!isValidUserId(userId)) {
+      return res.status(400).json({ ok: false, msg: '非法 userId' })
+    }
+    if (sessionId != null && !isValidSessionId(sessionId)) {
+      return res.status(400).json({ ok: false, msg: '非法 sessionId' })
+    }
     try {
       const dir = path.join(PLUGIN_ROOT, 'data', 'history', userId)
       if (!fs.existsSync(dir)) return res.json({ ok: false, msg: '目录不存在' })
@@ -323,6 +338,9 @@ export function createApp() {
 
   app.get('/api/sessions/:userId/:sessionId', requireAuth, (req, res) => {
     const { userId, sessionId } = req.params
+    if (!isValidUserId(userId) || !isValidSessionId(sessionId)) {
+      return res.status(400).json({ ok: false, msg: '非法参数' })
+    }
     const arr = llm.loadHistory(userId, sessionId)
     res.json({ ok: true, data: arr })
   })
