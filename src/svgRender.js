@@ -192,8 +192,8 @@ export function renderHelp() {
       ['#ai添加主人 <QQ>', '添加新主人'],
       ['#ai重载', '重新加载配置文件']
     ] },
-    { title: '🔍 诊断命令', lines: [
-      ['#ai诊断', '检查权限/主人/配置/后台（任何人可用）'],
+    { title: '🔍 诊断命令（仅主人）', lines: [
+      ['#ai诊断', '检查权限/主人/配置/后台'],
       ['#ai测试模型 [key]', '探测 /models + 发起 /chat/completions 调用']
     ] },
     { title: '💡 小提示', lines: [

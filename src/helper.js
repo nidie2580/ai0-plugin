@@ -901,3 +901,25 @@ async function downloadImageViaFetch(url) {
     return { ok: false, error: err.message || String(err) }
   }
 }
+
+// ========== 共享输入规范化工具 ==========
+/**
+ * 规范化"模型名/模型ID"类输入（修复 13：防止 YAML/换行/控制字符注入）。
+ *   - 移除 ASCII 控制字符、换行、Tab
+ *   - 移除常见 YAML 断行/注入字符
+ *   - 长度限制：默认 128 字符（模型 ID 通常不会超过这个长度）
+ * 返回规范化后的字符串；若全部是非法字符则返回空字符串。
+ */
+export function normalizeModelName(raw, maxLen = 128) {
+  if (raw == null) return ''
+  let s = String(raw)
+  // 去除所有 ASCII 控制字符 + 换行/回车/tab（保持 unicode 字母数字，兼容中英文模型名）
+  s = s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\r\n\t]/g, '')
+  // 头尾空白
+  s = s.trim()
+  // 去掉反引号（防止被 YAML 的 ` 字面块解释）
+  s = s.replace(/`/g, '')
+  // 截断长度
+  if (s.length > maxLen) s = s.slice(0, maxLen)
+  return s
+}

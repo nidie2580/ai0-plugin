@@ -19,6 +19,43 @@ let serverInstance = null
 let currentPort = null
 let currentHost = null
 
+/* ---------- 修复 7：路径组件白名单校验（防止 .. 越界删除或读取） ---------- */
+/**
+ * 对 userId/sessionId 等外部输入做"路径安全化"：
+ *  - 仅允许 ASCII 字母/数字/-/_/.，其他字符一律剔除
+ *  - 禁止 .. 和开头的 .
+ *  - 禁止 / \ 路径分隔符
+ *  - 空串返回 null（调用方据此应判非法）
+ */
+function safePathComponent(raw) {
+  if (raw == null) return null
+  let s = String(raw).trim()
+  if (!s) return null
+  // 先去掉所有 ..
+  s = s.replace(/\.\.+/g, '')
+  // 去掉开头的所有 .
+  while (s.startsWith('.')) s = s.slice(1)
+  // 再做白名单过滤（仅允许 \w . -）
+  s = s.replace(/[^\w.\-]/g, '')
+  // 最后兜底再去除任何可能的 / \
+  s = s.replace(/[\/\\]/g, '')
+  if (!s) return null
+  return s
+}
+
+/**
+ * 对最终 path 做「归一化后必须仍在 baseDir 内」的二次校验（双重保险），
+ * 如果越界返回 null，否则返回归一化后的真实绝对路径。
+ */
+function safeJoinUnder(baseDir, relativeComponent) {
+  if (!baseDir || !relativeComponent) return null
+  const resolved = path.resolve(baseDir, relativeComponent)
+  const base = path.resolve(baseDir)
+  // 归一化后必须是 base + sep 开头，或恰好等于 base
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) return null
+  return resolved
+}
+
 export function isRunning() {
   return !!serverInstance
 }
@@ -73,14 +110,26 @@ function listSessions() {
   const historyDir = path.join(PLUGIN_ROOT, 'data', 'history')
   const out = []
   if (!fs.existsSync(historyDir)) return out
+  // 先做整体归一化校验，避免 data/history 本身是符号链接飞出 PLUGIN_ROOT
+  const safeHistoryDir = safeJoinUnder(PLUGIN_ROOT, path.join('data', 'history'))
+  if (!safeHistoryDir) return out
   for (const user of fs.readdirSync(historyDir)) {
-    const ud = path.join(historyDir, user)
+    // 读目录后同样过一遍白名单（防止有人手动在 history 下塞了 ../ 之类的奇怪命名目录）
+    const safeUser = safePathComponent(user)
+    if (!safeUser || safeUser !== user) continue
+    const ud = safeJoinUnder(historyDir, safeUser)
+    if (!ud) continue
     const st = fs.statSync(ud)
     if (!st.isDirectory()) continue
     const files = fs.readdirSync(ud).filter(f => f.endsWith('.json'))
     const sessions = []
     for (const f of files) {
-      const fp = path.join(ud, f)
+      // session 文件名白名单
+      const sessionIdRaw = f.replace(/\.json$/, '')
+      const safeId = safePathComponent(sessionIdRaw)
+      if (!safeId || safeId !== sessionIdRaw) continue
+      const fp = safeJoinUnder(ud, f)
+      if (!fp) continue
       const s = fs.statSync(fp)
       let msgCount = 0
       let preview = ''
@@ -91,7 +140,7 @@ function listSessions() {
         if (last) preview = (last.content || '').slice(0, 60)
       } catch {}
       sessions.push({
-        id: f.replace(/\.json$/, ''),
+        id: safeId,
         size: s.size,
         mtime: s.mtimeMs,
         msgCount,
@@ -100,7 +149,7 @@ function listSessions() {
     }
     sessions.sort((a, b) => b.mtime - a.mtime)
     out.push({
-      userId: user,
+      userId: safeUser,
       sessions,
       totalMessages: sessions.reduce((a, s) => a + s.msgCount, 0)
     })
@@ -277,25 +326,32 @@ export function createApp() {
     res.json({ ok: true, config: safe })
   })
 
-  app.post('/api/config', requireAuth, (req, res) => {
+  app.post('/api/config', requireAuth, async (req, res) => {
     const { config } = req.body || {}
     if (!config || typeof config !== 'object') {
       return res.json({ ok: false, msg: '配置格式错误' })
     }
-    // 把脱敏的 apiKey 还原：收到 **** 时，从原配置读取
-    const old = cfg.loadConfig()
-    const cleaned = JSON.parse(JSON.stringify(config))
-    if (cleaned.model && old.model) {
-      for (const k of Object.keys(cleaned.model)) {
-        const newVal = cleaned.model[k]?.apiKey
-        const oldVal = old.model[k]?.apiKey
-        if (typeof newVal === 'string' && newVal.includes('****') && typeof oldVal === 'string') {
-          cleaned.model[k].apiKey = oldVal
+    // ========== 修复 12：网页后台整体提交也走原子 modifyConfig ==========
+    //   - 在锁内部：读旧配置（防中途被其它 save 改了 apikey 后被误还原成 ****）
+    //   - 整体替换（保持原语义：提交上来的 cleaned 整体覆盖写盘）
+    try {
+      const { ok } = await cfg.modifyConfig((prev) => {
+        const cleaned = JSON.parse(JSON.stringify(config))
+        if (cleaned.model && prev?.model) {
+          for (const k of Object.keys(cleaned.model)) {
+            const newVal = cleaned.model[k]?.apiKey
+            const oldVal = prev.model[k]?.apiKey
+            if (typeof newVal === 'string' && newVal.includes('****') && typeof oldVal === 'string') {
+              cleaned.model[k].apiKey = oldVal
+            }
+          }
         }
-      }
+        return cleaned
+      })
+      res.json({ ok, msg: ok ? '已保存' : '保存失败，查看日志' })
+    } catch (e) {
+      res.json({ ok: false, msg: e.message })
     }
-    const ok = cfg.saveConfig(cleaned)
-    res.json({ ok, msg: ok ? '已保存' : '保存失败，查看日志' })
   })
 
   app.get('/api/sessions', requireAuth, (req, res) => {
@@ -303,16 +359,33 @@ export function createApp() {
   })
 
   app.delete('/api/sessions/:userId/:sessionId?', requireAuth, (req, res) => {
-    const { userId, sessionId } = req.params
+    // ========== 修复 7：外部 userId/sessionId 必须通过白名单校验 ==========
+    // 注：此接口已 requireAuth，但仍然要防认证后越界（防止 history 外的 .json 被误删）
+    const rawUserId = req.params?.userId
+    const rawSessionId = req.params?.sessionId
+    const userId = safePathComponent(rawUserId)
+    if (!userId) return res.json({ ok: false, msg: 'userId 非法（仅允许字母/数字/-/_/.）' })
+    const historyBase = path.join(PLUGIN_ROOT, 'data', 'history')
+    const dir = safeJoinUnder(historyBase, userId)
+    if (!dir) return res.json({ ok: false, msg: '路径越界，拒绝操作' })
+    if (!fs.existsSync(dir)) return res.json({ ok: false, msg: '目录不存在' })
     try {
-      const dir = path.join(PLUGIN_ROOT, 'data', 'history', userId)
-      if (!fs.existsSync(dir)) return res.json({ ok: false, msg: '目录不存在' })
-      if (sessionId) {
-        const p = path.join(dir, `${sessionId}.json`)
+      if (rawSessionId !== undefined && rawSessionId !== null && rawSessionId !== '') {
+        const sessionId = safePathComponent(rawSessionId)
+        if (!sessionId) return res.json({ ok: false, msg: 'sessionId 非法' })
+        const p = safeJoinUnder(dir, `${sessionId}.json`)
+        if (!p) return res.json({ ok: false, msg: 'session 路径越界' })
         if (fs.existsSync(p)) fs.unlinkSync(p)
       } else {
+        // 删除整个用户目录下的所有 .json（依然逐个过 safeJoinUnder，不依赖 readdirSync 结果）
         for (const f of fs.readdirSync(dir)) {
-          if (f.endsWith('.json')) fs.unlinkSync(path.join(dir, f))
+          if (!f.endsWith('.json')) continue
+          const idRaw = f.slice(0, -5)
+          const idSafe = safePathComponent(idRaw)
+          if (!idSafe || idSafe !== idRaw) continue
+          const p = safeJoinUnder(dir, f)
+          if (!p) continue
+          if (fs.existsSync(p)) fs.unlinkSync(p)
         }
       }
       res.json({ ok: true })
@@ -322,8 +395,18 @@ export function createApp() {
   })
 
   app.get('/api/sessions/:userId/:sessionId', requireAuth, (req, res) => {
-    const { userId, sessionId } = req.params
+    // ========== 修复 7：同样做白名单 + 路径边界校验 ==========
+    const userId = safePathComponent(req.params?.userId)
+    const sessionId = safePathComponent(req.params?.sessionId)
+    if (!userId || !sessionId) return res.json({ ok: false, msg: 'userId/sessionId 非法' })
+    const historyBase = path.join(PLUGIN_ROOT, 'data', 'history')
+    const dir = safeJoinUnder(historyBase, userId)
+    if (!dir) return res.json({ ok: false, data: [] })
+    const filePath = safeJoinUnder(dir, `${sessionId}.json`)
+    if (!filePath) return res.json({ ok: false, data: [] })
     const arr = llm.loadHistory(userId, sessionId)
+    // 最后再兜底：llm.loadHistory 内部会用 historyFile(userId, sessionId) 再拼成一次路径，
+    // 但我们在 Web API 入口已经把参数白名单化，这里直接返回即可。
     res.json({ ok: true, data: arr })
   })
 
@@ -418,28 +501,36 @@ export function createApp() {
     res.json({ ok: true, config: safe })
   })
 
-  app.post('/api/image-config', requireAuth, (req, res) => {
+  app.post('/api/image-config', requireAuth, async (req, res) => {
     const { config: ic } = req.body || {}
     if (!ic || typeof ic !== 'object') {
       return res.json({ ok: false, msg: '配置格式错误' })
     }
-    const full = cfg.loadConfig()
-    // 脱敏 apiKey 还原
-    const oldKey = full.imageGen?.apiKey
-    if (typeof ic.apiKey === 'string' && ic.apiKey.includes('****') && typeof oldKey === 'string') {
-      ic.apiKey = oldKey
+    // ========== 修复 12：图片配置写入也走原子 modifyConfig ==========
+    try {
+      const { ok } = await cfg.modifyConfig((prev) => {
+        const full = prev
+        // 脱敏 apiKey 还原：在锁内部读 prev，确保读到的是最新真正磁盘上的
+        const oldKey = full.imageGen?.apiKey
+        let newKey = ic.apiKey
+        if (typeof newKey === 'string' && newKey.includes('****') && typeof oldKey === 'string') {
+          newKey = oldKey
+        }
+        full.imageGen = {
+          enabled: ic.enabled === true || ic.enabled === 'true',
+          apiBase: String(ic.apiBase || '').replace(/[\u0000-\u001F\u007F\r\n]/g, '').slice(0, 512),
+          apiKey: String(newKey || '').replace(/[\u0000-\u001F\u007F\r\n]/g, '').slice(0, 512),
+          model: helper.normalizeModelName(String(ic.model || '')) || 'dall-e-3',
+          defaultSize: String(ic.defaultSize || '1024x1024').replace(/[\u0000-\u001F\u007F\r\n]/g, '').slice(0, 32),
+          quality: String(ic.quality || 'standard').replace(/[\u0000-\u001F\u007F\r\n]/g, '').slice(0, 32),
+          timeout: parseInt(ic.timeout, 10) || 120000
+        }
+        return full
+      })
+      res.json({ ok, msg: ok ? '图片配置已保存' : '保存失败' })
+    } catch (e) {
+      res.json({ ok: false, msg: e.message })
     }
-    full.imageGen = {
-      enabled: ic.enabled === true || ic.enabled === 'true',
-      apiBase: ic.apiBase || '',
-      apiKey: ic.apiKey || '',
-      model: ic.model || 'dall-e-3',
-      defaultSize: ic.defaultSize || '1024x1024',
-      quality: ic.quality || 'standard',
-      timeout: parseInt(ic.timeout, 10) || 120000
-    }
-    const ok = cfg.saveConfig(full)
-    res.json({ ok, msg: ok ? '图片配置已保存' : '保存失败' })
   })
 
   app.post('/api/test-image', requireAuth, async (req, res) => {
