@@ -154,6 +154,84 @@ function injectContextIntoHistory({ history, sysPrompt, parsed, opts, modelConfi
   return next
 }
 
+/* -------------------------------------------------------------------------- */
+/*                            仅艾特机器人 → 默认回复                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 群聊里「只艾特机器人没说正文」时的默认回复。
+ * - 文案从 texts 池里随机挑 1 条
+ * - 图片从 stickers 池里随机挑 0~1 条（空数组就不发图）
+ * - 发送方式按 sendMode：together 合并一条 / separate 分两条 / random 50% 随机
+ * 成功返回 true（caller 会 return true，阻止继续调用大模型），失败返回 false。
+ */
+async function sendOnlyAtDefaultReply(e, config) {
+  if (!config) return false
+  const texts = Array.isArray(config.texts) ? config.texts.filter(Boolean) : []
+  const stickers = Array.isArray(config.stickers) ? config.stickers.filter(Boolean) : []
+  const sendMode = ['together', 'separate', 'random'].includes(config.sendMode)
+    ? config.sendMode
+    : 'together'
+
+  if (!texts.length && !stickers.length) {
+    logger.warn && logger.warn('[ai0-plugin] onlyAtDefaultReply 配置为空（没文案也没图），跳过默认回复')
+    return false
+  }
+
+  // 1) 随机挑 1 条文案
+  const text = texts.length ? texts[Math.floor(Math.random() * texts.length)] : ''
+
+  // 2) 随机挑 1 张图（可能没有）→ 统一用 helper.getImageSegment 走"本地临时文件路径"策略，避免 rich media transfer failed
+  let stickerSeg = null
+  if (stickers.length) {
+    const pick = stickers[Math.floor(Math.random() * stickers.length)]
+    try {
+      stickerSeg = await helper.getImageSegment(pick)
+    } catch (err) {
+      logger.warn && logger.warn(`[ai0-plugin] 默认回复图片处理失败: ${err.message}`)
+      stickerSeg = null
+    }
+  }
+
+  // 3) 按 sendMode 发送
+  const effectiveMode =
+    sendMode === 'random'
+      ? (Math.random() > 0.5 ? 'together' : 'separate')
+      : sendMode
+
+  try {
+    const hasText = !!text
+    const hasImg = !!stickerSeg
+
+    if (!hasText && !hasImg) return false
+
+    if (effectiveMode === 'together' && hasText && hasImg) {
+      // 合并成一条消息：文字段 + 图片段（顺序：先文字后图片）
+      const msgArr = [
+        { type: 'text', text: text + '\n' },
+        stickerSeg
+      ]
+      await e.reply(msgArr)
+      return true
+    }
+
+    // separate 模式 或 只剩其中一种 → 逐个发送
+    if (hasText) await e.reply(text)
+    if (hasImg) {
+      if (hasText) await new Promise(r => setTimeout(r, 200))
+      await e.reply(stickerSeg)
+    }
+    return true
+  } catch (err) {
+    logger.error && logger.error(`[ai0-plugin] 发送仅艾特默认回复失败: ${err.message}`)
+    // 兜底：如果有文案至少再试一次只发文案，别啥都不回
+    if (text && sendMode !== 'together') {
+      try { await e.reply(text); return true } catch (_) {}
+    }
+    return false
+  }
+}
+
 export async function handleChat(e) {
   const userId = helper.getUserId(e)
   const groupId = helper.getGroupId(e)
@@ -242,7 +320,30 @@ export async function handleChat(e) {
     }
     if (trimmed) pureText = trimmed
   }
-  if (!pureText) return false
+
+  /* ---------- 仅艾特默认回复（去掉@/前缀后 + 解析引用转发后 仍无实质内容） ---------- */
+  if (!pureText) {
+    const onlyAtCfg = cfg.get('chat.onlyAtDefaultReply', {}) || {}
+    const isEnabled = onlyAtCfg.enabled !== false
+    // 判断是不是"纯艾特触发"场景：
+    //   1) 群聊  2) 确实是 @机器人 命中的（不是globalAI、不是前缀触发）
+    //   3) 引用消息 & 转发记录 里也没有实质文本（避免用户通过 @+引用某图 以为有内容 却被吞）
+    const hasQuoteContent = !!(parsed.quote && parsed.quote.text)
+    const hasForwardContent =
+      (Array.isArray(parsed.forwardFromCurrent) && parsed.forwardFromCurrent.some(t => t && t.text)) ||
+      (Array.isArray(parsed.forwardFromQuote) && parsed.forwardFromQuote.some(t => t && t.text))
+
+    const inGlobalGroup = globalAI && globalAIGroups.includes(String(groupId))
+    const byPrefix = triggerPrefix.some(p => text.startsWith(p))
+    const purelyAtBot =
+      isGroup && helper.isAtBot(e) && !inGlobalGroup && !byPrefix
+
+    if (isEnabled && purelyAtBot && !hasQuoteContent && !hasForwardContent) {
+      const handled = await sendOnlyAtDefaultReply(e, onlyAtCfg)
+      if (handled) return true
+    }
+    return false
+  }
   // 把纯净版正文回填，后面注入 history 时也用它，避免重复引用段
   if (parsed.current) parsed.current.text = pureText
 

@@ -1,4 +1,31 @@
 import * as cfg from '../config/index.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const TMP_DIR = path.join(__dirname, '..', 'data', 'tmp-stickers')
+try { if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true }) } catch (_) {}
+
+// 临时文件清理：只保留近 1 小时内的，避免长期运行堆积
+let _cleanupRan = 0
+function cleanupTmpDir() {
+  const now = Date.now()
+  if (now - _cleanupRan < 10 * 60 * 1000) return  // 每 10 分钟最多跑一次
+  _cleanupRan = now
+  try {
+    const files = fs.readdirSync(TMP_DIR)
+    for (const f of files) {
+      if (!f.startsWith('stk-')) continue
+      const fp = path.join(TMP_DIR, f)
+      try {
+        const st = fs.statSync(fp)
+        if (now - st.mtimeMs > 60 * 60 * 1000) fs.unlinkSync(fp)
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
 
 function readFrameworkMasters() {
   const masters = new Set()
@@ -753,4 +780,124 @@ export async function sendPrivate(userId, content) {
     } catch (err) { lastErr = err }
   }
   return { ok: false, reason: lastErr ? lastErr.message : '所有主动私信接口均调用失败' }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                              仅艾特默认回复相关                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 把一个「图片来源」（本地路径 / http(s) URL / Buffer / base64 dataURL）
+ * 转成 Yunzai/NapCat 能稳定发送的 segment.image（统一通过"本地临时文件路径"发送，
+ * 避免直接发 Buffer/URL 导致的 rich media transfer failed）。
+ *
+ * @param {string|Buffer} src - 图片来源
+ * @returns {Promise<segment|null>} 失败返回 null（caller 应静默降级）
+ */
+export async function getImageSegment(src) {
+  if (src == null) return null
+  cleanupTmpDir()
+
+  try {
+    // 1) Buffer → 写临时文件
+    if (Buffer.isBuffer(src)) {
+      const ext = guessExtFromBuffer(src) || '.img'
+      const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
+      fs.writeFileSync(tmp, src)
+      return safeSegmentImage(tmp)
+    }
+
+    if (typeof src !== 'string') return null
+    const s = src.trim()
+    if (!s) return null
+
+    // 2) data:URL (base64)
+    if (/^data:image\//i.test(s)) {
+      const m = s.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,(.+)$/i)
+      if (!m) return null
+      const ext = m[1] ? '.' + (m[1].split('+')[0].replace('jpeg', 'jpg')) : '.img'
+      const buf = Buffer.from(m[2], 'base64')
+      const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
+      fs.writeFileSync(tmp, buf)
+      return safeSegmentImage(tmp)
+    }
+
+    // 3) http(s) URL → 下载 → 写临时文件
+    if (/^https?:\/\//i.test(s)) {
+      const dl = await downloadImageViaFetch(s)
+      if (!dl.ok) {
+        logger && logger.warn && logger.warn(`[ai0-plugin] 默认回复图片下载失败(${s.slice(0,80)}): ${dl.error}`)
+        return null
+      }
+      const urlPath = safeUrlPathname(s) || ''
+      const extFromUrl = urlPath ? path.extname(urlPath) : ''
+      const ext = extFromUrl || guessExtFromBuffer(dl.buffer) || '.img'
+      const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
+      fs.writeFileSync(tmp, dl.buffer)
+      return safeSegmentImage(tmp)
+    }
+
+    // 4) 本地文件路径 → 直接用（先判断存在）
+    try {
+      if (fs.existsSync(s) && fs.statSync(s).isFile()) {
+        return safeSegmentImage(s)
+      }
+    } catch (_) {}
+
+    logger && logger.warn && logger.warn(`[ai0-plugin] 无法识别的图片来源，已跳过: ${s.slice(0, 80)}`)
+    return null
+  } catch (err) {
+    logger && logger.warn && logger.warn(`[ai0-plugin] getImageSegment 异常: ${err.message}`)
+    return null
+  }
+}
+
+function safeSegmentImage(filePath) {
+  // segment 是 Yunzai 全局对象；某些适配器也支持 segment.image('file:///abs/path')
+  try {
+    if (typeof segment !== 'undefined' && segment && typeof segment.image === 'function') {
+      return segment.image(filePath)
+    }
+  } catch (_) {}
+  // 兜底：手动组装 segment 数组对象
+  return { type: 'image', file: filePath }
+}
+
+function rand6() {
+  return Math.random().toString(36).slice(2, 8)
+}
+
+function safeUrlPathname(u) {
+  try { return new URL(u).pathname || '' } catch (_) { return '' }
+}
+
+/** 根据 Buffer 的 magic number 判断扩展名（尽量猜，猜不到就 null） */
+function guessExtFromBuffer(buf) {
+  if (!buf || buf.length < 4) return null
+  const b0 = buf[0], b1 = buf[1], b2 = buf[2], b3 = buf[3]
+  if (b0 === 0x89 && b1 === 0x50 && b2 === 0x4E && b3 === 0x47) return '.png'
+  if (b0 === 0xFF && b1 === 0xD8 && b2 === 0xFF) return '.jpg'
+  if (b0 === 0x47 && b1 === 0x49 && b2 === 0x46) return '.gif'
+  if (b0 === 0x52 && b1 === 0x49 && b2 === 0x46 && b3 === 0x46) {
+    // RIFF → 接下来 4 字节是 size, 再接下来 4 字节应该是 WEBP
+    if (buf.length >= 12 && buf.toString('ascii', 8, 12) === 'WEBP') return '.webp'
+  }
+  if (b0 === 0x42 && b1 === 0x4D) return '.bmp'
+  return null
+}
+
+async function downloadImageViaFetch(url) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 30000)
+  try {
+    const resp = await fetch(url, { signal: controller.signal })
+    clearTimeout(timer)
+    if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` }
+    const buf = Buffer.from(await resp.arrayBuffer())
+    if (!buf || buf.length < 16) return { ok: false, error: '图片为空或过小' }
+    return { ok: true, buffer: buf }
+  } catch (err) {
+    clearTimeout(timer)
+    return { ok: false, error: err.message || String(err) }
+  }
 }
