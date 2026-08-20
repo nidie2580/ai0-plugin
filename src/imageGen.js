@@ -62,10 +62,16 @@ export async function generateImage(prompt, opts = {}) {
         'Authorization': `Bearer ${ic.apiKey}`
       },
       body: JSON.stringify(body),
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: 'manual'
     })
 
     clearTimeout(timer)
+
+    // 拒绝重定向以避免 SSRF 绕过
+    if (resp.status >= 300 && resp.status < 400) {
+      return { ok: false, error: '图片生成 API 返回重定向，已被拒绝' }
+    }
 
     const respText = await resp.text()
     let data = null
@@ -106,7 +112,10 @@ export async function downloadImage(url, maxBytes = 20 * 1024 * 1024) {
   const timer = setTimeout(() => controller.abort(), 60000)
 
   try {
-    const resp = await fetch(url, { signal: controller.signal })
+    const resp = await fetch(url, { signal: controller.signal, redirect: 'manual' })
+    if (resp.status >= 300 && resp.status < 400) {
+      return { ok: false, error: '下载图片时遇到重定向，已被拒绝' }
+    }
     if (!resp.ok) {
       return { ok: false, error: `下载图片失败: HTTP ${resp.status}` }
     }

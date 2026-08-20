@@ -1,5 +1,6 @@
 import dns from 'node:dns/promises'
 import net from 'node:net'
+import axios from 'axios'
 
 function isPrivateIp(ip) {
   if (!ip) return false
@@ -30,13 +31,10 @@ export async function isAllowedOutboundUrl(u) {
     return { ok: false, reason: '无法解析的 URL' }
   }
   const hostname = parsed.hostname
-  // If hostname is IP literal
   if (net.isIP(hostname)) {
     if (isPrivateIp(hostname)) return { ok: false, reason: '拒绝访问私有或回环 IP 地址' }
     return { ok: true }
   }
-
-  // hostname is a domain — resolve to all addresses and ensure none are private
   try {
     const addrs = await dns.lookup(hostname, { all: true })
     if (!Array.isArray(addrs) || addrs.length === 0) return { ok: false, reason: '域名无法解析' }
@@ -45,7 +43,72 @@ export async function isAllowedOutboundUrl(u) {
     }
     return { ok: true }
   } catch (err) {
-    // DNS lookup may fail for various reasons; treat as disallowed to be safe
     return { ok: false, reason: 'DNS 解析失败或被阻止' }
+  }
+}
+
+/**
+ * Safe fetch that validates each URL (including redirect targets) before requesting.
+ * Returns { ok: true, response, finalUrl } on success or { ok: false, error } on failure.
+ */
+export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 3) {
+  let current = origUrl
+  let redirects = 0
+  while (true) {
+    const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
+    if (!check.ok) return { ok: false, error: check.reason || '拒绝访问该 URL' }
+    // Ensure we don't let fetch auto-redirect
+    const fetchOpts = { ...(opts || {}), redirect: 'manual' }
+    let resp
+    try {
+      resp = await fetch(current, fetchOpts)
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) }
+    }
+    if (resp.status >= 300 && resp.status < 400) {
+      const loc = resp.headers.get('location')
+      if (!loc) return { ok: false, error: `HTTP ${resp.status}` }
+      const next = new URL(loc, current).toString()
+      redirects += 1
+      if (redirects > maxRedirects) return { ok: false, error: '重定向次数过多' }
+      // validate next before following
+      const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
+      if (!chk2.ok) return { ok: false, error: chk2.reason || '拒绝重定向目标' }
+      // follow to next
+      current = next
+      continue
+    }
+    return { ok: true, response: resp, finalUrl: current }
+  }
+}
+
+/**
+ * Safe axios request that validates redirect targets. options similar to axios.request
+ * Returns axios response on success or throws Error on failure
+ */
+export async function safeAxiosRequest(method, url, data = null, opts = {}, maxRedirects = 3) {
+  let current = url
+  let redirects = 0
+  while (true) {
+    const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
+    if (!check.ok) throw new Error(check.reason || '拒绝访问该 URL')
+    try {
+      const conf = Object.assign({}, opts, { method, url: current, data, maxRedirects: 0, validateStatus: () => true })
+      const resp = await axios.request(conf)
+      if (resp.status >= 300 && resp.status < 400) {
+        const loc = resp.headers?.location
+        if (!loc) throw new Error(`HTTP ${resp.status}`)
+        const next = new URL(loc, current).toString()
+        redirects += 1
+        if (redirects > maxRedirects) throw new Error('重定向次数过多')
+        const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
+        if (!chk2.ok) throw new Error(chk2.reason || '拒绝重定向目标')
+        current = next
+        continue
+      }
+      return resp
+    } catch (err) {
+      throw err
+    }
   }
 }

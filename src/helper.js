@@ -58,7 +58,14 @@ async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 30000)
   try {
-    const resp = await fetch(url, { signal: controller.signal })
+    // 不自动跟随重定向，避免由 Location 绕过校验
+    const resp = await fetch(url, { signal: controller.signal, redirect: 'manual' })
+    // 如果服务器返回 3xx 且带 Location → 拒绝（更安全）
+    if (resp.status >= 300 && resp.status < 400) {
+      const loc = resp.headers.get('location')
+      if (loc) return { ok: false, error: '拒绝重定向以防 SSRF' }
+      return { ok: false, error: `HTTP ${resp.status}` }
+    }
     if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` }
     const declared = Number(resp.headers.get('content-length') || 0)
     if (declared > maxBytes) return { ok: false, error: `图片过大(${Math.round(declared / 1024 / 1024)}MB)已拒绝` }
@@ -88,6 +95,151 @@ async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {
     return { ok: false, error: err.message || String(err) }
   } finally {
     clearTimeout(timer)
+  }
+}
+
+// ----------------- Master detection helpers (platform-first) -----------------
+
+function normalizeId(v) {
+  if (v == null) return null
+  try { return String(v) } catch (_) { return null }
+}
+
+export function getUserId(e) {
+  if (!e) return null
+  // common event shapes used by QQ adapters: user_id, userId, user?.id, sender?.user_id
+  return e.user_id ?? e.userId ?? (e.user && (e.user.id ?? e.user.user_id)) ?? (e.sender && e.sender.user_id) ?? null
+}
+
+export function getGroupId(e) {
+  if (!e) return null
+  return e.group_id ?? e.groupId ?? (e.group && (e.group.id ?? e.group.group_id)) ?? null
+}
+
+/**
+ * isMaster: 优先使用运行时/事件平台信息判断（e.isMaster / e.master / 平台 owner 列表）���仅在无法判断时退回到 config.permissions.masters
+ */
+export function isMaster(userId, e = null) {
+  const uid = normalizeId(userId)
+  if (!uid) return false
+
+  // 1) 事件对象显式声明（最高优先级）
+  if (e && ('isMaster' in e)) return !!e.isMaster
+  if (e && ('master' in e)) {
+    try {
+      if (normalizeId(e.master) === uid) return true
+    } catch (_) {}
+  }
+
+  // 2) 平台/机器人提供的 owners/masters 信息（如 XRK-Yunzai adapter）
+  try {
+    const bot = global.Bot || global.bot || null
+    if (bot) {
+      // 常见字段名尝试
+      const candidates = []
+      if (Array.isArray(bot.masters)) candidates.push(...bot.masters.map(String))
+      if (Array.isArray(bot.owners)) candidates.push(...bot.owners.map(String))
+      if (bot.master) candidates.push(String(bot.master))
+      if (bot.owner) candidates.push(String(bot.owner))
+      if (bot.ownerUin) candidates.push(String(bot.ownerUin))
+      if (typeof bot.getMaster === 'function') {
+        try { const gm = bot.getMaster(); if (gm) candidates.push(String(gm)) } catch (_) {}
+      }
+      if (candidates.map(String).includes(uid)) return true
+    }
+  } catch (_) {}
+
+  // 3) 最后退回到配置文件里的 permissions.masters（作为回退/手动覆盖）
+  try {
+    const cfgMasters = cfg.get('permissions.masters', []) || []
+    for (const m of cfgMasters) if (String(m) === uid) return true
+  } catch (_) {}
+
+  return false
+}
+
+export function listMasters() {
+  const out = { event: [], platform: [], config: [] }
+  try {
+    const cfgMasters = cfg.get('permissions.masters', []) || []
+    out.config = cfgMasters.map(String)
+  } catch (_) { out.config = [] }
+  try {
+    const bot = global.Bot || global.bot || null
+    if (bot) {
+      const platform = []
+      if (Array.isArray(bot.masters)) platform.push(...bot.masters.map(String))
+      if (Array.isArray(bot.owners)) platform.push(...bot.owners.map(String))
+      if (bot.master) platform.push(String(bot.master))
+      if (bot.owner) platform.push(String(bot.owner))
+      out.platform = Array.from(new Set(platform))
+    }
+  } catch (_) { out.platform = [] }
+  return out.platform.concat(out.config)
+}
+
+export function listMasterSources() {
+  const sources = { platform: [], config: [] }
+  try {
+    const bot = global.Bot || global.bot || null
+    if (bot) {
+      if (Array.isArray(bot.masters)) sources.platform.push(...bot.masters.map(String))
+      if (Array.isArray(bot.owners)) sources.platform.push(...bot.owners.map(String))
+      if (bot.master) sources.platform.push(String(bot.master))
+      if (bot.owner) sources.platform.push(String(bot.owner))
+      sources.platform = Array.from(new Set(sources.platform))
+    }
+  } catch (_) { sources.platform = [] }
+  try {
+    const cfgMasters = cfg.get('permissions.masters', []) || []
+    sources.config = cfgMasters.map(String)
+  } catch (_) { sources.config = [] }
+  return sources
+}
+
+/** 检查机器人是否能给某个用户发私信（best-effort） */
+export async function isBotFriend(userId) {
+  try {
+    const bot = global.Bot || global.bot || null
+    if (!bot) return { ok: false, reason: 'bot 未初始化' }
+    if (typeof bot.isFriend === 'function') {
+      const r = await bot.isFriend(userId)
+      return { ok: !!r }
+    }
+    if (typeof bot.pickFriend === 'function') {
+      try {
+        const f = await bot.pickFriend(userId)
+        return { ok: !!f }
+      } catch (err) {
+        return { ok: false, reason: err?.message || String(err) }
+      }
+    }
+    // 无明确方法时：无法判断，返回 ok=true 以不阻塞功能（此处可按需改为更保守的默认 false）
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, reason: err?.message || String(err) }
+  }
+}
+
+/** 通过机器人发送私信（best-effort） */
+export async function sendPrivate(userId, message) {
+  try {
+    const bot = global.Bot || global.bot || null
+    if (!bot) throw new Error('bot 未初始化')
+    if (typeof bot.sendPrivate === 'function') {
+      return await bot.sendPrivate(userId, message)
+    }
+    if (typeof bot.send === 'function') {
+      // 某些适配器 use send({ to, type, message })
+      try { return await bot.send({ to: userId, type: 'private', message }) } catch (_) {}
+    }
+    if (typeof bot.pickFriend === 'function') {
+      const f = await bot.pickFriend(userId)
+      if (f && typeof f.send === 'function') return await f.send(message)
+    }
+    throw new Error('适配器不支持私信发送')
+  } catch (err) {
+    throw err
   }
 }
 
