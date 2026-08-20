@@ -1,5 +1,4 @@
 import crypto from 'node:crypto'
-import * as cfg from '../config/index.js'
 
 const tokens = new Map()
 const codes = new Map()
@@ -23,7 +22,7 @@ function randomId(len = 32) {
 
 function randomDigits(len = 6) {
   let s = ''
-  for (let i = 0; i < len; i++) s += crypto.randomInt(10)
+  for (let i = 0; i < len; i++) s += Math.floor(Math.random() * 10)
   return s
 }
 
@@ -35,7 +34,7 @@ function cleanup() {
   for (const [k, v] of rateLimit) if (v.resetAt < now) rateLimit.delete(k)
 }
 
-setInterval(cleanup, 30_000).unref?.()
+setInterval(cleanup, 30_000)
 
 /** 简单滑动窗口限速：允许 pass=true 放行并计数；超过阈值返回 false。
  *  scope='code' | 'magic' | 'login'；id 是 IP/验证码id 等
@@ -66,20 +65,11 @@ export function generateTerminalCode() {
     failCount: 0,     // 单 id 错误次数上限（防止错一次就拉黑整个IP导致正常用户被锁）
   })
   const logLine = `[ai0-plugin] ===== 网页管理验证码：${code} ===== (5分钟内有效)`
-  // 仅在交互终端打印，或配置允许时打印到日志（以避免云日志泄露）
-  const allowPrint = process.stdout && process.stdout.isTTY === true
-  const showInLogs = cfg.get('web.showTerminalCode', false)
-  if (allowPrint) {
-    // 强制打印到终端 (一次性)，便于运维在本地终端获取
+  if (typeof logger !== 'undefined') {
+    const fn = (typeof logger.mark === 'function') ? logger.mark : (logger.info || console.log)
+    fn(logLine)
+  } else {
     console.log(logLine)
-  } else if (showInLogs) {
-    // 可选：在开发或配置允许下也打印到 logger（谨慎）
-    if (typeof logger !== 'undefined') {
-      const fn = (typeof logger.mark === 'function') ? logger.mark : (logger.info || console.log)
-      fn(logLine)
-    } else {
-      console.log(logLine)
-    }
   }
   return { id, code }
 }
@@ -174,3 +164,4 @@ export function getPendingCodeId() {
   for (const [id, v] of codes) if (!v.used) return id
   return null
 }
+

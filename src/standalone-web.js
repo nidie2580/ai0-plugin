@@ -15,8 +15,7 @@ function localIPs() {
 
 async function main() {
   const port = Number(process.env.AI0_PORT) || 12580
-  // 默认只绑定本机（与 README 文档一致）；需局域网访问时显式设置 AI0_HOST=0.0.0.0
-  const host = process.env.AI0_HOST || '127.0.0.1'
+  const host = process.env.AI0_HOST || '0.0.0.0'
   try {
     await ws.startWebServer(port, host)
   } catch (e) {

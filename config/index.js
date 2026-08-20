@@ -198,6 +198,53 @@ let cachedConfig = null
 let lastMtime = 0
 let lastParseError = null   // 最近一次 YAML 解析失败信息（给 #ai诊断 展示）
 
+// ————————————————————————————————————————————————————————————
+// 修复 12：配置写入互斥锁（解决"读-改-写"竞态）
+//   - saveConfig 所有写入统一走 __cfgSaveQueue 串行化（防止并发 YAML stringify→write 互相覆盖）
+//   - 提供 modifyConfig(modifier) 原子接口：load→modify→save 三者在同一锁内顺序执行，
+//     调用方不用自己写 load/save，天然不会丢写入（例：#切换模型 + #ai设置apikey 同时触发）
+// ————————————————————————————————————————————————————————————
+let __cfgSaveQueue = Promise.resolve()
+
+function runInSaveQueue(fn) {
+  const next = __cfgSaveQueue.then(() => Promise.resolve().then(fn)).catch((err) => {
+    logger.error && logger.error(`[ai0-plugin] 配置写入队列异常: ${err && err.message || err}`)
+  })
+  __cfgSaveQueue = next
+  return next
+}
+
+export function modifyConfig(modifier, opts = {}) {
+  if (typeof modifier !== 'function') return Promise.resolve({ ok: false, msg: 'modifier 必须是函数' })
+  return runInSaveQueue(async () => {
+    // 强制绕过缓存（确保读到最新文件；若本进程内刚 save 过但另一个进程改了文件，这里不能用旧 cachedConfig）
+    const forceReload = opts.forceReload !== false
+    let prev = null
+    if (forceReload) {
+      // 临时清缓存，保证 loadConfig 从磁盘重读
+      const _cc = cachedConfig
+      const _lm = lastMtime
+      cachedConfig = null
+      lastMtime = 0
+      try {
+        prev = loadConfig()
+      } catch (e) {
+        cachedConfig = _cc
+        lastMtime = _lm
+        throw e
+      }
+    } else {
+      prev = loadConfig()
+    }
+    const next = await modifier(prev || {})
+    if (next === undefined || next === null || typeof next !== 'object') {
+      return { ok: false, msg: 'modifier 未返回新的 config 对象' }
+    }
+    const ok = _saveConfigLocked(next)
+    return { ok, config: next }
+  })
+}
+
 // 以原子方式保存到 config.yaml（与 llm.saveHistory 相同策略：先 tmp→rename，成功后写 .bak）
 function atomicWriteYaml(filePath, content) {
   const dir = path.dirname(filePath)
@@ -212,13 +259,9 @@ function atomicWriteYaml(filePath, content) {
   fs.renameSync(tmp, filePath)
 }
 
-export function setForceLoad(v) {
-  loadConfig.__forceLoad = !!v
-}
-
 export function loadConfig() {
-  // #ai重载 可强制绕过 mtime 缓存（用 setForceLoad 设置，避免引用 ESM 模块内不存在的 cfg 标识符）
-  const force = !!loadConfig.__forceLoad
+  // #ai重载 可强制绕过 mtime 缓存
+  const force = !!loadConfig.__forceLoad || !!cfg.__forceLoad
   if (!force && cachedConfig && fs.existsSync(USER_CONFIG)) {
     try {
       const mtime = fs.statSync(USER_CONFIG).mtimeMs
@@ -272,7 +315,11 @@ export function getLastConfigError() {
   return lastParseError
 }
 
-export function saveConfig(config) {
+/**
+ * 内部不加锁的 save（由 modifyConfig 调用；或外部 saveConfig 通过队列串行后调用）
+ * 不要直接调用此函数，除非你明确自己已经在 cfg.__cfgSaveQueue 内执行。
+ */
+export function _saveConfigLocked(config) {
   try {
     const content = YAML.stringify(config)
     atomicWriteYaml(USER_CONFIG, content)
@@ -284,6 +331,34 @@ export function saveConfig(config) {
     logger.error && logger.error(`[ai0-plugin] 保存配置失败: ${err.message}`)
     return false
   }
+}
+
+/**
+ * 公开的 saveConfig：写入串行化（所有并发写同一个队列排队，防止原子写前 YAML 被并发覆盖）
+ * —— 同步兼容层 ——
+ * 旧代码使用方式：const ok = cfg.saveConfig(obj)（同步拿 bool）。
+ * 我们这里同步返回 true 表示"已接受并排入队列"；真实写入错误会打印到日志。
+ * 对于"读→改→写"一整条链，务必改用 cfg.modifyConfig(() => ...) 保证整条链路原子。
+ */
+export function saveConfig(config) {
+  // 1. 同步做一次 sanity：不能直接把 undefined/null 当配置写
+  if (config === null || config === undefined || typeof config !== 'object') {
+    logger.error && logger.error('[ai0-plugin] saveConfig 收到非法 config（非对象），已拒绝写入')
+    return false
+  }
+  // 2. 入队异步写（不阻塞），错误只打日志
+  runInSaveQueue(() => _saveConfigLocked(config))
+  // 3. 同步返回 true：对外保持签名兼容
+  return true
+}
+
+// ========== 修复 14：真正清理缓存（之前只写了时间戳，什么都没清理） ==========
+export function invalidateCache() {
+  cachedConfig = null
+  lastMtime = 0
+  // 记录一次刷新时间（保留原行为：reload 命令的人能从 __ai0_reload_ts 看最近时间）
+  globalThis.__ai0_reload_ts = Date.now()
+  return true
 }
 
 export function get(key, defaultValue) {

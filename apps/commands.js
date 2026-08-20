@@ -6,6 +6,79 @@ import * as auth from '../src/auth.js'
 import * as llm from '../src/llm.js'
 import * as svgR from '../src/svgRender.js'
 
+/* ---------- 安全辅助：脱敏（修复 5：防止敏感信息明文泄露） ---------- */
+
+/**
+ * QQ 号脱敏：保留前后各 2 位，中间用 *** 代替。
+ * 小于等于4位时全部显示为 ****（防止短号被秒猜）。
+ */
+function maskQq(raw) {
+  if (raw == null) return '(空)'
+  const s = String(raw).trim()
+  if (!s) return '(空)'
+  if (s.length <= 4) return '****'
+  if (s.length <= 6) return s.slice(0, 2) + '***' + s.slice(-2)
+  return s.slice(0, 3) + '****' + s.slice(-2)
+}
+
+/**
+ * URL 脱敏：仅隐藏 query 部分（某些供应商会把临时 token 写在 query）。
+ * 域名/路径保留（诊断本身需要对比 apiBase），但不要裸漏任何看起来像 key/token 的值。
+ */
+function maskUrl(raw) {
+  if (!raw) return '(空)'
+  try {
+    const s = String(raw)
+    const u = new URL(s)
+    // 常见 query 中的敏感参数名 → 直接标成 ***
+    for (const k of ['key', 'api_key', 'apikey', 'token', 'access_token', 'auth', 'secret', 'pwd', 'password']) {
+      if (u.searchParams.has(k)) u.searchParams.set(k, '***')
+    }
+    // 同时对 pathname 里如果出现 sk- 开头的长串（少见但防一手），做替换
+    let pn = u.pathname.replace(/sk-[A-Za-z0-9]{16,}/g, 'sk-***')
+    return u.origin + pn + (u.search ? '?<params已脱敏，不含明文敏感键>' : '')
+  } catch (_) {
+    // 非标准 URL → 仍扫描一下 sk- 前缀替换
+    return String(raw).replace(/sk-[A-Za-z0-9]{16,}/g, 'sk-***')
+  }
+}
+
+/**
+ * 网页后台信息群聊 vs 私聊的处理：
+ *  - 私聊（groupId 为空/false）：不改动，主人自己看得清楚
+ *  - 群聊（groupId 为真）：把"可访问地址清单"这一小节的具体条目折叠成一行提示，
+ *    防止在群聊里把所有 LAN/WAN IP 连同端口明文直接暴露给所有人看（修复 5）。
+ */
+function maskWebLinesForGroup(webLinesText, isGroup) {
+  if (!isGroup) return webLinesText
+  if (!webLinesText) return ''
+  const lines = String(webLinesText).split('\n')
+  const out = []
+  let inUrls = false
+  for (const line of lines) {
+    if (inUrls) {
+      // 一直吞掉以 4 空格 + "- http" 开头的行（也就是具体 URL 列表）
+      if (/^\s{2,}-\s+https?:\/\//i.test(line) || /^\s{4,}http/i.test(line)) continue
+      inUrls = false
+    }
+    if (/可访问地址（\d+ 个）/.test(line)) {
+      inUrls = true
+      out.push(line)
+      out.push('    · <已折叠：详情请私聊发送 #ai诊断 或 在 #ai网页管理 里获取>')
+      continue
+    }
+    out.push(line)
+  }
+  return out.join('\n')
+}
+
+/**
+ * 模型名规范化（修复 13）：统一委托 helper.normalizeModelName，防止
+ * YAML 注入或后续 SVG 渲染时换行导致脏数据写入配置。
+ *   commands.js / webServer.js / switchModel 等位置共用同一套实现。
+ */
+const normalizeModelName = (raw, maxLen = 128) => helper.normalizeModelName(raw, maxLen)
+
 export class AICommands extends plugin {
   constructor() {
     super({
@@ -77,17 +150,17 @@ export class AICommands extends plugin {
         {
           reg: '^#ai(诊断|debug|检查)$',
           fnc: 'diagnose',
-          permission: 'all'
+          permission: 'master'
         },
         {
           reg: '^#ai(群诊断|检查群|群检查)$',
           fnc: 'groupDiagnose',
-          permission: 'all'
+          permission: 'master'
         },
         {
           reg: '^#ai(测试模型|模型测试|测模型)(\\s+\\S+)?$',
           fnc: 'testModel',
-          permission: 'all'
+          permission: 'master'
         },
         {
           reg: '^#(ai)?(切换模型|切模型|换模型)(\\s+\\S+(\\s+\\S+)?)?$',
@@ -162,9 +235,9 @@ export class AICommands extends plugin {
         '  #ai添加主人 <QQ号>',
         '  #ai重载         重新加载配置文件',
         '',
-        '【诊断命令】',
-        '  #ai诊断         权限/主人/配置/后台检查（任何人可用）',
-        '  #ai测试模型 [key]    测试指定平台的接口',
+        '【诊断命令】（仅主人）',
+        '  #ai诊断         权限/主人/配置/后台检查',
+        '  #ai测试模型 [key]    测试指定平台的接口（会真实调用API）',
         '',
         '💡 详细配置：plugins/ai0-plugin/config/config.yaml'
       ]
@@ -202,13 +275,19 @@ export class AICommands extends plugin {
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置模型\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置模型 <模型ID>')
-    const config = cfg.loadConfig()
-    const def = config.model?.default || 'openai-compatible'
-    if (!config.model) config.model = {}
-    if (!config.model[def]) config.model[def] = {}
-    config.model[def].model = text
-    cfg.saveConfig(config)
-    return this.e.reply(`✅ 已将默认模型ID设置为：${text}`)
+    // ========== 修复 12 & 13：原子写入 modifyConfig + 模型名 normalizeModelName ==========
+    // 规范化：防止换行/dotall 正则导致多行内容落盘（YAML 注入面）
+    const modelName = normalizeModelName(text)
+    if (!modelName) return this.e.reply('❌ 模型ID非法（为空或仅控制字符）')
+    const { ok } = await cfg.modifyConfig((prev) => {
+      const def = prev.model?.default || 'openai-compatible'
+      if (!prev.model) prev.model = {}
+      if (!prev.model[def]) prev.model[def] = {}
+      prev.model[def].model = modelName
+      return prev
+    })
+    if (!ok) return this.e.reply('❌ 保存配置失败，请查看 Yunzai 日志。')
+    return this.e.reply(`✅ 已将默认模型ID设置为：${modelName}`)
   }
 
   async setApiKey() {
@@ -218,12 +297,17 @@ export class AICommands extends plugin {
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置apikey\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置apikey <你的apikey>')
-    const config = cfg.loadConfig()
-    const def = config.model?.default || 'openai-compatible'
-    if (!config.model) config.model = {}
-    if (!config.model[def]) config.model[def] = {}
-    config.model[def].apiKey = text
-    cfg.saveConfig(config)
+    // 防换行/控制字符注入 apikey 字段
+    const cleanKey = String(text).replace(/[\u0000-\u001F\u007F\r\n]/g, '').slice(0, 512)
+    if (!cleanKey) return this.e.reply('❌ apiKey 为空或包含非法字符。')
+    const { ok } = await cfg.modifyConfig((prev) => {
+      const def = prev.model?.default || 'openai-compatible'
+      if (!prev.model) prev.model = {}
+      if (!prev.model[def]) prev.model[def] = {}
+      prev.model[def].apiKey = cleanKey
+      return prev
+    })
+    if (!ok) return this.e.reply('❌ 保存配置失败，请查看 Yunzai 日志。')
     return this.e.reply('✅ API Key 已保存。')
   }
 
@@ -234,13 +318,18 @@ export class AICommands extends plugin {
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置api\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置api <apiBaseURL>')
-    const config = cfg.loadConfig()
-    const def = config.model?.default || 'openai-compatible'
-    if (!config.model) config.model = {}
-    if (!config.model[def]) config.model[def] = {}
-    config.model[def].apiBase = text
-    cfg.saveConfig(config)
-    return this.e.reply(`✅ API Base 已设置为：${text}`)
+    // URL 字段去换行/控制字符，长度截断（防YAML注入）
+    const cleanUrl = String(text).replace(/[\u0000-\u001F\u007F\r\n]/g, '').trim().slice(0, 512)
+    if (!cleanUrl) return this.e.reply('❌ apiBase 为空或包含非法字符。')
+    const { ok } = await cfg.modifyConfig((prev) => {
+      const def = prev.model?.default || 'openai-compatible'
+      if (!prev.model) prev.model = {}
+      if (!prev.model[def]) prev.model[def] = {}
+      prev.model[def].apiBase = cleanUrl
+      return prev
+    })
+    if (!ok) return this.e.reply('❌ 保存配置失败，请查看 Yunzai 日志。')
+    return this.e.reply(`✅ API Base 已设置为：${cleanUrl}`)
   }
 
   async addMaster() {
@@ -250,15 +339,21 @@ export class AICommands extends plugin {
     }
     const match = helper.getMessageText(this.e).match(/^#ai添加主人\s+(\d+)/)
     if (!match) return this.e.reply('用法：#ai添加主人 <QQ号>')
-    const newMaster = match[1]
-    const config = cfg.loadConfig()
-    if (!config.permissions) config.permissions = {}
-    if (!Array.isArray(config.permissions.masters)) config.permissions.masters = []
-    if (config.permissions.masters.map(String).includes(newMaster)) {
-      return this.e.reply('该用户已经是主人。')
-    }
-    config.permissions.masters.push(newMaster)
-    cfg.saveConfig(config)
+    const newMaster = String(match[1])
+    // —— 用闭包捕获"是否已是主人"，不要写临时字段到 config ——
+    let already = false
+    const { ok } = await cfg.modifyConfig((prev) => {
+      if (!prev.permissions) prev.permissions = {}
+      if (!Array.isArray(prev.permissions.masters)) prev.permissions.masters = []
+      if (prev.permissions.masters.map(String).includes(newMaster)) {
+        already = true
+        return prev
+      }
+      prev.permissions.masters.push(newMaster)
+      return prev
+    })
+    if (!ok) return this.e.reply('❌ 保存配置失败，请查看 Yunzai 日志。')
+    if (already) return this.e.reply('该用户已经是主人。')
     return this.e.reply(`✅ 已添加主人：${newMaster}`)
   }
 
@@ -268,11 +363,23 @@ export class AICommands extends plugin {
     if (!helper.isMaster(userId, e)) {
       return e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
-    // 1. 先强制把缓存打失效（无论 mtime 是否变化都重新解析一遍）
-    try { cfg.saveConfig?.(cfg.loadConfig?.() || {}) } catch (_) {}
-    cfg.setForceLoad?.(true)
+
+    // ========== 修复 14：真正清理缓存（而不是只写个时间戳） ==========
+    // 1) 配置文件缓存：清除 cachedConfig/lastMtime，下次 loadConfig 从磁盘重读
+    cfg.invalidateCache?.()
+
+    // 2) chatService 层 session/user/inflight 缓存
+    const cacheReport = { sessionCount: 0, inflightPurged: 0, pageMapCleared: 0 }
+    try {
+      if (typeof chatSvc.invalidateCaches === 'function') {
+        Object.assign(cacheReport, chatSvc.invalidateCaches())
+      }
+    } catch (_) {}
+
+    // 3) 重新加载最新配置（确保后续逻辑用的是最新文件）
+    cfg.__forceLoad = true
     const config = cfg.loadConfig()
-    cfg.setForceLoad?.(false)
+    delete cfg.__forceLoad
 
     // 2. 如果 web 正在运行 → 使用新配置强制重启（host/port 变动会立刻生效；
     //    旧 server 会被关闭并触发 closeAllConnections，避免重启后旧路由持续引用旧闭包造成内存泄漏）
@@ -293,13 +400,11 @@ export class AICommands extends plugin {
       }
     }
 
-    // 3. 给 #ai诊断 加上"上次重载时间"，并顺带清除缓存过大的 LRU 型 Map（防止长期运行无限增长）
-    globalThis.__ai0_reload_ts = Date.now()
-
     // 4. 如果有 YAML 解析错误（坏文件已被降级），明确提示用户
     const lastErr = typeof cfg.getLastConfigError === 'function' ? cfg.getLastConfigError() : null
 
     const parts = ['✅ 配置文件已重新加载。']
+    parts.push(`（已清理缓存：userSession×${cacheReport.sessionCount}，过期inflight×${cacheReport.inflightPurged}，模型翻页×${cacheReport.pageMapCleared}）`)
     if (wasRunning) parts.push('（网页后台已按新配置强制重启，旧连接已清理，无路由/监听器泄漏）')
     if (lastErr) parts.push(`⚠️ 但检测到 YAML 解析错误：${lastErr.msg}\n已自动退回默认/备份模板；请手动检查 ${lastErr.file} 的缩进与格式（常见坑是层级不对齐）。`)
     return e.reply(parts.join('\n'))
@@ -481,6 +586,10 @@ export class AICommands extends plugin {
   async diagnose() {
     const e = this.e
     const userId = helper.getUserId(e)
+    // ========== 修复 5：代码层强制主人校验（双重保险，不依赖 rule 里的 permission 字段） ==========
+    if (!helper.isMaster(userId, e)) {
+      return e.reply('❌ 此命令仅机器人主人可用。\n（普通用户如需排查基础问题，可私聊主人获取有限的基础诊断。）')
+    }
     const groupId = helper.getGroupId(e)
     const sources = helper.listMasterSources()
     const allMasters = helper.listMasters()
@@ -562,17 +671,20 @@ export class AICommands extends plugin {
       `  允许对话 : ${isAllowedNow ? '✅ 通过' : '❌ 被拒绝'}`,
       '',
       '【主人来源】',
-      `  框架全局(Config)：${sources.framework.length ? sources.framework.join(', ') : '(空)'}`,
-      `  插件配置(permissions.masters)：${sources.plugin.length ? sources.plugin.join(', ') : '(空)'}`,
-      `  合并后的主人总数：${allMasters.length}（${allMasters.length ? allMasters.join(', ') : '⚠️ 无主人'}）`,
+      // ========== 修复 5：主人 QQ 号脱敏展示（仅前2+后2位） ==========
+      `  框架全局(Config)：${sources.framework.length ? sources.framework.map(maskQq).join(', ') : '(空)'}`,
+      `  插件配置(permissions.masters)：${sources.plugin.length ? sources.plugin.map(maskQq).join(', ') : '(空)'}`,
+      `  合并后的主人总数：${allMasters.length}（${allMasters.length ? allMasters.map(maskQq).join(', ') : '⚠️ 无主人'}）`,
       '',
       '【模型配置】',
       `  默认模型 key：${modelDefault}`,
       `  状态：${modelStatus.join('、')}`,
-      modelDiag ? `  原始 apiBase ：${modelDiag.rawBase}\n  归一化 apiBase：${modelDiag.normalizedBase}\n  /chat/completions → ${modelDiag.chatUrl}\n  /models          → ${modelDiag.modelsUrl}` : '',
+      // apiBase / URL 也做轻度脱敏（域名保留，路径含 token 的概率较低，但仍统一用脱敏函数）
+      modelDiag ? `  原始 apiBase ：${maskUrl(modelDiag.rawBase)}\n  归一化 apiBase：${maskUrl(modelDiag.normalizedBase)}\n  /chat/completions → ${maskUrl(modelDiag.chatUrl)}\n  /models          → ${maskUrl(modelDiag.modelsUrl)}` : '',
       '',
       '【网页后台】',
-      webLines.join('\n'),
+      // ========== 修复 5：群聊中文案不再直接罗列所有 publicUrls 细节，敏感提示统一收敛 ==========
+      maskWebLinesForGroup(webLines.join('\n'), !!groupId),
       '',
       '💡 Kimi/DeepSeek 等 404 快速处理：',
       '  1) 发送 #ai测试模型  进行一键检测：会打 /models 探测 + /chat/completions 真实请求并把最终URL/HTTP状态/响应体都告诉你。',
@@ -605,9 +717,13 @@ export class AICommands extends plugin {
   /** #ai群诊断：输出群+成员接口的原始数据与可用方法清单 */
   async groupDiagnose() {
     const e = this.e
+    // ========== 修复 5：代码层强制主人校验（双重保险） ==========
+    const userId = helper.getUserId(e)
+    if (!helper.isMaster(userId, e)) {
+      return e.reply('❌ 此命令仅机器人主人可用（会输出群接口详细信息，仅限主人自查）。')
+    }
     if (!e.group_id) return e.reply('⚠️ 此命令仅在群聊中可用。')
     const groupId = e.group_id
-    const userId = helper.getUserId(e)
     const bot = global.Bot || global.bot
 
     const lines = ['🩺 AI0-Plugin 群诊断报告', '']
@@ -766,6 +882,11 @@ export class AICommands extends plugin {
 
   async testModel() {
     const e = this.e
+    // ========== 修复 6：代码层强制主人校验（双重保险，防止普通用户无限刷调用浪费主人API配额） ==========
+    const userId = helper.getUserId(e)
+    if (!helper.isMaster(userId, e)) {
+      return e.reply('❌ 此命令仅机器人主人可用（会真实请求 API 消耗配额，非主人禁用）。')
+    }
     const text = helper.getMessageText(e)
     const m = (text || '').match(/^#ai(测试模型|模型测试|测模型)\s*(\S+)?\s*$/)
     const modelKey = (m && m[2]) ? m[2] : null
@@ -865,10 +986,13 @@ export class AICommands extends plugin {
       return e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
     }
     const raw = helper.getMessageText(e)
-    const re = /^#(ai)?(切换模型|切模型|换模型)\s*(.*)?$/s
+    // ========== 修复 13：去掉正则 /s(dotall)，防止多行内容被当作参数吞入 YAML ==========
+    const re = /^#(ai)?(切换模型|切模型|换模型)\s*(.*)?$/
     const m = raw.match(re)
     const argStr = (m && m[3] ? m[3].trim() : '')
-    const args = argStr.split(/\s+/).filter(Boolean)
+    // 参数分行：只用第一行作解析（防止第二行/后续行夹带注入）
+    const safeArgStr = argStr.split(/\r?\n/)[0] || ''
+    const args = safeArgStr.split(/\s+/).filter(Boolean)
 
     const config = cfg.loadConfig()
     const modelCfg = config.model || {}
@@ -951,21 +1075,34 @@ export class AICommands extends plugin {
     }))
 
     // 读取用户上次查看页码（每个用户独立保存，临时 Map，重启失效）
+    // ========== 修复 14：页码 Map 加 TTL（2 小时自动过期，防止长期运行无限增长） ==========
     const PAGE_SESSION_KEY = '__switch_model_page'
+    const PAGE_TTL_MS = 2 * 60 * 60 * 1000   // 2小时
     if (!globalThis[PAGE_SESSION_KEY]) globalThis[PAGE_SESSION_KEY] = new Map()
     const pageStore = globalThis[PAGE_SESSION_KEY]
+    // 每次访问时做一次 TTL 清扫（低成本；如果 Map 巨大可降频，但上限是「总用户数」）
+    try {
+      const nowTs = Date.now()
+      for (const [k, v] of [...pageStore]) {
+        const ts = (v && typeof v === 'object' && typeof v.ts === 'number') ? v.ts : 0
+        if (nowTs - ts > PAGE_TTL_MS) pageStore.delete(k)
+      }
+    } catch (_) {}
     const totalPages = svgR.countPages?.(providerData) ?? 1
     let currentPage = 1
     try {
-      if (pageNav === 'prev') currentPage = (pageStore.get(userId) || 1) - 1
-      else if (pageNav === 'next') currentPage = (pageStore.get(userId) || 1) + 1
+      const prev = pageStore.get(userId)
+      const prevPage = (prev && typeof prev === 'object' && typeof prev.page === 'number') ? prev.page : (typeof prev === 'number' ? prev : 1)
+      if (pageNav === 'prev') currentPage = prevPage - 1
+      else if (pageNav === 'next') currentPage = prevPage + 1
       else if (typeof pageNav === 'number') currentPage = pageNav
       currentPage = Math.max(1, Math.min(currentPage, totalPages))
     } catch (_) { currentPage = 1 }
 
     // ---------- 无参数 / 翻页：列出（图片版，支持分页） ----------
     if ((!targetModel && !switchDefaultOnly) || pageNav) {
-      pageStore.set(userId, currentPage)
+      // 存入：{ page, 写入时间戳 }
+      pageStore.set(userId, { page: currentPage, ts: Date.now() })
       try {
         const { svgPath, pageNum, totalPages: actualTotal, hasPrev, hasNext } = svgR.renderModelListPages(providerData, currentPage)
         // 清理旧临时文件
@@ -1022,21 +1159,30 @@ export class AICommands extends plugin {
 
     // ---------- 仅切换默认平台（不改模型） ----------
     if (switchDefaultOnly && targetKey) {
-      const config2 = cfg.loadConfig()
-      if (!config2.model) config2.model = {}
-      const oldDefault = config2.model.default || defaultKey
-      if (oldDefault === targetKey) {
-        return e.reply(`ℹ️ 默认平台已经是 ${targetKey}，无需切换。`)
+      // ========== 修复 12 & 13：平台名白名单 + 原子写入 modifyConfig ==========
+      if (!providerKeys.includes(targetKey)) {
+        return e.reply(`❌ 平台 ${targetKey} 不在已配置 provider 列表中，拒绝写入。`)
       }
-      config2.model.default = targetKey
-      const ok = cfg.saveConfig(config2)
+      let noChange = false
+      let newModel = ''
+      const { ok } = await cfg.modifyConfig((prev) => {
+        if (!prev.model) prev.model = {}
+        const oldDefault = prev.model.default || defaultKey
+        if (oldDefault === targetKey) {
+          noChange = true
+          return prev
+        }
+        prev.model.default = targetKey
+        newModel = prev.model?.[targetKey]?.model || '(未设置)'
+        return prev
+      })
       if (!ok) return e.reply(`❌ 保存配置失败，请查看 Yunzai 日志。`)
-      const newModel = config2.model[targetKey]?.model || '(未设置)'
+      if (noChange) return e.reply(`ℹ️ 默认平台已经是 ${targetKey}，无需切换。`)
       return e.reply([
         `✅ 默认平台已切换`,
-        `  原默认平台：${oldDefault}`,
+        `  原默认平台：${defaultKey}`,
         `  新默认平台：${targetKey}`,
-        `  当前使用模型：${newModel}`,
+        `  当前使用模型：${newModel || '(未设置)'}`,
         ``,
         `💡 上下文不会自动重置，需要新会话可发送 "#ai新会话"。`
       ].join('\n'))
@@ -1048,6 +1194,10 @@ export class AICommands extends plugin {
 
     // 情况 A：显式指定了 provider key
     if (targetKey) {
+      // 平台 key 白名单（防止注入任意 key）
+      if (!providerKeys.includes(targetKey)) {
+        return e.reply(`❌ 平台 ${targetKey} 不在已配置 provider 列表中。`)
+      }
       finalKey = targetKey
       if (/^\d+$/.test(targetModel)) {
         const n = parseInt(targetModel, 10)
@@ -1057,7 +1207,6 @@ export class AICommands extends plugin {
         finalModel = list[n - 1]
       } else {
         finalModel = targetModel
-        // 在指定平台列表里做大小写归一化匹配
         const list = providerModels[finalKey]?.models || []
         if (list.length && !list.includes(finalModel)) {
           const ci = list.find(id => id.toLowerCase() === finalModel.toLowerCase())
@@ -1102,11 +1251,8 @@ export class AICommands extends plugin {
       const lower = targetModel.toLowerCase()
       for (const key of providerKeys) {
         const list = providerModels[key]?.models || []
-        // 1. 精确
         let found = list.find(id => id === targetModel)
-        // 2. 大小写不敏感
         if (!found) found = list.find(id => id.toLowerCase() === lower)
-        // 3. 包含
         if (!found) found = list.find(id => id.toLowerCase().includes(lower))
         if (found) {
           finalKey = key
@@ -1115,29 +1261,47 @@ export class AICommands extends plugin {
         }
       }
       if (!finalKey) {
-        // 没在任何平台找到 → 当模型ID处理，落到默认平台
+        // 没找到 → 当自定义模型 ID 写入默认平台（依然要规范化和白名单平台）
         finalKey = defaultKey
         finalModel = targetModel
+        if (!providerKeys.includes(finalKey)) {
+          return e.reply(`❌ 默认平台 ${finalKey} 不在已配置 provider 列表中，请先检查配置。`)
+        }
       }
     }
 
-    // 写入配置
-    const config2 = cfg.loadConfig()
-    if (!config2.model) config2.model = {}
-    if (!config2.model[finalKey]) config2.model[finalKey] = {}
-    const before = String(config2.model[finalKey].model || '')
-    const oldDefault = config2.model.default || defaultKey
-    config2.model[finalKey].model = finalModel
-    // 切换到非默认平台时，自动把 default 指向新平台（让用户立即用上新模型）
-    if (finalKey !== oldDefault) {
-      config2.model.default = finalKey
+    // ========== 修复 13：finalKey/finalModel 最终合法性与规范化 ==========
+    if (!finalKey || !providerKeys.includes(finalKey)) {
+      return e.reply(`❌ 目标平台为空或不合法，拒绝写入。`)
     }
-    const ok = cfg.saveConfig(config2)
+    finalModel = normalizeModelName(finalModel)
+    if (!finalModel) {
+      return e.reply(`❌ 目标模型名为空或仅包含非法字符，拒绝写入。`)
+    }
+
+    // ========== 修复 12：最后写入走原子 modifyConfig（闭包保存 before/oldDefault，不写临时字段到 config） ==========
+    let before = ''
+    let oldDefaultVal = ''
+    let newDefaultVal = ''
+    const { ok } = await cfg.modifyConfig((prev) => {
+      if (!prev.model) prev.model = {}
+      if (!prev.model[finalKey]) prev.model[finalKey] = {}
+      oldDefaultVal = prev.model.default || defaultKey
+      newDefaultVal = oldDefaultVal
+      before = String(prev.model[finalKey].model || '')
+      prev.model[finalKey].model = finalModel
+      // 切换到非默认平台时，自动把 default 指向新平台（让用户立即用上新模型）
+      if (finalKey !== oldDefaultVal) {
+        prev.model.default = finalKey
+        newDefaultVal = finalKey
+      }
+      return prev
+    })
     if (!ok) return e.reply(`❌ 保存配置失败，请查看 Yunzai 日志。`)
 
     const lines = [
       `✅ 模型切换完成`,
-      `  平台：${finalKey}${finalKey !== oldDefault ? `（默认平台已由 ${oldDefault} 切到 ${finalKey}）` : ''}`,
+      `  平台：${finalKey}${finalKey !== oldDefaultVal ? `（默认平台已由 ${oldDefaultVal} 切到 ${newDefaultVal || finalKey}）` : ''}`,
       `  原模型：${before || '(未设置)'}`,
       `  新模型：${finalModel}`,
       ``

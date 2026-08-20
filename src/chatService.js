@@ -355,9 +355,9 @@ export async function handleChat(e) {
     const sendHint = () => {
       try {
         if (isGroup && e.group_id) {
-          (e.bot || Bot).pickGroup?.(e.group_id)?.sendMsg?.('我正在思考中...')?.catch?.(() => {})
+          (e.bot || Bot).pickGroup?.(e.group_id).sendMsg?.('我正在思考中...').catch(() => {})
         } else if (userId) {
-          (e.bot || Bot).pickFriend?.(userId)?.sendMsg?.('我正在思考中...')?.catch?.(() => {})
+          (e.bot || Bot).pickFriend?.(userId).sendMsg?.('我正在思考中...').catch(() => {})
         }
       } catch {}
     }
@@ -484,7 +484,28 @@ export async function handleChat(e) {
     // 群聊且开启了群操作，解析AI回复中的群操作指令并执行
     if (isGroup && groupContext) {
       try {
-        const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId, e)
+        // ========== 修复 8：构造请求上下文并传递给 parseAndExecuteActions ==========
+        // 架构级强制：所有群操作都必须校验请求者身份（不再依赖 prompt 里的文字规则）
+        // 同时把消息中真实 @ 的目标一起传进去，做"动作目标必须等于被@的人"绑定校验
+        const atTargets = []
+        if (Array.isArray(e?.message)) {
+          const botUin = String(e.self_id ?? (global.Bot || global.bot)?.uin ?? (global.Bot || global.bot)?.self_id ?? '')
+          for (const seg of e.message) {
+            if (seg?.type === 'at' && seg.qq) {
+              const uid = String(seg.qq)
+              if (uid && uid !== botUin) atTargets.push(uid)
+            }
+          }
+        }
+        const parseCtx = {
+          requesterUid: userId,
+          requesterIsMaster: helper.isMaster(userId, e),
+          requesterInfo: null,   // parseAndExecuteActions 内部会兜底查询
+          atTargets,
+          e,
+          onlyAtBind: true       // 群操作目标必须与 @ 的目标一致（防注入任意QQ）
+        }
+        const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId, parseCtx)
         replyText = cleanText
         if (results.length) {
           const actionReport = results.map(r =>
@@ -583,4 +604,37 @@ async function parseAndExecuteImageAction(replyText) {
   }
 
   return { cleanText, ok: true, imageBuffer }
+}
+
+// ========== 修复 14：#ai重载 时真正清理 LRU 缓存 ==========
+// 之前 reloadConfig 只写了 globalThis.__ai0_reload_ts 时间戳，什么都没清。
+// 现在暴露 invalidateCaches()，由 commands.js 的 #ai重载 显式调用。
+export function invalidateCaches({ keepInflightMs = 5 * 60 * 1000 } = {}) {
+  // 1) 清 userSession：强制所有用户下次对话开启新会话（立即生效新配置）
+  const sessionCount = userSession.size
+  userSession.clear()
+
+  // 2) 清 inflightChat：超过 keepInflightMs 的老请求一律视为泄漏，直接取消并移除
+  let inflightPurged = 0
+  const now = Date.now()
+  for (const [k, v] of [...inflightChat]) {
+    const age = now - (v?.at || 0)
+    if (age >= keepInflightMs) {
+      try { v?.controller?.abort?.('config-reload-purge') } catch (_) {}
+      inflightChat.delete(k)
+      inflightPurged++
+    }
+  }
+
+  // 3) 清 #切换模型 页码 Map（全局 TTL 过期+全量兜底）
+  let pageMapCleared = 0
+  try {
+    const k = '__switch_model_page'
+    if (globalThis[k] && globalThis[k] instanceof Map) {
+      pageMapCleared = globalThis[k].size
+      globalThis[k].clear()
+    }
+  } catch (_) {}
+
+  return { sessionCount, inflightPurged, pageMapCleared }
 }
