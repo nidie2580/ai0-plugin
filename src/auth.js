@@ -120,7 +120,8 @@ export function generateMagicLink() {
 }
 
 /** 校验 magic link 是否有效。默认绑定首次访问 IP：链接被转发到其他 IP 后无法再使用。
- *  校验通过并不会消费链接，调用方应在成功发放 session 后调用 consumeMagicLink(token)。
+ *  校验通过后立即标记为已消费（原子操作），消除 verify→consume 之间的竞态窗口。
+ *  若后续 session 发放失败，调用方应调用 rollbackMagicLink(token) 回滚。
  *  @returns {ok, msg?, boundIp?}
  */
 export function verifyMagicLink(token, clientIp = 'unknown') {
@@ -144,21 +145,31 @@ export function verifyMagicLink(token, clientIp = 'unknown') {
       return { ok: false, msg: '该链接已绑定其他 IP，请通过生成链接时的 IP 访问' }
     }
   }
+  // 原子标记为已消费，消除竞态窗口
+  rec.used = true
   return { ok: true, boundIp: rec.ip }
 }
 
-/** 消费（作废）一个 magic link。成功发放 session 后调用。 */
+/** 回滚 magic link 消费（session 发放失败时调用） */
+export function rollbackMagicLink(token) {
+  const rec = MAGIC_LINKS.get(token)
+  if (rec) { rec.used = false }
+}
+
+/** 清理已消费的 magic link 记录 */
 export function consumeMagicLink(token) {
   return MAGIC_LINKS.delete(token)
 }
 
 export function issueSession() {
   const token = randomId(48)
+  const csrf = randomId(32)
   tokens.set(token, {
     expireAt: Date.now() + AUTH_CFG.tokenExpireMs,
     createdAt: Date.now(),
+    csrf,
   })
-  return token
+  return { token, csrf }
 }
 
 export function verifySession(token) {
@@ -171,6 +182,14 @@ export function verifySession(token) {
   }
   rec.expireAt = Date.now() + AUTH_CFG.tokenExpireMs
   return true
+}
+
+/** 获取 session 关联的 CSRF token（用于 double-submit 校验） */
+export function getSessionCsrf(token) {
+  if (!token) return null
+  const rec = tokens.get(token)
+  if (!rec) return null
+  return rec.csrf || null
 }
 
 export function destroySession(token) {

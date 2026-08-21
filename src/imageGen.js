@@ -73,6 +73,9 @@ export async function generateImage(prompt, opts = {}) {
 
   const base = normalizeApiBase(ic.apiBase)
   const endpoint = `${base}/images/generations`
+  if (!isAllowedOutboundUrl(endpoint)) {
+    return { ok: false, error: 'apiBase URL 未通过安全校验（禁止访问私有/回环/链路本地地址）' }
+  }
   const model = opts.model || ic.model || 'dall-e-3'
   const size = opts.size || ic.defaultSize || '1024x1024'
   const quality = opts.quality || ic.quality || 'standard'

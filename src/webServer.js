@@ -126,18 +126,39 @@ function requireAuth(req, res, next) {
   next()
 }
 
+function requireCsrf(req, res, next) {
+  const sessionToken = req.cookies?.ai0_session || req.headers['x-ai0-session']
+  const csrfCookie = req.cookies?.ai0_csrf
+  const csrfHeader = req.headers['x-csrf-token']
+  if (!csrfCookie || !csrfHeader || csrfCookie !== csrfHeader) {
+    return res.status(403).json({ ok: false, msg: 'CSRF 校验失败' })
+  }
+  const storedCsrf = auth.getSessionCsrf(sessionToken)
+  if (!storedCsrf || storedCsrf !== csrfCookie) {
+    return res.status(403).json({ ok: false, msg: 'CSRF token 无效' })
+  }
+  next()
+}
+
 export function createApp() {
   const app = express()
   app.use(cookieParser())
   app.use(express.json({ limit: '10mb' }))
   app.use(express.urlencoded({ extended: true }))
 
-  // —— 安全响应头（防御 XSS、Clickjacking、MIME 嗅探等）
+  // —— 安全响应头（统一合并，防御 XSS、Clickjacking、MIME 嗅探等）
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('X-Frame-Options', 'DENY')
     res.setHeader('Referrer-Policy', 'no-referrer')
     res.setHeader('X-XSS-Protection', '0')
+    res.removeHeader('X-Powered-By')
+    // HSTS: 仅在 HTTPS 时启用，强制浏览器使用 HTTPS
+    if (req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+    }
+    // 基础 CSP：限制资源来源，防止内联脚本注入
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'")
     next()
   })
 
@@ -215,15 +236,6 @@ export function createApp() {
     next()
   })
 
-  // 全局基础安全头
-  app.use((req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff')
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN')
-    res.setHeader('Referrer-Policy', 'no-referrer')
-    res.removeHeader('X-Powered-By')
-    next()
-  })
-
   // 首页 / 静态资源
   app.get('/', (req, res) => {
     const token = req.cookies?.ai0_session
@@ -237,18 +249,34 @@ export function createApp() {
   app.use('/assets', express.static(path.join(WEB_DIR, 'assets')))
 
   app.get('/magic/:token', (req, res) => {
-    const r = auth.verifyMagicLink(req.params.token, req.clientIp)
+    const token = req.params.token
+    const r = auth.verifyMagicLink(token, req.clientIp)
     if (!r.ok) {
       const f = path.join(WEB_DIR, 'login.html')
       if (fs.existsSync(f)) return res.sendFile(f)
       return res.send('链接无效或已过期')
     }
-    const session = auth.issueSession()
-    auth.consumeMagicLink(req.params.token)
+    // verifyMagicLink 已原子标记为已消费；若 session 发放失败则回滚
+    let session
+    try {
+      session = auth.issueSession()
+    } catch (e) {
+      auth.rollbackMagicLink(token)
+      const f = path.join(WEB_DIR, 'login.html')
+      if (fs.existsSync(f)) return res.sendFile(f)
+      return res.send('登录失败，请重试')
+    }
+    auth.consumeMagicLink(token) // 清理记录
     const secure = req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')
-    res.cookie('ai0_session', session, {
+    res.cookie('ai0_session', session.token, {
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'strict',
+      secure: !!secure,
+      maxAge: auth.AUTH_CFG.tokenExpireMs
+    })
+    res.cookie('ai0_csrf', session.csrf, {
+      httpOnly: false,
+      sameSite: 'strict',
       secure: !!secure,
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
@@ -264,16 +292,22 @@ export function createApp() {
     if (!r.ok) return res.json(r)
     const session = auth.issueSession()
     const secure = req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')
-    res.cookie('ai0_session', session, {
+    res.cookie('ai0_session', session.token, {
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'strict',
+      secure: !!secure,
+      maxAge: auth.AUTH_CFG.tokenExpireMs
+    })
+    res.cookie('ai0_csrf', session.csrf, {
+      httpOnly: false,
+      sameSite: 'strict',
       secure: !!secure,
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     res.json({ ok: true })
   })
 
-  app.post('/api/logout', (req, res) => {
+  app.post('/api/logout', requireCsrf, (req, res) => {
     const t = req.cookies?.ai0_session
     if (t) auth.destroySession(t)
     res.clearCookie('ai0_session')
@@ -352,11 +386,55 @@ export function createApp() {
     res.json({ ok: true, config: safe })
   })
 
-  app.post('/api/config', requireAuth, (req, res) => {
+  app.post('/api/config', requireAuth, requireCsrf, (req, res) => {
     const { config } = req.body || {}
     if (!config || typeof config !== 'object') {
       return res.json({ ok: false, msg: '配置格式错误' })
     }
+
+    // — P0-2: 白名单校验顶层字段 —
+    const ALLOWED_TOP_KEYS = new Set([
+      'model', 'chat', 'groupOps', 'imageGen', 'system', 'permissions', 'response', 'web'
+    ])
+    const unknownKeys = Object.keys(config).filter(k => !ALLOWED_TOP_KEYS.has(k))
+    if (unknownKeys.length) {
+      return res.json({ ok: false, msg: `不允许的配置字段: ${unknownKeys.join(', ')}` })
+    }
+
+    // — P0-2: 禁止通过 API 修改 permissions.masters —
+    if (config.permissions?.masters) {
+      return res.json({ ok: false, msg: '禁止通过 API 修改 permissions.masters，请在 config.yaml 中手动编辑' })
+    }
+
+    // — P0-2: 数值字段范围校验 —
+    const w = config.web
+    if (w) {
+      if (w.port != null && (typeof w.port !== 'number' || w.port < 1 || w.port > 65535)) {
+        return res.json({ ok: false, msg: 'web.port 必须为 1-65535 之间的数字' })
+      }
+    }
+    const chat = config.chat
+    if (chat) {
+      if (chat.contextSize != null && (typeof chat.contextSize !== 'number' || chat.contextSize < 0 || chat.contextSize > 100)) {
+        return res.json({ ok: false, msg: 'chat.contextSize 必须为 0-100 之间的数字' })
+      }
+      if (chat.maxSessionsPerUser != null && (typeof chat.maxSessionsPerUser !== 'number' || chat.maxSessionsPerUser < 1 || chat.maxSessionsPerUser > 50)) {
+        return res.json({ ok: false, msg: 'chat.maxSessionsPerUser 必须为 1-50 之间的数字' })
+      }
+    }
+    const g = config.groupOps
+    if (g) {
+      if (g.defaultMuteDuration != null && (typeof g.defaultMuteDuration !== 'number' || g.defaultMuteDuration < 1 || g.defaultMuteDuration > 2592000)) {
+        return res.json({ ok: false, msg: 'groupOps.defaultMuteDuration 必须为 1-2592000 秒' })
+      }
+    }
+    const img = config.imageGen
+    if (img) {
+      if (img.timeout != null && (typeof img.timeout !== 'number' || img.timeout < 1000 || img.timeout > 600000)) {
+        return res.json({ ok: false, msg: 'imageGen.timeout 必须为 1000-600000 毫秒' })
+      }
+    }
+
     // 把脱敏的 apiKey 还原：收到 **** 时，从原配置读取
     const old = cfg.loadConfig()
     const cleaned = JSON.parse(JSON.stringify(config))
@@ -369,15 +447,30 @@ export function createApp() {
         }
       }
     }
+
+    // — P0-3: 环境变量覆盖的字段不写入配置文件 —
+    const envKeys = cfg.getEnvOverriddenKeys()
+    for (const dotKey of envKeys) {
+      const parts = dotKey.split('.')
+      let target = cleaned
+      for (let i = 0; i < parts.length - 1; i++) {
+        target = target?.[parts[i]]
+      }
+      if (target && typeof target === 'object') {
+        delete target[parts[parts.length - 1]]
+      }
+    }
+
     const ok = cfg.saveConfig(cleaned)
-    res.json({ ok, msg: ok ? '已保存' : '保存失败，查看日志' })
+    const skipped = envKeys.length ? `（已跳过 ${envKeys.length} 个环境变量覆盖字段）` : ''
+    res.json({ ok, msg: ok ? `已保存${skipped}` : '保存失败，查看日志' })
   })
 
   app.get('/api/sessions', requireAuth, (req, res) => {
     res.json({ ok: true, data: listSessions() })
   })
 
-  app.delete('/api/sessions/:userId/:sessionId?', requireAuth, (req, res) => {
+  app.delete('/api/sessions/:userId/:sessionId?', requireAuth, requireCsrf, (req, res) => {
     const { userId, sessionId } = req.params
     if (!isValidUserId(userId)) {
       return res.status(400).json({ ok: false, msg: '非法 userId' })
@@ -398,7 +491,8 @@ export function createApp() {
       }
       res.json({ ok: true })
     } catch (e) {
-      res.json({ ok: false, msg: e.message })
+      logger && logger.error && logger.error(`[ai0-plugin] 会话删除失败: ${e.message}`)
+      res.json({ ok: false, msg: '操作失败，请稍后重试' })
     }
   })
 
@@ -412,7 +506,7 @@ export function createApp() {
   })
 
   // ---- 多 API 平台：探测某 provider 的 /models ----
-  app.post('/api/providers/probe', requireAuth, async (req, res) => {
+  app.post('/api/providers/probe', requireAuth, requireCsrf, async (req, res) => {
     const { modelKey = null } = req.body || {}
     try {
       const t0 = Date.now()
@@ -425,7 +519,7 @@ export function createApp() {
   })
 
   // ---- 多 API 平台：并发探测所有 provider 的 /models ----
-  app.post('/api/providers/probe-all', requireAuth, async (req, res) => {
+  app.post('/api/providers/probe-all', requireAuth, requireCsrf, async (req, res) => {
     try {
       const c = cfg.loadConfig()
       const modelCfg = c.model || {}
@@ -447,16 +541,18 @@ export function createApp() {
             error: info.error || null
           }
         } catch (e) {
-          return { key, ok: false, models: [], latencyMs: Date.now() - t0, error: e.message || String(e) }
+          logger && logger.error && logger.error(`[ai0-plugin] 模型探测失败(${key}): ${e.message}`)
+          return { key, ok: false, models: [], latencyMs: Date.now() - t0, error: '探测失败' }
         }
       }))
       res.json({ ok: true, results })
     } catch (e) {
-      res.json({ ok: false, msg: e.message || String(e) })
+      logger && logger.error && logger.error(`[ai0-plugin] 批量探测失败: ${e.message}`)
+      res.json({ ok: false, msg: '批量探测失败，请稍后重试' })
     }
   })
 
-  app.post('/api/test-model', requireAuth, async (req, res) => {
+  app.post('/api/test-model', requireAuth, requireCsrf, async (req, res) => {
     const { message = '请用一句话介绍你自己', modelKey = null } = req.body || {}
     try {
       // 先探测 /models 并返回归一化后的 url 用于 UI 诊断展示
@@ -485,6 +581,11 @@ export function createApp() {
   })
 
   app.get('/api/server-info', (req, res) => {
+    const sessionToken = req.cookies?.ai0_session || req.headers['x-ai0-session']
+    const authenticated = sessionToken && auth.verifySession(sessionToken)
+    if (!authenticated) {
+      return res.json({ ok: true, info: { running: isRunning() } })
+    }
     res.json({ ok: true, info: getServerInfo() })
   })
 
@@ -500,7 +601,7 @@ export function createApp() {
     res.json({ ok: true, config: safe })
   })
 
-  app.post('/api/image-config', requireAuth, (req, res) => {
+  app.post('/api/image-config', requireAuth, requireCsrf, (req, res) => {
     const { config: ic } = req.body || {}
     if (!ic || typeof ic !== 'object') {
       return res.json({ ok: false, msg: '配置格式错误' })
@@ -524,7 +625,7 @@ export function createApp() {
     res.json({ ok, msg: ok ? '图片配置已保存' : '保存失败' })
   })
 
-  app.post('/api/test-image', requireAuth, async (req, res) => {
+  app.post('/api/test-image', requireAuth, requireCsrf, async (req, res) => {
     const { prompt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') {
       return res.json({ ok: false, msg: '请提供测试提示词' })
@@ -533,7 +634,8 @@ export function createApp() {
       const result = await imageGen.generateImage(prompt)
       res.json(result)
     } catch (err) {
-      res.json({ ok: false, error: err.message })
+      logger && logger.error && logger.error(`[ai0-plugin] 图片生成失败: ${err.message}`)
+      res.json({ ok: false, error: '图片生成失败，请稍后重试' })
     }
   })
 

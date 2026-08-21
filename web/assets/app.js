@@ -13,6 +13,11 @@ async function api(path, { method = 'GET', body, raw = false } = {}) {
     opts.headers['Content-Type'] = 'application/json'
     opts.body = JSON.stringify(body)
   }
+  // CSRF: POST/DELETE 时从 cookie 读取 token 并附带到 header
+  if (method === 'POST' || method === 'DELETE') {
+    const csrf = document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('ai0_csrf='))?.split('=')[1]
+    if (csrf) opts.headers['X-CSRF-Token'] = csrf
+  }
   const r = await fetch(path, opts)
   const text = await r.text()
   let data = {}
@@ -350,8 +355,8 @@ if (route === 'dashboard') {
     $('#aboutInfo').innerHTML = `
       <div class="cmd-box">
 Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
-访问地址：${info.url || '-' }<br>
-绑定 ${info.host || '-'} : ${info.port || '-'}
+访问地址：${escapeHtml(info.url || '-') }<br>
+绑定 ${escapeHtml(info.host || '-')} : ${escapeHtml(String(info.port || '-'))}
       </div>
       <p class="hint">如需长期开启，可在 config.yaml 中配置端口与绑定地址（绑定 0.0.0.0 可局域网访问）。</p>
     `

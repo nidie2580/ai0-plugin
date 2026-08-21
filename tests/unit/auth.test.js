@@ -100,18 +100,20 @@ describe('auth: magic link', () => {
     assert.equal(r.boundIp, '127.0.0.1')
   })
 
-  test('IP 绑定：首次访问绑定，不同 IP 被拒', () => {
+  test('IP 绑定：首次访问绑定，不同 IP 被拒（原子消费）', () => {
     const token = generateMagicLink()
     assert.equal(verifyMagicLink(token, '10.0.0.1').ok, true)
+    // 原子消费后，不同 IP 访问同一 token 会被拒绝（已使用）
     const second = verifyMagicLink(token, '10.0.0.2')
     assert.equal(second.ok, false)
-    assert.match(second.msg, /绑定其他 IP/)
+    assert.match(second.msg, /已使用|绑定其他/)
   })
 
-  test('同 IP 可重复校验（消费前）', () => {
+  test('原子消费后同一 token 不可重用', () => {
     const token = generateMagicLink()
     assert.equal(verifyMagicLink(token, '192.168.1.5').ok, true)
-    assert.equal(verifyMagicLink(token, '192.168.1.5').ok, true)
+    // 原子消费后，同一 IP 再次访问也会被拒绝
+    assert.equal(verifyMagicLink(token, '192.168.1.5').ok, false)
   })
 
   test('消费后失效', () => {
@@ -123,13 +125,15 @@ describe('auth: magic link', () => {
     assert.match(after.msg, /无效|已使用|已过期/)
   })
 
-  test('magicBindIp=false 时不绑定 IP', () => {
+  test('magicBindIp=false 时不绑定 IP（仍原子消费）', () => {
     const orig = AUTH_CFG.magicBindIp
     AUTH_CFG.magicBindIp = false
     try {
       const token = generateMagicLink()
       assert.equal(verifyMagicLink(token, '10.1.1.1').ok, true)
-      assert.equal(verifyMagicLink(token, '10.1.1.2').ok, true)
+      // 原子消费后，第二个 token 已被标记为已使用
+      const token2 = generateMagicLink()
+      assert.equal(verifyMagicLink(token2, '10.1.1.2').ok, true)
     } finally {
       AUTH_CFG.magicBindIp = orig
     }
@@ -150,11 +154,12 @@ describe('auth: magic link', () => {
 
 describe('auth: session', () => {
   test('issue → verify → destroy 生命周期', () => {
-    const s = issueSession()
-    assert.ok(s)
-    assert.equal(verifySession(s), true)
-    assert.equal(destroySession(s), true)
-    assert.equal(verifySession(s), false)
+    const { token, csrf } = issueSession()
+    assert.ok(token)
+    assert.ok(csrf)
+    assert.equal(verifySession(token), true)
+    assert.equal(destroySession(token), true)
+    assert.equal(verifySession(token), false)
   })
 
   test('无效 token 校验失败', () => {

@@ -209,7 +209,7 @@ function atomicWriteYaml(filePath, content) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   const tmp = filePath + `.tmp.${process.pid}.${Date.now()}`
   const bak = filePath + '.bak'
-  fs.writeFileSync(tmp, content, 'utf-8')
+  fs.writeFileSync(tmp, content, 'utf-8', { mode: 0o600 })
   // 存在旧文件 → 先写 .bak
   try {
     if (fs.existsSync(filePath)) fs.copyFileSync(filePath, bak)
@@ -281,23 +281,35 @@ export function loadConfig() {
 //   AI0_IMAGE_API_KEY  → 覆盖图片生成的 apiKey（可选）
 // 返回是否有覆盖发生（供调用方判断是否需要重建缓存）。
 function applyEnvOverrides(parsed) {
+  const overridden = []
   const def = parsed.model && parsed.model.default
   const envLlmKey = process.env.AI0_LLM_API_KEY
   if (def && envLlmKey) {
     const mm = parsed.model[def]
-    if (mm && typeof mm === 'object') mm.apiKey = envLlmKey
+    if (mm && typeof mm === 'object') { mm.apiKey = envLlmKey; overridden.push(`model.${def}.apiKey`) }
   }
   const envLlmBase = process.env.AI0_LLM_API_BASE
   if (def && envLlmBase) {
     const mm = parsed.model[def]
-    if (mm && typeof mm === 'object') mm.apiBase = envLlmBase
+    if (mm && typeof mm === 'object') { mm.apiBase = envLlmBase; overridden.push(`model.${def}.apiBase`) }
   }
   const envImgKey = process.env.AI0_IMAGE_API_KEY
   if (envImgKey) {
     if (!parsed.imageGen || typeof parsed.imageGen !== 'object') parsed.imageGen = {}
-    parsed.imageGen.apiKey = envImgKey
+    parsed.imageGen.apiKey = envImgKey; overridden.push('imageGen.apiKey')
   }
-  return !!(envLlmKey || envLlmBase || envImgKey)
+  return overridden
+}
+
+/** 返回当前被环境变量覆盖的配置字段列表（用于 POST /api/config 写入时跳过） */
+export function getEnvOverriddenKeys() {
+  const keys = []
+  const config = loadConfig()
+  const def = config.model?.default
+  if (def && process.env.AI0_LLM_API_KEY) keys.push(`model.${def}.apiKey`)
+  if (def && process.env.AI0_LLM_API_BASE) keys.push(`model.${def}.apiBase`)
+  if (process.env.AI0_IMAGE_API_KEY) keys.push('imageGen.apiKey')
+  return keys
 }
 
 /** 最近一次配置解析错误（#ai诊断 展示用） */

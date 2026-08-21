@@ -547,6 +547,11 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: false, msg: '未指定目标QQ' })
         continue
       }
+      // P1-4: targetUid 格式校验（5-12位纯数字）
+      if (!/^\d{5,12}$/.test(String(targetUid))) {
+        results.push({ type, ok: false, msg: `目标QQ号格式无效: ${targetUid}` })
+        continue
+      }
 
       // 获取目标信息
       const targetInfo = await getMemberInfo(groupId, targetUid)
@@ -596,6 +601,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
           continue
         }
         await executeKick(groupId, targetUid)
+        logger && logger.info && logger.info(`[ai0-plugin] 群操作: kick 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已踢出 ${targetUid}` })
 
       } else if (type === 'set_admin') {
@@ -612,6 +618,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
           continue
         }
         await executeSetAdmin(groupId, targetUid, true)
+        logger && logger.info && logger.info(`[ai0-plugin] 群操作: set_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已将 ${targetUid} 设为管理员` })
 
       } else if (type === 'remove_admin') {
@@ -632,6 +639,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
           continue
         }
         await executeSetAdmin(groupId, targetUid, false)
+        logger && logger.info && logger.info(`[ai0-plugin] 群操作: remove_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已取消 ${targetUid} 的管理员身份` })
 
       } else if (type === 'set_title') {
@@ -639,7 +647,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
           results.push({ type, ok: false, msg: '头衔功能未启用' })
           continue
         }
-        const titleText = args.slice(1).join(':').trim()
+        const titleText = args.slice(1).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
         if (!titleText) {
           results.push({ type, ok: false, msg: '未指定头衔内容' })
           continue

@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import axios from 'axios'
 import * as cfg from '../config/index.js'
+import { isAllowedOutboundUrl } from './security.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -188,9 +189,8 @@ export function buildEndpoint(base, pathSegment = '/chat/completions') {
 }
 
 function redactKey(key) {
-  if (!key || typeof key !== 'string') return '(空)'
-  if (key.length <= 8) return '****'
-  return `${key.slice(0, 4)}****${key.slice(-4)}`
+  if (!key || typeof key !== 'string' || /^\s*$/.test(key)) return 'apiKey=未设置'
+  return 'apiKey=已设置'
 }
 
 function summarizeAxiosError(err) {
@@ -224,6 +224,9 @@ export async function listAvailableModels({ modelKey = null } = {}) {
   if (!m.apiKey || !m.apiBase) return { ok: false, models: [], error: '未配置 apiBase 或 apiKey' }
   const base = normalizeApiBase(m.apiBase, 'openai')
   const modelsUrl = `${base}/models`
+  if (!isAllowedOutboundUrl(modelsUrl)) {
+    return { ok: false, models: [], error: 'apiBase URL 未通过安全校验（禁止访问私有/回环/链路本地地址）' }
+  }
   try {
     const resp = await axios.get(modelsUrl, {
       headers: {
@@ -283,6 +286,10 @@ export async function chatCompletions(messages, {
   const rawBase = String(m.apiBase || '')
   const normalizedBase = normalizeApiBase(rawBase, 'openai')
   const url = buildEndpoint(normalizedBase, '/chat/completions')
+
+  if (!isAllowedOutboundUrl(url)) {
+    throw new Error('apiBase URL 未通过安全校验（禁止访问私有/回环/链路本地地址）')
+  }
 
   const model = String(m.model || 'gpt-3.5-turbo').trim() || 'gpt-3.5-turbo'
   const body = {
