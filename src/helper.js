@@ -949,3 +949,43 @@ async function readBody(resp, maxBytes) {
   if (!buf || buf.length < 16) return { ok: false, error: '图片为空或过小' }
   return { ok: true, buffer: buf }
 }
+
+/**
+ * API Base URL 归一化：去 query/hash、裁剪误写的端点路径、自动补 /v1
+ * llm.js 和 imageGen.js 共用此函数，避免重复实现
+ */
+export function normalizeApiBase(rawBase) {
+  if (!rawBase || typeof rawBase !== 'string') return ''
+  let base = rawBase.trim()
+  if (!base) return ''
+
+  try {
+    const u = new URL(base)
+    u.search = ''
+    u.hash = ''
+    base = u.toString()
+  } catch (_) {
+    base = base.split('?')[0].split('#')[0]
+  }
+
+  const re = /(.*?)\/?v(\d+(?:[\.-]\w+)*)?\/?(images\/generations|chat\/completions|models|embeddings)?\/?$/i
+  const m = base.match(re)
+  if (m && m[3]) {
+    const host = m[1]
+    const ver = m[2] ? `/v${m[2]}` : ''
+    base = host + ver
+  }
+
+  base = base.replace(/\/+$/, '')
+
+  try {
+    const pu = new URL(base)
+    const pathPart = pu.pathname || '/'
+    const hasVersionOrCustom = /\/v\d/i.test(pathPart) || pathPart.replace(/\/+$/, '').length > 1
+    if (!hasVersionOrCustom) {
+      base = base + '/v1'
+    }
+  } catch (_) {}
+
+  return base
+}

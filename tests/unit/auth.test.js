@@ -167,4 +167,21 @@ describe('auth: session', () => {
     assert.equal(verifySession(''), false)
     assert.equal(verifySession('not-a-token'), false)
   })
+
+  test('issueSession 记录创建 IP', () => {
+    const { token } = issueSession('10.0.0.1')
+    assert.ok(token)
+    // 验证通过（同 IP）
+    assert.equal(verifySession(token, '10.0.0.1'), true)
+  })
+
+  test('verifySession 记录 IP 变更', () => {
+    const { token } = issueSession('10.0.0.1')
+    // 第一次验证（同 IP，无变更）
+    assert.equal(verifySession(token, '10.0.0.1'), true)
+    // 第二次验证（不同 IP，触发变更记录）
+    assert.equal(verifySession(token, '10.0.0.2'), true)
+    // 仍然有效
+    assert.equal(verifySession(token, '10.0.0.3'), true)
+  })
 })

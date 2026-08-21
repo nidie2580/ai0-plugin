@@ -120,7 +120,7 @@ function isValidSessionId(v) {
 
 function requireAuth(req, res, next) {
   const token = req.cookies?.ai0_session || req.headers['x-ai0-session']
-  if (!auth.verifySession(token)) {
+  if (!auth.verifySession(token, req.clientIp)) {
     return res.status(401).json({ ok: false, msg: '未登录或登录已过期' })
   }
   next()
@@ -239,7 +239,7 @@ export function createApp() {
   // 首页 / 静态资源
   app.get('/', (req, res) => {
     const token = req.cookies?.ai0_session
-    const file = auth.verifySession(token)
+    const file = auth.verifySession(token, req.clientIp)
       ? path.join(WEB_DIR, 'dashboard.html')
       : path.join(WEB_DIR, 'login.html')
     if (fs.existsSync(file)) return res.sendFile(file)
@@ -259,7 +259,7 @@ export function createApp() {
     // verifyMagicLink 已原子标记为已消费；若 session 发放失败则回滚
     let session
     try {
-      session = auth.issueSession()
+      session = auth.issueSession(req.clientIp)
     } catch (e) {
       auth.rollbackMagicLink(token)
       const f = path.join(WEB_DIR, 'login.html')
@@ -290,7 +290,7 @@ export function createApp() {
     if (!id) return res.json({ ok: false, msg: '当前没有待验证的验证码，请先在终端生成' })
     const r = auth.verifyCode(id, code, req.clientIp)
     if (!r.ok) return res.json(r)
-    const session = auth.issueSession()
+    const session = auth.issueSession(req.clientIp)
     const secure = req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')
     res.cookie('ai0_session', session.token, {
       httpOnly: true,
@@ -316,14 +316,14 @@ export function createApp() {
 
   app.get('/api/me', (req, res) => {
     const token = req.cookies?.ai0_session
-    res.json({ ok: true, loggedIn: auth.verifySession(token) })
+    res.json({ ok: true, loggedIn: auth.verifySession(token, req.clientIp) })
   })
 
   // 诊断接口：未认证只返回最小化状态（避免向未登录访问者泄露 apiBase/模型名/主人数量/web绑定等配置细节）；
   // 认证后返回完整诊断信息。
   app.get('/api/diag', (req, res) => {
     try {
-      const authed = auth.verifySession(req.cookies?.ai0_session || req.headers['x-ai0-session'])
+      const authed = auth.verifySession(req.cookies?.ai0_session || req.headers['x-ai0-session'], req.clientIp)
       const info = getServerInfo()
       if (!authed) {
         return res.json({
@@ -582,7 +582,7 @@ export function createApp() {
 
   app.get('/api/server-info', (req, res) => {
     const sessionToken = req.cookies?.ai0_session || req.headers['x-ai0-session']
-    const authenticated = sessionToken && auth.verifySession(sessionToken)
+    const authenticated = sessionToken && auth.verifySession(sessionToken, req.clientIp)
     if (!authenticated) {
       return res.json({ ok: true, info: { running: isRunning() } })
     }

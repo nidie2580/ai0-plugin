@@ -161,24 +161,32 @@ export function consumeMagicLink(token) {
   return MAGIC_LINKS.delete(token)
 }
 
-export function issueSession() {
+export function issueSession(createIp = 'unknown') {
   const token = randomId(48)
   const csrf = randomId(32)
   tokens.set(token, {
     expireAt: Date.now() + AUTH_CFG.tokenExpireMs,
     createdAt: Date.now(),
     csrf,
+    createIp,
+    lastIp: createIp,
+    ipChanges: 0,
   })
   return { token, csrf }
 }
 
-export function verifySession(token) {
+export function verifySession(token, currentIp = null) {
   if (!token) return false
   const rec = tokens.get(token)
   if (!rec) return false
   if (Date.now() > rec.expireAt) {
     tokens.delete(token)
     return false
+  }
+  // IP 变更检测：记录变更次数，供审计使用
+  if (currentIp && rec.lastIp && currentIp !== rec.lastIp) {
+    rec.ipChanges = (rec.ipChanges || 0) + 1
+    rec.lastIp = currentIp
   }
   rec.expireAt = Date.now() + AUTH_CFG.tokenExpireMs
   return true

@@ -1,50 +1,12 @@
 import * as cfg from '../config/index.js'
 import { isAllowedOutboundUrl } from './security.js'
+import { normalizeApiBase } from './helper.js'
 
 /**
  * AI0-Plugin 图片生成模块
  * 支持 OpenAI 兼容的 /images/generations 接口
  * 流程：AI 在回复中输出 [action:image:提示词] → 插件调用生图API → 下载图片 → 发送到QQ
  */
-
-/** URL 归一化：和 llm.js 中的逻辑一致，确保 base 格式正确 */
-function normalizeApiBase(rawBase) {
-  if (!rawBase || typeof rawBase !== 'string') return ''
-  let base = rawBase.trim()
-  if (!base) return ''
-
-  try {
-    const u = new URL(base)
-    u.search = ''
-    u.hash = ''
-    base = u.toString()
-  } catch (_) {
-    base = base.split('?')[0].split('#')[0]
-  }
-
-  // 裁剪误写的端点路径
-  const re = /(.*?)\/?v(\d+(?:[\.-]\w+)*)?\/?(images\/generations|chat\/completions|models|embeddings)?\/?$/i
-  const m = base.match(re)
-  if (m && m[3]) {
-    const host = m[1]
-    const ver = m[2] ? `/v${m[2]}` : ''
-    base = host + ver
-  }
-
-  base = base.replace(/\/+$/, '')
-
-  // 自动补全 /v1
-  try {
-    const pu = new URL(base)
-    const pathPart = pu.pathname || '/'
-    const hasVersionOrCustom = /\/v\d/i.test(pathPart) || pathPart.replace(/\/+$/, '').length > 1
-    if (!hasVersionOrCustom) {
-      base = base + '/v1'
-    }
-  } catch (_) {}
-
-  return base
-}
 
 /** 获取图片生成配置 */
 export function getImageGenConfig() {

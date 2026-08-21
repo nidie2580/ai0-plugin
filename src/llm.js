@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import axios from 'axios'
 import * as cfg from '../config/index.js'
 import { isAllowedOutboundUrl } from './security.js'
+import { normalizeApiBase } from './helper.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -139,51 +140,10 @@ export function cleanupOldSessions(userId, maxSessions, timeoutMs) {
   }
 }
 
-// ====== 通用 URL / 请求规范化 ======
-export function normalizeApiBase(rawBase, kind = 'openai') {
-  if (!rawBase || typeof rawBase !== 'string') return ''
-  let base = rawBase.trim()
-  if (!base) return ''
-
-  // 去掉 query/hash
-  try {
-    const u = new URL(base)
-    u.search = ''
-    u.hash = ''
-    base = u.toString()
-  } catch (_) {
-    // 非标准 URL（内网 http://localhost:1234 也可能走到这里），走字符串回退
-    base = base.split('?')[0].split('#')[0]
-  }
-
-  // 若用户误把完整 /chat/completions 或 /v1/chat/completions 写进了 apiBase，裁剪到根（/v1 前缀保留）
-  const re = /(.*?)\/?v(\d+(?:[\.-]\w+)*)?\/?(chat\/completions|models|embeddings)?\/?$/i
-  const m = base.match(re)
-  if (m && m[3]) {
-    const host = m[1]
-    const ver = m[2] ? `/v${m[2]}` : ''
-    base = host + ver
-  }
-
-  // 再次标准化：去掉所有尾部 /，统一不要尾巴
-  base = base.replace(/\/+$/, '')
-
-  // 一些服务商（Kimi/DeepSeek/OpenAI 等）公开接口都要求带 /v1。如果用户写了裸域名（https://xxx.cn），就自动补 /v1，避免 404。
-  // 但如果已经有版本号（/v1 /v2 /v3 /v4 等）或包含 /openai /ollama 等自定义路径段，就不补。
-  try {
-    const pu = new URL(base)
-    const pathPart = pu.pathname || '/'
-    const hasVersionOrCustom = /\/v\d/i.test(pathPart) || pathPart.replace(/\/+$/, '').length > 1
-    if (!hasVersionOrCustom) {
-      base = base + '/v1'
-    }
-  } catch (_) {}
-
-  return base
-}
+// ====== 通用 URL / 请求规范化（normalizeApiBase 已提取到 helper.js） ======
 
 export function buildEndpoint(base, pathSegment = '/chat/completions') {
-  const b = normalizeApiBase(base, 'openai').replace(/\/+$/, '')
+  const b = normalizeApiBase(base).replace(/\/+$/, '')
   const seg = pathSegment.startsWith('/') ? pathSegment : `/${pathSegment}`
   return b + seg
 }
