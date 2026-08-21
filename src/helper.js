@@ -130,8 +130,23 @@ export function getGroupId(e) {
   return e?.group_id ?? e?.message?.group_id ?? e?.from_group ?? null
 }
 
+/**
+ * 将 e.message 归一化为段数组（兼容 XRK-Yunzai 部分适配器将 e.message 作为纯字符串的情况）
+ */
+export function normalizeMessage(e) {
+  if (Array.isArray(e.message)) return e
+  if (typeof e.message === 'string') {
+    e.message = [{ type: 'text', text: e.message }]
+  }
+  return e
+}
+
+/**
+ * 获取消息文本（兼容数组和字符串两种格式）
+ */
 export function getMessageText(e) {
   if (!e.message) return ''
+  if (typeof e.message === 'string') return e.message.trim()
   let text = ''
   for (const seg of e.message) {
     if (seg.type === 'text') text += (seg.text || '')
@@ -142,6 +157,7 @@ export function getMessageText(e) {
 export function isAtBot(e) {
   if (!e.message || !e.self_id) return false
   const selfId = String(e.self_id)
+  if (typeof e.message === 'string') return false
   for (const seg of e.message) {
     if (seg.type === 'at' && String(seg.qq) === selfId) return true
   }

@@ -234,6 +234,7 @@ async function sendOnlyAtDefaultReply(e, config) {
 }
 
 export async function handleChat(e) {
+  helper.normalizeMessage(e)
   const userId = helper.getUserId(e)
   const groupId = helper.getGroupId(e)
   const text = helper.getMessageText(e)
