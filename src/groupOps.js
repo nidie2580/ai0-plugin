@@ -17,6 +17,35 @@ import { safeLogger } from './globals.js'
  *  3) AI 回复后，chatService 调用 parseAndExecuteActions() 解析回复中的动作标签并执行
  */
 
+// 自定义头衔请求限流：用户ID -> [timestamp1, timestamp2, ...]
+const customTitleRateLimit = new Map()
+const CUSTOM_TITLE_RATE_LIMIT_WINDOW = 15 * 60 * 1000 // 15分钟
+const CUSTOM_TITLE_RATE_LIMIT_MAX = 3 // 最大请求次数
+
+/**
+ * 检查用户自定义头衔请求是否超过限流
+ * @param {string} userId - 用户ID
+ * @returns {{ok: boolean, reason?: string}}
+ */
+function checkCustomTitleRateLimit(userId) {
+  const now = Date.now()
+  const userRequests = customTitleRateLimit.get(userId) || []
+
+  // 清理过期的请求记录
+  const validRequests = userRequests.filter(ts => now - ts < CUSTOM_TITLE_RATE_LIMIT_WINDOW)
+  customTitleRateLimit.set(userId, validRequests)
+
+  if (validRequests.length >= CUSTOM_TITLE_RATE_LIMIT_MAX) {
+    return { ok: false, reason: '次数有点多，不要恶搞哦，15分钟后再试' }
+  }
+
+  // 记录本次请求
+  validRequests.push(now)
+  customTitleRateLimit.set(userId, validRequests)
+
+  return { ok: true }
+}
+
 /** 获取群成员信息（role: owner/admin/member）
  *  尝试多种适配器实现，兼容 XRK-Yunzai + NapCat/LLOneBot/ICQQ/QSign 等不同后端
  */
@@ -499,7 +528,7 @@ export async function buildGroupContext(e) {
     lines.push('  - 黑名单：拉黑/解除拉黑群成员。需要请求者是群主/管理员/机器人主人。')
   }
   if (allowCustomTitle && botInferred === 'owner') {
-    lines.push('  - 自定义头衔：用户只能给自己设置自定义头衔（目标必须等于发送者）。机器人必须是群主。')
+    lines.push('  - 自定义头衔：普通用户只能给自己设置，管理员可以给他人设置。机器人必须是群主。15分钟内最多3次请求。')
   }
   if (allowLevelTitle && botInferred === 'owner') {
     lines.push('  - 等级头衔：根据等级自定义头衔。需要请求者是群主/管理员/机器人主人，机器人必须是群主。')
@@ -600,10 +629,15 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
       return { ok: false, reason: '仅机器人主人/群主可执行此操作' }
     }
   } else if (type === 'custom_title') {
-    // 自定义头衔：用户只能给自己设置（targetUid 必须等于 requesterUid）
+    // 自定义头衔：普通用户只能给自己设置，管理员可以给他人设置
     const isSelf = String(targetUid) === String(requesterUid)
-    if (!isSelf) {
+    if (!isSelf && !requesterElevated) {
       return { ok: false, reason: '自定义头衔只能给自己设置，不能给他人设置' }
+    }
+    // 限流检查
+    const rateLimitResult = checkCustomTitleRateLimit(String(requesterUid))
+    if (!rateLimitResult.ok) {
+      return { ok: false, reason: rateLimitResult.reason }
     }
   } else if (type === 'level_title') {
     // 等级头衔：需要 elevated 权限
@@ -865,8 +899,9 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: true, msg: action === 'add' ? `已将 ${targetUid} 加入黑名单` : `已将 ${targetUid} 移出黑名单` })
 
       } else if (type === 'custom_title') {
-        // 自定义头衔：用户只能给自己设置（targetUid 必须等于 requesterUid）
-        if (String(targetUid) !== String(requesterUid)) {
+        // 自定义头衔：普通用户只能给自己设置，管理员可以给他人设置
+        const isSelf = String(targetUid) === String(requesterUid)
+        if (!isSelf && !requesterElevated) {
           results.push({ type, ok: false, msg: '自定义头衔只能给自己设置，不能给他人设置' }); continue
         }
         const titleText = args.slice(1).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
@@ -878,7 +913,8 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         }
         await executeCustomTitle(groupId, targetUid, titleText)
         safeLogger.info(`[ai0-plugin] 群操作: custom_title 群${groupId} 目标${targetUid} 头衔${titleText} 请求者${requesterUid}`)
-        results.push({ type, ok: true, msg: `已为您设置自定义头衔：${titleText}` })
+        const msg = isSelf ? `已为您设置自定义头衔：${titleText}` : `已为 ${targetUid} 设置自定义头衔：${titleText}`
+        results.push({ type, ok: true, msg })
 
       } else if (type === 'level_title') {
         // 等级头衔：根据等级自定义
