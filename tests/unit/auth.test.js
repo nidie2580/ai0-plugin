@@ -15,17 +15,17 @@ import {
 } from '../../src/auth.js'
 
 describe('auth: 验证码 (terminal code)', () => {
-  test('生成 6 位数字验证码并正确校验', () => {
+  test('生成 16 位字母数字验证码并正确校验', () => {
     const { id, code } = generateTerminalCode()
     assert.ok(id)
-    assert.match(String(code), /^\d{6}$/)
+    assert.match(String(code), /^[A-Za-z0-9]{16}$/)
     const r = verifyCode(id, code, '127.0.0.1')
     assert.equal(r.ok, true)
   })
 
   test('错误验证码被拒绝', () => {
     const { id } = generateTerminalCode()
-    const r = verifyCode(id, '000000', '127.0.0.2')
+    const r = verifyCode(id, 'wrongcode1234567', '127.0.0.2')
     assert.equal(r.ok, false)
     assert.match(r.msg, /错误/)
   })

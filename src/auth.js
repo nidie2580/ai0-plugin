@@ -30,6 +30,13 @@ function randomDigits(len = 6) {
   return s
 }
 
+const ALPHANUM_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+function randomAlphanumeric(len = 16) {
+  let s = ''
+  for (let i = 0; i < len; i++) s += ALPHANUM_CHARS[crypto.randomInt(ALPHANUM_CHARS.length)]
+  return s
+}
+
 function cleanup() {
   const now = Date.now()
   for (const [k, v] of tokens) if (v.expireAt < now) tokens.delete(k)
@@ -60,13 +67,13 @@ export function checkRateLimit(scope, id, maxAttempts = AUTH_CFG.rateMaxAttempts
 
 export function generateTerminalCode() {
   cleanup()
-  const code = randomDigits(6)
+  const code = randomAlphanumeric(16)
   const id = randomId(16)
   codes.set(id, {
     code,
     expireAt: Date.now() + AUTH_CFG.codeExpireMs,
     used: false,
-    failCount: 0,     // 单 id 错误次数上限（防止错一次就拉黑整个IP导致正常用户被锁）
+    failCount: 0,
   })
   const logLine = `[ai0-plugin] ===== 网页管理验证码：${code} ===== (5分钟内有效)`
   if (typeof logger !== 'undefined') {

@@ -42,7 +42,7 @@ if (route === 'login') {
   const input = $('#codeInput')
   const err = $('#err')
   input?.addEventListener('input', () => {
-    input.value = input.value.replace(/\D/g, '').slice(0, 6)
+    input.value = input.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)
     err.textContent = ''
   })
   input?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
