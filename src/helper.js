@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { safeLogger } from './globals.js'
 import { isAllowedOutboundUrl } from './security.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -820,7 +821,7 @@ export async function getImageSegment(src) {
       const ext = m[1] ? '.' + (m[1].split('+')[0].replace('jpeg', 'jpg')) : '.img'
       const buf = Buffer.from(m[2], 'base64')
       if (buf.length > 20 * 1024 * 1024) {
-        logger && logger.warn && logger.warn(`[ai0-plugin] data:URL 图片过大(${Math.round(buf.length / 1024 / 1024)}MB)，已拒绝`)
+        safeLogger.warn && logger.warn(`[ai0-plugin] data:URL 图片过大(${Math.round(buf.length / 1024 / 1024)}MB)，已拒绝`)
         return null
       }
       const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
@@ -832,7 +833,7 @@ export async function getImageSegment(src) {
     if (/^https?:\/\//i.test(s)) {
       const dl = await downloadImageViaFetch(s)
       if (!dl.ok) {
-        logger && logger.warn && logger.warn(`[ai0-plugin] 默认回复图片下载失败(${s.slice(0,80)}): ${dl.error}`)
+        safeLogger.warn && logger.warn(`[ai0-plugin] 默认回复图片下载失败(${s.slice(0,80)}): ${dl.error}`)
         return null
       }
       const urlPath = safeUrlPathname(s) || ''
@@ -850,15 +851,15 @@ export async function getImageSegment(src) {
       }
     } catch (_) {}
 
-    logger && logger.warn && logger.warn(`[ai0-plugin] 无法识别的图片来源，已跳过: ${s.slice(0, 80)}`)
+    safeLogger.warn && logger.warn(`[ai0-plugin] 无法识别的图片来源，已跳过: ${s.slice(0, 80)}`)
     return null
   } catch (err) {
-    logger && logger.warn && logger.warn(`[ai0-plugin] getImageSegment 异常: ${err.message}`)
+    safeLogger.warn && logger.warn(`[ai0-plugin] getImageSegment 异常: ${err.message}`)
     return null
   }
 }
 
-function safeSegmentImage(filePath) {
+export function safeSegmentImage(filePath) {
   // segment 是 Yunzai 全局对象；某些适配器也支持 segment.image('file:///abs/path')
   try {
     if (typeof segment !== 'undefined' && segment && typeof segment.image === 'function') {

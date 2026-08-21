@@ -1,5 +1,6 @@
 import * as cfg from '../config/index.js'
 import * as helper from './helper.js'
+import { safeLogger } from './globals.js'
 
 /**
  * AI0-Plugin 群操作执行模块（AI驱动）
@@ -601,7 +602,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
           continue
         }
         await executeKick(groupId, targetUid)
-        logger && logger.info && logger.info(`[ai0-plugin] 群操作: kick 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
+        safeLogger.info && logger.info(`[ai0-plugin] 群操作: kick 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已踢出 ${targetUid}` })
 
       } else if (type === 'set_admin') {
@@ -618,7 +619,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
           continue
         }
         await executeSetAdmin(groupId, targetUid, true)
-        logger && logger.info && logger.info(`[ai0-plugin] 群操作: set_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
+        safeLogger.info && logger.info(`[ai0-plugin] 群操作: set_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已将 ${targetUid} 设为管理员` })
 
       } else if (type === 'remove_admin') {
@@ -639,7 +640,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
           continue
         }
         await executeSetAdmin(groupId, targetUid, false)
-        logger && logger.info && logger.info(`[ai0-plugin] 群操作: remove_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
+        safeLogger.info && logger.info(`[ai0-plugin] 群操作: remove_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已取消 ${targetUid} 的管理员身份` })
 
       } else if (type === 'set_title') {

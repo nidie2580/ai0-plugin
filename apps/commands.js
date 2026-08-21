@@ -4,6 +4,7 @@ import * as chatSvc from '../src/chatService.js'
 import * as ws from '../src/webServer.js'
 import * as auth from '../src/auth.js'
 import * as llm from '../src/llm.js'
+import { safeLogger } from '../src/globals.js'
 
 let svgR = null
 try { svgR = await import('../src/svgRender.js') } catch (_) {}
@@ -111,7 +112,7 @@ export class AICommands extends plugin {
       const svgPath = svgR?.renderHelp?.()
       // 注意：e.reply 参数必须是「纯单个 segment.image(path)」，不要混发 text，
       //       否则 NapCat/LLOneBot 会被判为富媒体复合消息导致转换失败。
-      await e.reply(segment.image(svgPath))
+      await e.reply(helper.safeSegmentImage(svgPath))
       // 如果需要提示信息，单独再发一条（中间换行隔断）
       setTimeout(() => {
         e.reply([
@@ -298,7 +299,7 @@ export class AICommands extends plugin {
       try {
         await ws.stopWebServer()
       } catch (err) {
-        logger.warn && logger.warn(`[ai0-plugin] #ai重载关闭旧网页后台异常: ${err.message}`)
+        safeLogger.warn(`[ai0-plugin] #ai重载关闭旧网页后台异常: ${err.message}`)
       }
       try {
         const bind = cfg.getWebBindFromConfig?.()
@@ -1002,7 +1003,7 @@ export class AICommands extends plugin {
         // 清理旧临时文件
         svgR?.cleanupOldTmp?.()
         // 只发图片，不要和 text 混发
-        await e.reply(segment.image(svgPath))
+      await e.reply(helper.safeSegmentImage(svgPath))
         setTimeout(() => {
           const navHint = []
           if (hasPrev) navHint.push('← #切换模型 上一页')

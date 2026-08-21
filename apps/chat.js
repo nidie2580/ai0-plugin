@@ -21,7 +21,7 @@ export class AIChat extends plugin {
     try {
       return await chatSvc.handleChat(this.e)
     } catch (err) {
-      logger.error(`[ai0-plugin] onMessage error: ${err.message}`)
+      if (typeof logger !== 'undefined') logger.error(`[ai0-plugin] onMessage error: ${err.message}`)
       return false
     }
   }

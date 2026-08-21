@@ -6,10 +6,11 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import cookieParser from 'cookie-parser'
 import * as cfg from '../config/index.js'
-import * as llm from './llm.js'
 import * as auth from './auth.js'
-import * as helper from './helper.js'
+import * as llm from './llm.js'
 import * as imageGen from './imageGen.js'
+import * as helper from './helper.js'
+import { safeLogger } from './globals.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -519,7 +520,7 @@ export function createApp() {
       }
       res.json({ ok: true })
     } catch (e) {
-      logger && logger.error && logger.error(`[ai0-plugin] 会话删除失败: ${e.message}`)
+      safeLogger.error && logger.error(`[ai0-plugin] 会话删除失败: ${e.message}`)
       res.json({ ok: false, msg: '操作失败，请稍后重试' })
     }
   })
@@ -572,13 +573,13 @@ export function createApp() {
             error: info.error || null
           }
         } catch (e) {
-          logger && logger.error && logger.error(`[ai0-plugin] 模型探测失败(${key}): ${e.message}`)
+          safeLogger.error && logger.error(`[ai0-plugin] 模型探测失败(${key}): ${e.message}`)
           return { key, ok: false, models: [], latencyMs: Date.now() - t0, error: '探测失败' }
         }
       }))
       res.json({ ok: true, results })
     } catch (e) {
-      logger && logger.error && logger.error(`[ai0-plugin] 批量探测失败: ${e.message}`)
+      safeLogger.error && logger.error(`[ai0-plugin] 批量探测失败: ${e.message}`)
       res.json({ ok: false, msg: '批量探测失败，请稍后重试' })
     }
   })
@@ -672,7 +673,7 @@ export function createApp() {
       const result = await imageGen.generateImage(prompt)
       res.json(result)
     } catch (err) {
-      logger && logger.error && logger.error(`[ai0-plugin] 图片生成失败: ${err.message}`)
+      safeLogger.error && logger.error(`[ai0-plugin] 图片生成失败: ${err.message}`)
       res.json({ ok: false, error: '图片生成失败，请稍后重试' })
     }
   })
