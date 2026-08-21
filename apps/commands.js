@@ -221,10 +221,9 @@ export class AICommands extends plugin {
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置apikey\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置apikey <你的apikey>')
-    // API Key 仅允许常见安全字符集：字母、数字、连字符、下划线、点号
-    // 覆盖 sk-xxx、gsk_xxx、Bearer token 等常见格式
-    if (!/^[A-Za-z0-9._\-]{4,512}$/.test(text)) {
-      return this.e.reply('❌ API Key 格式不合法（仅允许字母、数字、连字符、下划线、点号，4-512位）')
+    // API Key 仅拒绝控制字符和明显危险字符（换行、引号、尖括号）
+    if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f"<>]/.test(text) || text.length < 4 || text.length > 512) {
+      return this.e.reply('❌ API Key 格式不合法（不允许控制字符/引号/尖括号，4-512位）')
     }
     const config = cfg.loadConfig()
     const def = config.model?.default || 'openai-compatible'
@@ -476,6 +475,10 @@ export class AICommands extends plugin {
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用')
     }
+    // 验证码仅在私聊中发送，防止群聊泄露
+    if (helper.getGroupId(this.e)) {
+      return this.e.reply('❌ 请在私聊中使用此命令，避免验证码在群聊中泄露')
+    }
     try {
       await this._ensureWebStarted()
     } catch (e) {
@@ -498,6 +501,10 @@ export class AICommands extends plugin {
     const e = this.e
     const userId = helper.getUserId(e)
     const groupId = helper.getGroupId(e)
+    // 诊断命令包含敏感信息（主人列表、apiBase等），仅允许私聊执行
+    if (groupId) {
+      return e.reply('❌ 诊断命令包含敏感配置信息，请在私聊中使用')
+    }
     const sources = helper.listMasterSources()
     const allMasters = helper.listMasters()
     const isMasterNow = helper.isMaster(userId, e)
@@ -785,6 +792,12 @@ export class AICommands extends plugin {
     const text = helper.getMessageText(e)
     const m = (text || '').match(/^#ai(测试模型|模型测试|测模型)\s*(\S+)?\s*$/)
     const modelKey = (m && m[2]) ? m[2] : null
+
+    // 测试模型包含 apiBase 等配置信息，仅允许私聊执行
+    const groupId = helper.getGroupId(e)
+    if (groupId) {
+      return e.reply('❌ 模型测试包含配置信息，请在私聊中使用')
+    }
 
     const config = cfg.loadConfig()
     const defaultKey = config.model?.default || 'openai-compatible'

@@ -1,9 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import axios from 'axios'
 import * as cfg from '../config/index.js'
-import { isAllowedOutboundUrl } from './security.js'
+import { safeAxiosRequest } from './security.js'
 import { normalizeApiBase } from './helper.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -17,11 +16,21 @@ if (!fs.existsSync(HISTORY_DIR)) fs.mkdirSync(HISTORY_DIR, { recursive: true })
 // ————————————————————————————————————————————————————————————
 const userQueues = new Map()                 // userId → Promise 链
 const inflightSaves = new Map()              // userId/sessionId → 最新 messages（去抖合并）
+const USER_QUEUE_MAX = 500                   // 最大缓存用户队列数，超出时淘汰最早
 
 function runInUserQueue(userId, fn) {
+  // LRU 淘汰：超出上限时移除最早的条目
+  if (userQueues.size >= USER_QUEUE_MAX && !userQueues.has(userId)) {
+    const oldest = userQueues.keys().next().value
+    userQueues.delete(oldest)
+  }
   const prev = userQueues.get(userId) || Promise.resolve()
   const next = prev.then(() => Promise.resolve().then(fn)).catch(() => {})
   userQueues.set(userId, next)
+  // 队列执行完毕后清理引用，避免 Promise 链无限增长
+  next.finally(() => {
+    if (userQueues.get(userId) === next) userQueues.delete(userId)
+  })
   return next
 }
 
@@ -50,7 +59,7 @@ export function loadHistory(userId, sessionId) {
           // 备份有效 → 把备份回写到主文件
           try {
             const tmp = file + '.tmp.' + Date.now()
-            fs.writeFileSync(tmp, JSON.stringify(arr, null, 2), 'utf-8')
+            fs.writeFileSync(tmp, JSON.stringify(arr, null, 2), 'utf-8', { mode: 0o600 })
             fs.renameSync(tmp, file)
             logger.warn && logger.warn(`[ai0-plugin] ${file} 已损坏，已从 .bak 恢复`)
           } catch (_) {}
@@ -84,7 +93,7 @@ export function saveHistory(userId, sessionId, messages) {
     try {
       const data = JSON.stringify(latest, null, 2)
       // 先写到 tmp
-      fs.writeFileSync(tmp, data, 'utf-8')
+      fs.writeFileSync(tmp, data, 'utf-8', { mode: 0o600 })
       // 尽量刷盘（兼容旧 node 忽略）；fd 用完必须 close，避免句柄泄漏
       try {
         const fd = fs.openSync(tmp, 'r')
@@ -166,6 +175,7 @@ function summarizeAxiosError(err) {
   }
   const code = err.code || ''
   const msg = err.message || ''
+  // 脱敏：不输出 Authorization 头，防止 API Key 泄露到日志
   return {
     status,
     statusText,
@@ -184,17 +194,13 @@ export async function listAvailableModels({ modelKey = null } = {}) {
   if (!m.apiKey || !m.apiBase) return { ok: false, models: [], error: '未配置 apiBase 或 apiKey' }
   const base = normalizeApiBase(m.apiBase, 'openai')
   const modelsUrl = `${base}/models`
-  if (!isAllowedOutboundUrl(modelsUrl)) {
-    return { ok: false, models: [], error: 'apiBase URL 未通过安全校验（禁止访问私有/回环/链路本地地址）' }
-  }
   try {
-    const resp = await axios.get(modelsUrl, {
+    const resp = await safeAxiosRequest('get', modelsUrl, null, {
       headers: {
         'Authorization': `Bearer ${m.apiKey}`,
         'Accept': 'application/json'
       },
       timeout: 15000,
-      validateStatus: () => true
     })
     if (resp.status >= 200 && resp.status < 300) {
       const arr = Array.isArray(resp.data?.data) ? resp.data.data : Array.isArray(resp.data) ? resp.data : []
@@ -265,14 +271,13 @@ export async function chatCompletions(messages, {
 
   let resp
   try {
-    resp = await axios.post(url, body, {
+    resp = await safeAxiosRequest('post', url, body, {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${m.apiKey}`
       },
       timeout: m.timeout ?? 60000,
       signal,
-      validateStatus: () => true
     })
   } catch (e) {
     const s = summarizeAxiosError(e)

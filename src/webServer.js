@@ -115,7 +115,8 @@ function isValidUserId(v) {
   return v != null && /^\d{1,20}$/.test(String(v))
 }
 function isValidSessionId(v) {
-  return v != null && /^[0-9a-fA-F-]{1,64}$/.test(String(v))
+  // 标准 UUID 格式：8-4-4-4-12（共 36 字符），减小攻击面
+  return v != null && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v))
 }
 
 function requireAuth(req, res, next) {
@@ -157,8 +158,8 @@ export function createApp() {
     if (req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')) {
       res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
     }
-    // 基础 CSP：限制资源来源，防止内联脚本注入
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'")
+    // 基础 CSP：限制资源来源，脚本仅允许外部文件（移除 unsafe-inline 防止内联脚本注入）
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'")
     next()
   })
 

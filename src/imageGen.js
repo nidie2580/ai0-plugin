@@ -69,7 +69,8 @@ export async function generateImage(prompt, opts = {}) {
         'Authorization': `Bearer ${ic.apiKey}`
       },
       body: JSON.stringify(body),
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: 'manual'
     })
 
     clearTimeout(timer)

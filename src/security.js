@@ -82,9 +82,9 @@ function isPrivateIpv6(ip) {
  * 校验出站 URL 是否允许访问（SSRF 防护）。
  * 返回 { ok: true } 或 { ok: false, reason }。
  *
- * 注意：校验与实际请求是两次独立 DNS 解析，存在 DNS rebinding 的
- * TOCTOU 窗口（攻击者可在校验后切换 DNS 记录指向内网）。对高安全
- * 场景，应改为解析后直接连接 IP 并固定 Host 头，此处为尽力而为。
+ * DNS Rebinding 防护：校验 URL 安全性并返回已解析的 IP 地址。
+ * 调用方应使用返回的 resolvedIp 直接连接，避免二次 DNS 解析的 TOCTOU 窗口。
+ * 返回 { ok: true, resolvedIp } 或 { ok: false, reason }。
  */
 export async function isAllowedOutboundUrl(u) {
   if (!u || typeof u !== 'string') return { ok: false, reason: '非法 URL' }
@@ -94,15 +94,13 @@ export async function isAllowedOutboundUrl(u) {
   } catch (err) {
     return { ok: false, reason: '无法解析的 URL' }
   }
-  // 浏览器风格 URL 中 IPv6 hostname 带方括号（如 [::1]），net.isIP 对
-  // 带括号形式返回 0，需剥离括号后再判定，否则会误走 DNS 分支。
   const rawHost = parsed.hostname
   const hostname = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost
 
   const v = net.isIP(hostname)
   if (v === 4 || v === 6) {
     if (isPrivateIp(hostname)) return { ok: false, reason: '拒绝访问私有或回环 IP 地址' }
-    return { ok: true }
+    return { ok: true, resolvedIp: hostname }
   }
 
   try {
@@ -111,7 +109,7 @@ export async function isAllowedOutboundUrl(u) {
     for (const a of addrs) {
       if (isPrivateIp(a.address)) return { ok: false, reason: '域名解析到私有或回环地址，拒绝访问' }
     }
-    return { ok: true }
+    return { ok: true, resolvedIp: addrs[0]?.address }
   } catch (err) {
     return { ok: false, reason: 'DNS 解析失败或被阻止' }
   }
@@ -153,7 +151,9 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
 }
 
 /**
- * Safe axios request that validates redirect targets. options similar to axios.request
+ * Safe axios request with DNS Rebinding protection.
+ * Uses the resolved IP directly for connection, setting Host header to original hostname.
+ * Validates each redirect target before following.
  * Returns axios response on success or throws Error on failure
  */
 export async function safeAxiosRequest(method, url, data = null, opts = {}, maxRedirects = 3) {
@@ -163,7 +163,25 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
     const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
     if (!check.ok) throw new Error(check.reason || '拒绝访问该 URL')
     try {
-      const conf = Object.assign({}, opts, { method, url: current, data, maxRedirects: 0, validateStatus: () => true })
+      // DNS Rebinding 防护：使用已解析的 IP 直接连接，避免二次 DNS 解析
+      let connectUrl = current
+      if (check.resolvedIp) {
+        try {
+          const u = new URL(current)
+          // 仅对域名（非 IP）应用 DNS pinning
+          if (!net.isIP(u.hostname)) {
+            u.hostname = check.resolvedIp
+            connectUrl = u.toString()
+            // 设置 Host 头为原始域名
+            opts = Object.assign({}, opts)
+            opts.headers = Object.assign({}, opts.headers, { 'Host': u.hostname })
+            // 恢复原始 hostname 用于 Host 头
+            const origUrl = new URL(current)
+            opts.headers['Host'] = origUrl.hostname + (origUrl.port ? `:${origUrl.port}` : '')
+          }
+        } catch (_) {}
+      }
+      const conf = Object.assign({}, opts, { method, url: connectUrl, data, maxRedirects: 0, validateStatus: () => true })
       const resp = await axios.request(conf)
       if (resp.status >= 300 && resp.status < 400) {
         const loc = resp.headers?.location
