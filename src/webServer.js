@@ -70,11 +70,13 @@ export function getServerInfo() {
   }
 }
 
-function listSessions() {
+function listSessions(limit = 100) {
   const historyDir = path.join(PLUGIN_ROOT, 'data', 'history')
   const out = []
   if (!fs.existsSync(historyDir)) return out
+  let count = 0
   for (const user of fs.readdirSync(historyDir)) {
+    if (count >= limit) break
     const ud = path.join(historyDir, user)
     const st = fs.statSync(ud)
     if (!st.isDirectory()) continue
@@ -105,6 +107,7 @@ function listSessions() {
       sessions,
       totalMessages: sessions.reduce((a, s) => a + s.msgCount, 0)
     })
+    count++
   }
   out.sort((a, b) => b.totalMessages - a.totalMessages)
   return out
@@ -812,6 +815,14 @@ export function stopWebServer() {
       currentHost = null
       resolve(true)
     })
-    setTimeout(() => resolve(true), 3000)
+    setTimeout(() => {
+      if (serverInstance) {
+        try { serverInstance.closeAllConnections?.() } catch (_) {}
+        serverInstance = null
+        currentPort = null
+        currentHost = null
+      }
+      resolve(true)
+    }, 3000)
   })
 }

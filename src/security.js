@@ -1,5 +1,6 @@
 import dns from 'node:dns/promises'
 import net from 'node:net'
+import axios from 'axios'
 
 /**
  * 判断 IP 是否为私有/回环/链路本地/保留地址（SSRF 防护用）。

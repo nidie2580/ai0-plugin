@@ -4,7 +4,9 @@ import * as chatSvc from '../src/chatService.js'
 import * as ws from '../src/webServer.js'
 import * as auth from '../src/auth.js'
 import * as llm from '../src/llm.js'
-import * as svgR from '../src/svgRender.js'
+
+let svgR = null
+try { svgR = await import('../src/svgRender.js') } catch (_) {}
 
 export class AICommands extends plugin {
   constructor() {
@@ -105,8 +107,8 @@ export class AICommands extends plugin {
     // （避免直接塞 Buffer 触发 NapCat "rich media transfer failed"）
     try {
       // 清理过旧的临时文件（每个用户发帮助时轻量执行一次）
-      svgR.cleanupOldTmp?.()
-      const svgPath = svgR.renderHelp()
+      svgR?.cleanupOldTmp?.()
+      const svgPath = svgR?.renderHelp?.()
       // 注意：e.reply 参数必须是「纯单个 segment.image(path)」，不要混发 text，
       //       否则 NapCat/LLOneBot 会被判为富媒体复合消息导致转换失败。
       await e.reply(segment.image(svgPath))
@@ -983,7 +985,7 @@ export class AICommands extends plugin {
     const PAGE_SESSION_KEY = '__switch_model_page'
     if (!globalThis[PAGE_SESSION_KEY]) globalThis[PAGE_SESSION_KEY] = new Map()
     const pageStore = globalThis[PAGE_SESSION_KEY]
-    const totalPages = svgR.countPages?.(providerData) ?? 1
+    const totalPages = svgR?.countPages?.(providerData) ?? 1
     let currentPage = 1
     try {
       if (pageNav === 'prev') currentPage = (pageStore.get(userId) || 1) - 1
@@ -996,9 +998,9 @@ export class AICommands extends plugin {
     if ((!targetModel && !switchDefaultOnly) || pageNav) {
       pageStore.set(userId, currentPage)
       try {
-        const { svgPath, pageNum, totalPages: actualTotal, hasPrev, hasNext } = svgR.renderModelListPages(providerData, currentPage)
+        const { svgPath, pageNum, totalPages: actualTotal, hasPrev, hasNext } = svgR?.renderModelListPages?.(providerData, currentPage) || {}
         // 清理旧临时文件
-        svgR.cleanupOldTmp?.()
+        svgR?.cleanupOldTmp?.()
         // 只发图片，不要和 text 混发
         await e.reply(segment.image(svgPath))
         setTimeout(() => {

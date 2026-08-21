@@ -3,8 +3,11 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
-import { safeAxiosRequest } from './security.js'
+import { safeAxiosRequest, isAllowedOutboundUrl } from './security.js'
 import { normalizeApiBase } from './helper.js'
+import { safeLogger } from './globals.js'
+
+export { normalizeApiBase }
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -62,12 +65,12 @@ export function loadHistory(userId, sessionId) {
             const tmp = file + '.tmp.' + crypto.randomBytes(16).toString('hex')
             fs.writeFileSync(tmp, JSON.stringify(arr, null, 2), { encoding: 'utf-8', mode: 0o600 })
             fs.renameSync(tmp, file)
-            logger.warn && logger.warn(`[ai0-plugin] ${file} 已损坏，已从 .bak 恢复`)
+            safeLogger.warn(`[ai0-plugin] ${file} 已损坏，已从 .bak 恢复`)
           } catch (_) {}
           return arr
         }
       } catch (_) {}
-      logger.warn && logger.warn(`[ai0-plugin] 会话历史损坏且无备份，已丢弃: ${file} (${err.message})`)
+      safeLogger.warn(`[ai0-plugin] 会话历史损坏且无备份，已丢弃: ${file} (${err.message})`)
       return []
     }
   }
@@ -109,7 +112,7 @@ export function saveHistory(userId, sessionId, messages) {
       // 原子 rename
       fs.renameSync(tmp, file)
     } catch (err) {
-      logger.error && logger.error(`[ai0-plugin] 保存历史失败: ${err.message}`)
+      safeLogger.error(`[ai0-plugin] 保存历史失败: ${err.message}`)
       try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch (_) {}
     }
   })
@@ -267,7 +270,7 @@ export async function chatCompletions(messages, {
   }
 
   if (typeof logger !== 'undefined') {
-    logger.info(`[ai0-plugin] LLM 请求：base(原始)=${rawBase}  base(归一化)=${normalizedBase}  url=${url}  model=${model}  apiKey=${redactKey(m.apiKey)}`)
+    safeLogger.info(`[ai0-plugin] LLM 请求：base(原始)=${rawBase}  base(归一化)=${normalizedBase}  url=${url}  model=${model}  apiKey=${redactKey(m.apiKey)}`)
   }
 
   let resp
@@ -282,7 +285,7 @@ export async function chatCompletions(messages, {
     })
   } catch (e) {
     const s = summarizeAxiosError(e)
-    logger && logger.error && logger.error(`[ai0-plugin] LLM 调用异常(${s.method} ${s.url}): code=${s.code} message=${s.message}`)
+    safeLogger.error(`[ai0-plugin] LLM 调用异常(${s.method} ${s.url}): code=${s.code} message=${s.message}`)
     let msg = '请求异常，请检查模型配置或稍后重试'
     if (s.code === 'ECONNREFUSED') msg = '连接被拒绝：请确认 apiBase 地址/端口正确，且服务已启动。'
     else if (s.code === 'ETIMEDOUT' || s.code === 'ECONNABORTED') msg = '连接超时：请稍后重试或调大 timeout。'
@@ -298,7 +301,7 @@ export async function chatCompletions(messages, {
         ? resp.data.slice(0, 2000)
         : JSON.stringify(resp.data || {}).slice(0, 3000)
     } catch (_) {}
-    logger && logger.error && logger.error(`[ai0-plugin] LLM HTTP ${status} ${resp.statusText || ''} | URL=${url}` + (bodyPreview ? `\n响应体:\n${bodyPreview}` : ''))
+    safeLogger.error(`[ai0-plugin] LLM HTTP ${status} ${resp.statusText || ''} | URL=${url}` + (bodyPreview ? `\n响应体:\n${bodyPreview}` : ''))
 
     // 友好化常见错误
     let extra = ''
