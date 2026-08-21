@@ -502,7 +502,7 @@ export async function handleChat(e) {
     // 解析图片生成指令并执行
     if (imageContext) {
       try {
-        const imgResult = await parseAndExecuteImageAction(replyText)
+        const imgResult = await parseAndExecuteImageAction(replyText, userId)
         if (imgResult) {
           replyText = imgResult.cleanText
           if (imgResult.ok) {
@@ -550,7 +550,7 @@ export async function handleChat(e) {
  * 从 AI 回复中解析图片生成指令 [action:image:提示词] 并执行
  * 返回 null 表示没有图片指令；否则返回 { cleanText, ok, imageBuffer?, error? }
  */
-async function parseAndExecuteImageAction(replyText) {
+async function parseAndExecuteImageAction(replyText, userId) {
   const re = /\[action:image:([^\]]+)\]/i
   const m = replyText.match(re)
   if (!m) return null
@@ -564,7 +564,7 @@ async function parseAndExecuteImageAction(replyText) {
   }
 
   safeLogger.info(`[ai0-plugin] 解析到图片生成指令，提示词：${prompt.slice(0, 100)}`)
-  const result = await imageGen.generateImage(prompt)
+  const result = await imageGen.generateImage(prompt, { userId })
   if (!result.ok) {
     return { cleanText, ok: false, error: result.error }
   }

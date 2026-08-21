@@ -491,6 +491,110 @@ export async function buildGroupContext(e) {
 }
 
 /**
+ * 群操作硬验证：4 个条件全部由本地代码判定，不依赖 AI 判断。
+ * 任一条件不满足则返回 { ok:false, reason }。
+ *
+ * 条件 1: 非私聊环境（groupId 存在）
+ * 条件 2: 发送者是机器人主人 或 群主 或 群管理员
+ * 条件 3: 机器人是群主 或 群管理员
+ * 条件 4: 操作对象不能是群主或管理员（例外：机器人是群主 + 发送者是主人 + 操作是 remove_admin）
+ * 条件 5: 操作对象不能是机器人主人
+ *
+ * @param {string} type - 操作类型 mute/kick/set_admin/remove_admin/set_title
+ * @param {string|number} groupId - 群号
+ * @param {string|number} targetUid - 操作目标 QQ
+ * @param {object} e - 消息事件对象
+ * @returns {Promise<{ok:boolean, reason?:string, requesterRole?:string, botRole?:string}>}
+ */
+export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
+  // —— 条件 1: 非私聊 ——
+  if (!groupId) {
+    return { ok: false, reason: '群操作仅限群聊环境' }
+  }
+
+  const masters = helper.listMasters()
+
+  // —— 条件 2: 发送者权限 ——
+  const requesterUid = e ? helper.getUserId(e) : null
+  if (requesterUid == null) {
+    return { ok: false, reason: '无法获取发送者身份' }
+  }
+  const requesterIsMaster = masters.includes(String(requesterUid))
+  let requesterRole = 'unknown'
+  try {
+    const info = await getMemberInfo(groupId, String(requesterUid))
+    requesterRole = _roleOf(info) || 'unknown'
+  } catch (_) {}
+  // ownerUin 反向推断
+  let groupInfo = null
+  try { groupInfo = await getGroupInfo(groupId) } catch (_) {}
+  const ownerUin = groupInfo?.ownerUin
+  if (ownerUin && String(requesterUid) === String(ownerUin) && requesterRole === 'unknown') {
+    requesterRole = 'owner'
+  }
+  const requesterElevated = requesterIsMaster || requesterRole === 'owner' || requesterRole === 'admin'
+  const requesterCanSetAdmin = requesterIsMaster || requesterRole === 'owner'
+
+  if (type === 'set_title') {
+    // set_title 自助允许，给他人需 elevated
+    const isSelf = String(targetUid) === String(requesterUid)
+    if (!isSelf && !requesterElevated) {
+      return { ok: false, reason: '发送者无权限（仅群主/管理员/机器人主人可给他人设置头衔）' }
+    }
+  } else if (type === 'set_admin' || type === 'remove_admin') {
+    if (!requesterCanSetAdmin) {
+      return { ok: false, reason: '仅机器人主人/群主可设置/取消管理员' }
+    }
+  } else {
+    // mute/kick
+    if (!requesterElevated) {
+      return { ok: false, reason: '发送者无权限（仅群主/管理员/机器人主人可发起此操作）' }
+    }
+  }
+
+  // —— 条件 3: 机器人权限 ——
+  const botRole = await getBotRole(groupId)
+  if (type === 'set_admin' || type === 'remove_admin') {
+    if (botRole !== 'owner') {
+      return { ok: false, reason: '机器人不是群主，无法设置/取消管理员', requesterRole, botRole }
+    }
+  } else {
+    if (botRole !== 'owner' && botRole !== 'admin') {
+      return { ok: false, reason: '机器人不是群主或管理员', requesterRole, botRole }
+    }
+  }
+
+  // —— 条件 4 & 5: 目标保护 ——
+  const targetStr = String(targetUid)
+  // 条件 5: 目标是机器人主人 → 拒绝
+  if (masters.includes(targetStr)) {
+    // 例外：remove_admin + 机器人是群主 + 发送者是主人 → 允许
+    if (type === 'remove_admin' && botRole === 'owner' && requesterIsMaster) {
+      // 允许，继续
+    } else {
+      return { ok: false, reason: `目标 ${targetUid} 是机器人主人，不可操作`, requesterRole, botRole }
+    }
+  }
+  // 条件 4: 目标是群主或管理员 → 拒绝（同上例外）
+  let targetRole = 'unknown'
+  try {
+    const tInfo = await getMemberInfo(groupId, targetStr)
+    targetRole = _roleOf(tInfo) || 'unknown'
+  } catch (_) {}
+  const isTargetOwnerByUin = ownerUin && targetStr === String(ownerUin)
+  const isTargetProtected = targetRole === 'owner' || targetRole === 'admin' || isTargetOwnerByUin
+  if (isTargetProtected) {
+    if (type === 'remove_admin' && botRole === 'owner' && requesterIsMaster) {
+      // 允许群主的主人取消管理员
+    } else {
+      return { ok: false, reason: `目标 ${targetUid} 受保护（群主/管理员）`, requesterRole, botRole }
+    }
+  }
+
+  return { ok: true, requesterRole, botRole }
+}
+
+/**
  * 从 AI 回复中解析操作指令并执行
  * 返回 { cleanText, results }
  * @param {object} e - 消息事件对象（用于执行层的请求者权限校验，防止 AI 被诱导越权执行）
@@ -521,7 +625,6 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
   const ownerUinForAction = groupInfoForAction?.ownerUin
 
   // —— 请求者权限（防御层）——
-  // AI 可能被 prompt injection / 社会工程诱导输出操作指令，这里按真实身份做二次校验。
   const requesterUid = e ? helper.getUserId(e) : null
   let requesterRole = 'unknown'
   if (requesterUid != null) {
@@ -529,15 +632,12 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
       const info = await getMemberInfo(groupId, String(requesterUid))
       requesterRole = _roleOf(info) || 'unknown'
     } catch (_) {}
-    // ownerUin 反向推断：请求者 QQ 与群主 UIN 一致但接口未返回角色时按群主处理
     if (ownerUinForAction && String(requesterUid) === String(ownerUinForAction) && requesterRole === 'unknown') {
       requesterRole = 'owner'
     }
   }
   const requesterIsMaster = requesterUid != null && masters.includes(String(requesterUid))
-  // 管理类操作（踢/禁言/给他人设头衔）：群主 / 管理员 / 机器人主人
   const requesterElevated = requesterIsMaster || requesterRole === 'owner' || requesterRole === 'admin'
-  // 设置管理员：仅机器人主人 / 群主
   const requesterCanSetAdmin = requesterIsMaster || requesterRole === 'owner'
 
   for (const match of matches) {
@@ -554,30 +654,28 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         continue
       }
 
-      // 获取目标信息
-      const targetInfo = await getMemberInfo(groupId, targetUid)
-      const targetRole = _roleOf(targetInfo) || 'unknown'
-      // 保护判定：ownerUin 也反向匹配（即使 targetRole 没返回）
-      const isOwnerByUin = ownerUinForAction && String(targetUid) === String(ownerUinForAction)
-      const isProtected = masters.includes(targetUid) || targetRole === 'owner' || targetRole === 'admin' || isOwnerByUin
+      // —— 4 条硬验证（本地判定，不依赖 AI）——
+      const perm = await verifyGroupOpPermission(type, groupId, targetUid, e)
+      if (!perm.ok) {
+        results.push({ type, ok: false, msg: perm.reason })
+        continue
+      }
+
+      // 功能开关检查
+      if (type === 'mute' && cfg.get('groupOps.allowMute', true) === false) {
+        results.push({ type, ok: false, msg: '禁言功能未启用' }); continue
+      }
+      if (type === 'kick' && cfg.get('groupOps.allowKick', true) === false) {
+        results.push({ type, ok: false, msg: '踢出功能未启用' }); continue
+      }
+      if ((type === 'set_admin' || type === 'remove_admin') && cfg.get('groupOps.allowAdmin', true) === false) {
+        results.push({ type, ok: false, msg: '管理员功能未启用' }); continue
+      }
+      if (type === 'set_title' && cfg.get('groupOps.allowTitle', true) === false) {
+        results.push({ type, ok: false, msg: '头衔功能未启用' }); continue
+      }
 
       if (type === 'mute') {
-        if (!requesterElevated) {
-          results.push({ type, ok: false, msg: '请求者无权限（仅群主/管理员/机器人主人可发起禁言）' })
-          continue
-        }
-        if (cfg.get('groupOps.allowMute', true) === false) {
-          results.push({ type, ok: false, msg: '禁言功能未启用' })
-          continue
-        }
-        if (botRole !== 'owner' && botRole !== 'admin') {
-          results.push({ type, ok: false, msg: '机器人不是管理员/群主（身份接口未返回）' })
-          continue
-        }
-        if (isProtected) {
-          results.push({ type, ok: false, msg: `目标 ${targetUid} 受保护（群主/管理员/主人）` })
-          continue
-        }
         const duration = parseInt(args[1], 10)
         const seconds = Number.isFinite(duration) ? Math.max(0, duration) : cfg.get('groupOps.defaultMuteDuration', 600)
         await executeMute(groupId, targetUid, seconds)
@@ -585,79 +683,24 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: true, msg: `已${display} ${targetUid}` })
 
       } else if (type === 'kick') {
-        if (!requesterElevated) {
-          results.push({ type, ok: false, msg: '请求者无权限（仅群主/管理员/机器人主人可发起踢出）' })
-          continue
-        }
-        if (cfg.get('groupOps.allowKick', true) === false) {
-          results.push({ type, ok: false, msg: '踢出功能未启用' })
-          continue
-        }
-        if (botRole !== 'owner' && botRole !== 'admin') {
-          results.push({ type, ok: false, msg: '机器人不是管理员/群主（身份接口未返回）' })
-          continue
-        }
-        if (isProtected) {
-          results.push({ type, ok: false, msg: `目标 ${targetUid} 受保护` })
-          continue
-        }
         await executeKick(groupId, targetUid)
-        safeLogger.info && logger.info(`[ai0-plugin] 群操作: kick 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
+        safeLogger.info(`[ai0-plugin] 群操作: kick 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已踢出 ${targetUid}` })
 
       } else if (type === 'set_admin') {
-        if (!requesterCanSetAdmin) {
-          results.push({ type, ok: false, msg: '仅机器人主人/群主可设置管理员' })
-          continue
-        }
-        if (cfg.get('groupOps.allowAdmin', true) === false) {
-          results.push({ type, ok: false, msg: '管理员功能未启用' })
-          continue
-        }
-        if (botRole !== 'owner') {
-          results.push({ type, ok: false, msg: '机器人不是群主' })
-          continue
-        }
         await executeSetAdmin(groupId, targetUid, true)
-        safeLogger.info && logger.info(`[ai0-plugin] 群操作: set_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
+        safeLogger.info(`[ai0-plugin] 群操作: set_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已将 ${targetUid} 设为管理员` })
 
       } else if (type === 'remove_admin') {
-        if (!requesterCanSetAdmin) {
-          results.push({ type, ok: false, msg: '仅机器人主人/群主可取消管理员' })
-          continue
-        }
-        if (cfg.get('groupOps.allowAdmin', true) === false) {
-          results.push({ type, ok: false, msg: '管理员功能未启用' })
-          continue
-        }
-        if (botRole !== 'owner') {
-          results.push({ type, ok: false, msg: '机器人不是群主' })
-          continue
-        }
-        if (masters.includes(targetUid)) {
-          results.push({ type, ok: false, msg: '不可取消机器人主人的管理员身份' })
-          continue
-        }
         await executeSetAdmin(groupId, targetUid, false)
-        safeLogger.info && logger.info(`[ai0-plugin] 群操作: remove_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
+        safeLogger.info(`[ai0-plugin] 群操作: remove_admin 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已取消 ${targetUid} 的管理员身份` })
 
       } else if (type === 'set_title') {
-        if (cfg.get('groupOps.allowTitle', true) === false) {
-          results.push({ type, ok: false, msg: '头衔功能未启用' })
-          continue
-        }
         const titleText = args.slice(1).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
         if (!titleText) {
-          results.push({ type, ok: false, msg: '未指定头衔内容' })
-          continue
-        }
-        // 自助设头衔：仅允许给自己设；给他人设需要群主/管理员/主人
-        const isSelfTitle = requesterUid != null && String(targetUid) === String(requesterUid)
-        if (!isSelfTitle && !requesterElevated) {
-          results.push({ type, ok: false, msg: '仅群主/管理员/机器人主人可给他人设置头衔' })
-          continue
+          results.push({ type, ok: false, msg: '未指定头衔内容' }); continue
         }
         await executeSetTitle(groupId, targetUid, titleText.slice(0, 18))
         results.push({ type, ok: true, msg: `已为 ${targetUid} 设置头衔：${titleText.slice(0, 18)}` })

@@ -1,12 +1,67 @@
 import * as cfg from '../config/index.js'
 import { isAllowedOutboundUrl } from './security.js'
 import { normalizeApiBase } from './helper.js'
+import { safeLogger } from './globals.js'
 
 /**
  * AI0-Plugin 图片生成模块
  * 支持 OpenAI 兼容的 /images/generations 接口
  * 流程：AI 在回复中输出 [action:image:提示词] → 插件调用生图API → 下载图片 → 发送到QQ
  */
+
+// —— 每用户每日用量跟踪 ——
+const dailyUsage = new Map() // key: `YYYY-MM-DD:userId` → { count, tokens }
+
+function todayKey(userId) {
+  const d = new Date().toISOString().slice(0, 10)
+  return `${d}:${userId}`
+}
+
+/** 检查用户配额，返回 { ok, reason? } */
+export function checkUserQuota(userId) {
+  if (!userId) return { ok: false, reason: '无法识别用户' }
+  const ic = getImageGenConfig()
+  const allowedUsers = ic.allowedUsers || []
+  // 白名单检查：非空白名单时，只有列表中的用户可用
+  if (allowedUsers.length > 0 && !allowedUsers.includes(String(userId))) {
+    return { ok: false, reason: '你没有图片生成权限' }
+  }
+  // 每日次数限制
+  const dailyLimit = ic.dailyLimit || 0
+  if (dailyLimit > 0) {
+    const key = todayKey(userId)
+    const usage = dailyUsage.get(key)
+    if (usage && usage.count >= dailyLimit) {
+      return { ok: false, reason: `今日生图次数已达上限（${dailyLimit}次/天）` }
+    }
+  }
+  // 每日 token 限制
+  const tokenLimit = ic.dailyTokenEstimate || 0
+  if (tokenLimit > 0) {
+    const key = todayKey(userId)
+    const usage = dailyUsage.get(key)
+    if (usage && usage.tokens >= tokenLimit) {
+      return { ok: false, reason: `今日预估 token 消耗已达上限（${tokenLimit}/天）` }
+    }
+  }
+  return { ok: true }
+}
+
+/** 记录一次生图使用（+1000 token 估算） */
+export function recordUsage(userId) {
+  if (!userId) return
+  const key = todayKey(userId)
+  const prev = dailyUsage.get(key) || { count: 0, tokens: 0 }
+  dailyUsage.set(key, { count: prev.count + 1, tokens: prev.tokens + 1000 })
+}
+
+// 每天凌晨清理昨日记录
+setInterval(() => {
+  const today = new Date().toISOString().slice(0, 10)
+  for (const [k] of dailyUsage) {
+    if (!k.startsWith(today + ':')) dailyUsage.delete(k)
+  }
+}, 3600_000).unref?.()
 
 /** 获取图片生成配置 */
 export function getImageGenConfig() {
@@ -24,6 +79,7 @@ export function isEnabled() {
  * 调用生图 API，返回图片 URL 或 base64
  * @param {string} prompt - 生图提示词
  * @param {object} [opts] - 可选参数覆盖默认配置
+ * @param {string} [opts.userId] - 用户 QQ 号（用于配额检查）
  * @returns {Promise<{ok, url?, b64?, revisedPrompt?, raw?, error?}>}
  */
 export async function generateImage(prompt, opts = {}) {
@@ -31,6 +87,12 @@ export async function generateImage(prompt, opts = {}) {
   if (!ic.enabled) return { ok: false, error: '图片生成功能未启用' }
   if (!ic.apiBase || !ic.apiKey || !ic.model) {
     return { ok: false, error: '图片生成配置不完整（需要 apiBase、apiKey、model）' }
+  }
+
+  // 用户配额检查
+  if (opts.userId) {
+    const quota = checkUserQuota(opts.userId)
+    if (!quota.ok) return { ok: false, error: quota.reason }
   }
 
   const base = normalizeApiBase(ic.apiBase)
@@ -61,7 +123,7 @@ export async function generateImage(prompt, opts = {}) {
   const timer = setTimeout(() => controller.abort(), timeout)
 
   try {
-    logger && logger.info && logger.info(`[ai0-plugin] 图片生成请求：endpoint=${endpoint} model=${model} size=${size} prompt=${prompt.slice(0, 80)}`)
+    safeLogger.info(`[ai0-plugin] 图片生成请求：endpoint=${endpoint} model=${model} size=${size} prompt=${prompt.slice(0, 80)}`)
 
     const resp = await fetch(endpoint, {
       method: 'POST',
@@ -82,7 +144,7 @@ export async function generateImage(prompt, opts = {}) {
 
     if (!resp.ok) {
       const errMsg = data?.error?.message || data?.message || respText.slice(0, 200)
-      logger && logger.error && logger.error(`[ai0-plugin] 图片生成 HTTP ${resp.status}: ${errMsg}`)
+      safeLogger.error(`[ai0-plugin] 图片生成 HTTP ${resp.status}: ${errMsg}`)
       return { ok: false, error: `HTTP ${resp.status}: ${errMsg}`, status: resp.status }
     }
 
@@ -90,6 +152,9 @@ export async function generateImage(prompt, opts = {}) {
     if (!item) {
       return { ok: false, error: 'API 返回数据中未找到图片', raw: data }
     }
+
+    // 记录使用量
+    if (opts.userId) recordUsage(opts.userId)
 
     return {
       ok: true,

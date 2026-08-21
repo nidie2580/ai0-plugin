@@ -96,8 +96,18 @@ export function saveHistory(userId, sessionId, messages) {
     const bak = file + '.bak'
     try {
       const data = JSON.stringify(latest, null, 2)
+      // M5: 会话文件大小上限 512KB，超过则截断旧消息
+      const MAX_HISTORY_BYTES = 512 * 1024
+      let trimmedData = data
+      if (Buffer.byteLength(data, 'utf-8') > MAX_HISTORY_BYTES) {
+        // 保留最后 contextSize*2 条消息
+        const ctxSize = cfg.get('chat.contextSize', 10)
+        const keep = latest.slice(-(ctxSize * 2 + 2))
+        trimmedData = JSON.stringify(keep, null, 2)
+        safeLogger.warn(`[ai0-plugin] 会话历史超过 512KB，已截断至 ${keep.length} 条消息`)
+      }
       // 先写到 tmp
-      fs.writeFileSync(tmp, data, { encoding: 'utf-8', mode: 0o600 })
+      fs.writeFileSync(tmp, trimmedData, { encoding: 'utf-8', mode: 0o600 })
       // 尽量刷盘（兼容旧 node 忽略）；fd 用完必须 close，避免句柄泄漏
       try {
         const fd = fs.openSync(tmp, 'r')

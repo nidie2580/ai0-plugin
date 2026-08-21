@@ -296,7 +296,7 @@ if (route === 'dashboard') {
     $('#sessDetailTag').textContent = `${userId}/${sessionId}`
     const r = await api(`/api/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}`)
     const box = $('#sessDetail')
-    if (!r.ok) { box.innerHTML = `<p class="err">${r.msg || '加载失败'}</p>`; return }
+    if (!r.ok) { box.innerHTML = `<p class="err">${escapeHtml(r.msg || '加载失败')}</p>`; return }
     const arr = r.data || []
     if (!arr.length) { box.innerHTML = '<p class="hint">该会话无消息记录。</p>'; return }
     box.innerHTML = ''

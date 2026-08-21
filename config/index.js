@@ -127,6 +127,12 @@ imageGen:
   quality: "standard"
   # 生成超时（毫秒）
   timeout: 120000
+  # 允许使用生图功能的用户 QQ 列表（空数组 = 所有人都能用）
+  allowedUsers: []
+  # 每用户每天生图次数上限（0 = 不限制）
+  dailyLimit: 0
+  # 每用户每天预估 token 消耗上限（0 = 不限制，按 1000 token/张 估算）
+  dailyTokenEstimate: 0
 
 # 系统提示词
 system:
@@ -252,7 +258,7 @@ export function loadConfig() {
       try {
         const raw = fs.readFileSync(bak, 'utf-8')
         const parsed = YAML.parse(raw) || {}
-        logger.warn && logger.warn(`[ai0-plugin] config.yaml 格式损坏（${primaryErr.message}），已自动从 config.yaml.bak 恢复`)
+        safeLogger.warn(`[ai0-plugin] config.yaml 格式损坏（${primaryErr.message}），已自动从 config.yaml.bak 恢复`)
         try { atomicWriteYaml(USER_CONFIG, raw) } catch (_) {}
         applyEnvOverrides(parsed)
         cachedConfig = parsed
@@ -260,11 +266,11 @@ export function loadConfig() {
         lastParseError = null
         return cachedConfig
       } catch (bakErr) {
-        logger.warn && logger.warn(`[ai0-plugin] config.yaml.bak 也解析失败：${bakErr.message}`)
+        safeLogger.warn(`[ai0-plugin] config.yaml.bak 也解析失败：${bakErr.message}`)
       }
     }
     // 3. 实在不行 → 退回默认模板（绝不让 YAML 坏了把 Yunzai 启动也拖崩；但不会覆写坏文件，方便人工修复）
-    logger.error && logger.error(`[ai0-plugin] 配置解析失败，退回内置默认模板（请修复 config.yaml：${primaryErr.message}）`)
+    safeLogger.error(`[ai0-plugin] 配置解析失败，退回内置默认模板（请修复 config.yaml：${primaryErr.message}）`)
     try {
       const parsed = YAML.parse(defaultConfigContent) || {}
       applyEnvOverrides(parsed)
@@ -328,7 +334,7 @@ export function saveConfig(config) {
     lastParseError = null
     return true
   } catch (err) {
-    logger.error && logger.error(`[ai0-plugin] 保存配置失败: ${err.message}`)
+    safeLogger.error(`[ai0-plugin] 保存配置失败: ${err.message}`)
     return false
   }
 }
