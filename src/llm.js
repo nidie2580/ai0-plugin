@@ -309,7 +309,7 @@ export async function chatCompletions(messages, {
     })
   } catch (e) {
     const s = summarizeAxiosError(e)
-    logger.error(`[ai0-plugin] LLM 调用异常(${s.method} ${s.url}): code=${s.code} message=${s.message}`)
+    logger && logger.error && logger.error(`[ai0-plugin] LLM 调用异常(${s.method} ${s.url}): code=${s.code} message=${s.message}`)
     let msg = `请求异常：${s.message}`
     if (s.code === 'ECONNREFUSED') msg = '连接被拒绝：请确认 apiBase 地址/端口正确，且服务已启动。'
     else if (s.code === 'ETIMEDOUT' || s.code === 'ECONNABORTED') msg = '连接超时：apiBase 不可达或网络太慢（可尝试调大 timeout）。'
@@ -325,7 +325,7 @@ export async function chatCompletions(messages, {
         ? resp.data.slice(0, 2000)
         : JSON.stringify(resp.data || {}).slice(0, 3000)
     } catch (_) {}
-    logger.error(`[ai0-plugin] LLM HTTP ${status} ${resp.statusText || ''} | URL=${url}` + (bodyPreview ? `\n响应体:\n${bodyPreview}` : ''))
+    logger && logger.error && logger.error(`[ai0-plugin] LLM HTTP ${status} ${resp.statusText || ''} | URL=${url}` + (bodyPreview ? `\n响应体:\n${bodyPreview}` : ''))
 
     // 友好化常见错误
     let extra = ''

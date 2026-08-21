@@ -174,7 +174,7 @@ async function sendOnlyAtDefaultReply(e, config) {
     : 'together'
 
   if (!texts.length && !stickers.length) {
-    logger.warn && logger.warn('[ai0-plugin] onlyAtDefaultReply 配置为空（没文案也没图），跳过默认回复')
+    logger && logger.warn('[ai0-plugin] onlyAtDefaultReply 配置为空（没文案也没图），跳过默认回复')
     return false
   }
 
@@ -188,7 +188,7 @@ async function sendOnlyAtDefaultReply(e, config) {
     try {
       stickerSeg = await helper.getImageSegment(pick)
     } catch (err) {
-      logger.warn && logger.warn(`[ai0-plugin] 默认回复图片处理失败: ${err.message}`)
+      logger && logger.warn(`[ai0-plugin] 默认回复图片处理失败: ${err.message}`)
       stickerSeg = null
     }
   }
@@ -223,7 +223,7 @@ async function sendOnlyAtDefaultReply(e, config) {
     }
     return true
   } catch (err) {
-    logger.error && logger.error(`[ai0-plugin] 发送仅艾特默认回复失败: ${err.message}`)
+    logger && logger.error(`[ai0-plugin] 发送仅艾特默认回复失败: ${err.message}`)
     // 兜底：如果有文案至少再试一次只发文案，别啥都不回
     if (text && sendMode !== 'together') {
       try { await e.reply(text); return true } catch (_) {}
@@ -395,7 +395,7 @@ export async function handleChat(e) {
     try {
       identityContext = await groupOps.buildIdentityContext(e)
     } catch (err) {
-      logger.warn(`[ai0-plugin] 构建群身份上下文失败: ${err.message}`)
+      logger && logger.warn(`[ai0-plugin] 构建群身份上下文失败: ${err.message}`)
     }
   }
 
@@ -405,7 +405,7 @@ export async function handleChat(e) {
     try {
       groupContext = await groupOps.buildGroupContext(e)
     } catch (err) {
-      logger.warn(`[ai0-plugin] 构建群操作上下文失败: ${err.message}`)
+      logger && logger.warn(`[ai0-plugin] 构建群操作上下文失败: ${err.message}`)
     }
   }
 
@@ -414,7 +414,7 @@ export async function handleChat(e) {
   try {
     imageContext = imageGen.buildImageContext()
   } catch (err) {
-    logger.warn(`[ai0-plugin] 构建图片上下文失败: ${err.message}`)
+    logger && logger.warn(`[ai0-plugin] 构建图片上下文失败: ${err.message}`)
   }
 
   // 合并所有上下文到 system prompt（身份信息放最前面，让 AI 优先记住真实数据）
@@ -471,7 +471,7 @@ export async function handleChat(e) {
     if (err?.name === 'CanceledError' || /cancel|abort/i.test(err?.message || err?.code || '')) {
       replyText = ''  // 被新请求取代时静默吞掉，不回用户发错误文本
     } else {
-      logger.error(`[ai0-plugin] LLM 调用失败: ${err.message}`)
+      logger && logger.error(`[ai0-plugin] LLM 调用失败: ${err.message}`)
       replyText = `(调用失败：${err.message?.replace(/sk-[A-Za-z0-9]+/g, 'sk-***') || '未知错误'})`
     }
   } finally {
@@ -491,10 +491,10 @@ export async function handleChat(e) {
             r.ok ? `✅ ${r.msg}` : `❌ ${r.msg}`
           ).join('\n')
           replyText = replyText + '\n\n' + actionReport
-          logger.info(`[ai0-plugin] 群操作执行结果: ${JSON.stringify(results)}`)
+          logger && logger.info(`[ai0-plugin] 群操作执行结果: ${JSON.stringify(results)}`)
         }
       } catch (err) {
-        logger.error(`[ai0-plugin] 群操作执行异常: ${err.message}`)
+        logger && logger.error(`[ai0-plugin] 群操作执行异常: ${err.message}`)
       }
     }
 
@@ -514,7 +514,7 @@ export async function handleChat(e) {
               try {
                 await e.reply(segment.image(imgResult.imageBuffer))
               } catch (imgErr) {
-                logger.error(`[ai0-plugin] 发送图片失败: ${imgErr.message}`)
+                logger && logger.error(`[ai0-plugin] 发送图片失败: ${imgErr.message}`)
                 await helper.replyText(e, '图片生成成功但发送失败，请查看日志。')
               }
             }
@@ -527,7 +527,7 @@ export async function handleChat(e) {
           }
         }
       } catch (err) {
-        logger.error(`[ai0-plugin] 图片生成执行异常: ${err.message}`)
+        logger && logger.error(`[ai0-plugin] 图片生成执行异常: ${err.message}`)
       }
     }
 
@@ -562,7 +562,7 @@ async function parseAndExecuteImageAction(replyText) {
     return { cleanText, ok: false, error: '图片提示词为空' }
   }
 
-  logger.info(`[ai0-plugin] 解析到图片生成指令，提示词：${prompt.slice(0, 100)}`)
+  logger && logger.info(`[ai0-plugin] 解析到图片生成指令，提示词：${prompt.slice(0, 100)}`)
   const result = await imageGen.generateImage(prompt)
   if (!result.ok) {
     return { cleanText, ok: false, error: result.error }

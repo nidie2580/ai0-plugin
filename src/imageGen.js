@@ -95,7 +95,7 @@ export async function generateImage(prompt, opts = {}) {
   const timer = setTimeout(() => controller.abort(), timeout)
 
   try {
-    logger.info(`[ai0-plugin] 图片生成请求：endpoint=${endpoint} model=${model} size=${size} prompt=${prompt.slice(0, 80)}`)
+    logger && logger.info && logger.info(`[ai0-plugin] 图片生成请求：endpoint=${endpoint} model=${model} size=${size} prompt=${prompt.slice(0, 80)}`)
 
     const resp = await fetch(endpoint, {
       method: 'POST',
@@ -115,7 +115,7 @@ export async function generateImage(prompt, opts = {}) {
 
     if (!resp.ok) {
       const errMsg = data?.error?.message || data?.message || respText.slice(0, 200)
-      logger.error(`[ai0-plugin] 图片生成 HTTP ${resp.status}: ${errMsg}`)
+      logger && logger.error && logger.error(`[ai0-plugin] 图片生成 HTTP ${resp.status}: ${errMsg}`)
       return { ok: false, error: `HTTP ${resp.status}: ${errMsg}`, status: resp.status }
     }
 
