@@ -26,7 +26,7 @@ setTimeout(() => {
     const all = helper.listMasters()
     logger.info(`[ai0-plugin] 主人列表：框架(${s.framework.length})=[${s.framework.join(',') || '-'}] + 插件(${s.plugin.length})=[${s.plugin.join(',') || '-'}] → 合并 ${all.length} 人: ${all.join(',') || '(空，管理命令将不可用!)'}`)
     if (!all.length) {
-      logger.warn(`[ai0-plugin] ⚠️ 未检测到任何主人！可在 Yunzai 全局 config/matcher.master 或 插件 config.yaml 的 permissions.masters 中配置。任何人都可以发送 #ai诊断 查看当前生效配置。`)
+      logger.warn(`[ai0-plugin] ⚠️ 未检测到任何主人！可在 Yunzai 全局 config/matcher.master 或 插件 config.yaml 的 permissions.masters 中配置。`)
     }
   } catch (e) {
     logger.warn(`[ai0-plugin] 读取主人列表失败：${e.message}`)

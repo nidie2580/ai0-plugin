@@ -132,6 +132,15 @@ export function createApp() {
   app.use(express.json({ limit: '10mb' }))
   app.use(express.urlencoded({ extended: true }))
 
+  // —— 安全响应头（防御 XSS、Clickjacking、MIME 嗅探等）
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('X-Frame-Options', 'DENY')
+    res.setHeader('Referrer-Policy', 'no-referrer')
+    res.setHeader('X-XSS-Protection', '0')
+    next()
+  })
+
   // —— 反向代理真实 IP 识别（给限速/IP绑定用）：兼容 Cloudflare / X-Forwarded-For / X-Real-IP
   // 安全要点：只有当请求来自"可信代理来源"时才信任 X-Forwarded-For 等头，否则攻击者
   // 绕过代理直连端口时可伪造 XFF 头绕过 IP 绑定/限速。可信来源 = 回环地址 + web.trustedProxies

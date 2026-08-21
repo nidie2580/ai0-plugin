@@ -77,17 +77,17 @@ export class AICommands extends plugin {
         {
           reg: '^#ai(诊断|debug|检查)$',
           fnc: 'diagnose',
-          permission: 'all'
+          permission: 'master'
         },
         {
           reg: '^#ai(群诊断|检查群|群检查)$',
           fnc: 'groupDiagnose',
-          permission: 'all'
+          permission: 'master'
         },
         {
           reg: '^#ai(测试模型|模型测试|测模型)(\\s+\\S+)?$',
           fnc: 'testModel',
-          permission: 'all'
+          permission: 'master'
         },
         {
           reg: '^#(ai)?(切换模型|切模型|换模型)(\\s+\\S+(\\s+\\S+)?)?$',
@@ -162,8 +162,8 @@ export class AICommands extends plugin {
         '  #ai添加主人 <QQ号>',
         '  #ai重载         重新加载配置文件',
         '',
-        '【诊断命令】',
-        '  #ai诊断         权限/主人/配置/后台检查（任何人可用）',
+        '【诊断命令】(仅主人)',
+        '  #ai诊断         权限/主人/配置/后台检查',
         '  #ai测试模型 [key]    测试指定平台的接口',
         '',
         '💡 详细配置：plugins/ai0-plugin/config/config.yaml'
@@ -198,7 +198,7 @@ export class AICommands extends plugin {
   async setModel() {
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
-      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+      return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置模型\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置模型 <模型ID>')
@@ -214,7 +214,7 @@ export class AICommands extends plugin {
   async setApiKey() {
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
-      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+      return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置apikey\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置apikey <你的apikey>')
@@ -230,7 +230,7 @@ export class AICommands extends plugin {
   async setApiBase() {
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
-      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+      return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置api\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置api <apiBaseURL>')
@@ -246,7 +246,7 @@ export class AICommands extends plugin {
   async addMaster() {
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
-      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+      return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
     const match = helper.getMessageText(this.e).match(/^#ai添加主人\s+(\d+)/)
     if (!match) return this.e.reply('用法：#ai添加主人 <QQ号>')
@@ -266,7 +266,7 @@ export class AICommands extends plugin {
     const e = this.e
     const userId = helper.getUserId(e)
     if (!helper.isMaster(userId, e)) {
-      return e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+      return e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
     // 1. 先强制把缓存打失效（无论 mtime 是否变化都重新解析一遍）
     try { cfg.saveConfig?.(cfg.loadConfig?.() || {}) } catch (_) {}
@@ -337,7 +337,7 @@ export class AICommands extends plugin {
     if (!helper.isMaster(userId, e)) {
       const noTip = [
         '❌ 「#ai网页管理」仅机器人主人可用。',
-        `（当前账号 QQ=${userId ?? '未知'} 未被识别为主人，可发送 #ai诊断 排查）`
+        `（当前账号 QQ=${userId ?? '未知'} 未被识别为主人，请联系机器人主人确认权限）`
       ]
       if (isGroup) noTip.push('如你确实是主人，请先把机器人添加为好友后再在群里使用此命令（可提高校验优先级）。')
       return e.reply(noTip.join('\n'))
@@ -424,7 +424,7 @@ export class AICommands extends plugin {
   async webStart() {
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
-      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+      return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
     try {
       // 用户显式「启动」时，若配置变了就自动重启使用新 host/port
@@ -449,7 +449,7 @@ export class AICommands extends plugin {
   async webStop() {
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
-      return this.e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+      return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
     const ok = await ws.stopWebServer()
     return this.e.reply(ok ? '✅ 网页管理后台已关闭。' : '网页后台当前未运行。')
@@ -862,7 +862,7 @@ export class AICommands extends plugin {
     const e = this.e
     const userId = helper.getUserId(e)
     if (!helper.isMaster(userId, e)) {
-      return e.reply('❌ 此命令仅主人可用（可发送 #ai诊断 排查）')
+      return e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
     const raw = helper.getMessageText(e)
     const re = /^#(ai)?(切换模型|切模型|换模型)\s*(.*)?$/s
