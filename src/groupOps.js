@@ -475,6 +475,8 @@ export async function buildGroupContext(e) {
   const allowNotice = cfg.get('groupOps.allowNotice', true) !== false
   const allowSearch = cfg.get('groupOps.allowSearch', true) !== false
   const allowBlacklist = cfg.get('groupOps.allowBlacklist', true) !== false
+  const allowCustomTitle = cfg.get('groupOps.allowCustomTitle', true) !== false
+  const allowLevelTitle = cfg.get('groupOps.allowLevelTitle', true) !== false
   if (allowGroupName && botCanManage) {
     lines.push('  - 改群名：需要请求者是群主/管理员/机器人主人，机器人必须是群主/管理员。')
   }
@@ -496,6 +498,12 @@ export async function buildGroupContext(e) {
   if (allowBlacklist && botCanManage) {
     lines.push('  - 黑名单：拉黑/解除拉黑群成员。需要请求者是群主/管理员/机器人主人。')
   }
+  if (allowCustomTitle && botInferred === 'owner') {
+    lines.push('  - 自定义头衔：用户只能给自己设置自定义头衔（目标必须等于发送者）。机器人必须是群主。')
+  }
+  if (allowLevelTitle && botInferred === 'owner') {
+    lines.push('  - 等级头衔：根据等级自定义头衔。需要请求者是群主/管理员/机器人主人，机器人必须是群主。')
+  }
 
   lines.push('', '【操作输出格式】')
   lines.push('如果你判断请求合法且需要执行群操作，请在回复末尾另起一行，用以下格式输出操作指令（用户不会看到这行，系统会解析并执行）：')
@@ -516,6 +524,8 @@ export async function buildGroupContext(e) {
   lines.push('  群搜索关：[action:group_search:0]')
   lines.push('  拉黑：[action:blacklist:add:目标QQ]')
   lines.push('  解除拉黑：[action:blacklist:remove:目标QQ]')
+  lines.push('  自定义头衔：[action:custom_title:目标QQ:头衔文字]（目标必须是发送者自己）')
+  lines.push('  等级头衔：[action:level_title:目标QQ:等级:头衔文字]')
   lines.push('示例：用户说"禁言一下@123 10分钟"，你的回复可以是：')
   lines.push('  好的，我来帮你禁言该成员10分钟。')
   lines.push('  [action:mute:123:600]')
@@ -589,6 +599,17 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
     if (!requesterIsMaster && requesterRole !== 'owner') {
       return { ok: false, reason: '仅机器人主人/群主可执行此操作' }
     }
+  } else if (type === 'custom_title') {
+    // 自定义头衔：用户只能给自己设置（targetUid 必须等于 requesterUid）
+    const isSelf = String(targetUid) === String(requesterUid)
+    if (!isSelf) {
+      return { ok: false, reason: '自定义头衔只能给自己设置，不能给他人设置' }
+    }
+  } else if (type === 'level_title') {
+    // 等级头衔：需要 elevated 权限
+    if (!requesterElevated) {
+      return { ok: false, reason: '发送者无权限（仅群主/管理员/机器人主人可设置等级头衔）' }
+    }
   } else {
     // mute/kick/set_group_name/mute_all/timed_mute/set_notice/blacklist
     if (!requesterElevated) {
@@ -602,8 +623,8 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
     if (botRole !== 'owner') {
       return { ok: false, reason: '机器人不是群主，无法设置/取消管理员', requesterRole, botRole }
     }
-  } else if (type === 'title_display' || type === 'group_search') {
-    // 头衔展示和群搜索仅群主可操作
+  } else if (type === 'title_display' || type === 'group_search' || type === 'custom_title' || type === 'level_title') {
+    // 头衔展示、群搜索、自定义头衔、等级头衔仅群主可操作
     if (botRole !== 'owner') {
       return { ok: false, reason: '机器人不是群主，无法执行此操作', requesterRole, botRole }
     }
@@ -746,6 +767,12 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
       if (type === 'blacklist' && cfg.get('groupOps.allowBlacklist', true) === false) {
         results.push({ type, ok: false, msg: '黑名单功能未启用' }); continue
       }
+      if (type === 'custom_title' && cfg.get('groupOps.allowCustomTitle', true) === false) {
+        results.push({ type, ok: false, msg: '自定义头衔功能未启用' }); continue
+      }
+      if (type === 'level_title' && cfg.get('groupOps.allowLevelTitle', true) === false) {
+        results.push({ type, ok: false, msg: '等级头衔功能未启用' }); continue
+      }
 
       if (type === 'mute') {
         const duration = parseInt(args[1], 10)
@@ -836,6 +863,39 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         await executeBlacklist(groupId, targetUid, action)
         safeLogger.info(`[ai0-plugin] 群操作: blacklist ${action} 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: action === 'add' ? `已将 ${targetUid} 加入黑名单` : `已将 ${targetUid} 移出黑名单` })
+
+      } else if (type === 'custom_title') {
+        // 自定义头衔：用户只能给自己设置（targetUid 必须等于 requesterUid）
+        if (String(targetUid) !== String(requesterUid)) {
+          results.push({ type, ok: false, msg: '自定义头衔只能给自己设置，不能给他人设置' }); continue
+        }
+        const titleText = args.slice(1).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        if (!titleText) {
+          results.push({ type, ok: false, msg: '未指定头衔内容' }); continue
+        }
+        if (titleText.length > 18) {
+          results.push({ type, ok: false, msg: '头衔不能超过18个字符' }); continue
+        }
+        await executeCustomTitle(groupId, targetUid, titleText)
+        safeLogger.info(`[ai0-plugin] 群操作: custom_title 群${groupId} 目标${targetUid} 头衔${titleText} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: `已为您设置自定义头衔：${titleText}` })
+
+      } else if (type === 'level_title') {
+        // 等级头衔：根据等级自定义
+        const level = parseInt(args[1], 10)
+        if (!Number.isFinite(level) || level < 1 || level > 100) {
+          results.push({ type, ok: false, msg: '等级必须是1-100之间的数字' }); continue
+        }
+        const titleText = args.slice(2).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        if (!titleText) {
+          results.push({ type, ok: false, msg: '未指定等级头衔内容' }); continue
+        }
+        if (titleText.length > 18) {
+          results.push({ type, ok: false, msg: '头衔不能超过18个字符' }); continue
+        }
+        await executeLevelTitle(groupId, targetUid, level, titleText)
+        safeLogger.info(`[ai0-plugin] 群操作: level_title 群${groupId} 目标${targetUid} 等级${level} 头衔${titleText} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: `已为 ${targetUid} 设置等级${level}头衔：${titleText}` })
 
       } else {
         results.push({ type, ok: false, msg: `未知操作类型：${type}` })
@@ -956,4 +1016,27 @@ async function executeBlacklist(groupId, userId, action) {
   } else {
     throw new Error('无效的黑名单操作')
   }
+}
+
+/** 自定义头衔（用户只能给自己设置） */
+async function executeCustomTitle(groupId, userId, title) {
+  const bot = global.Bot || global.bot
+  const group = bot?.pickGroup?.(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  if (typeof group.setTitle === 'function') await group.setTitle(userId, title)
+  else if (typeof group.setMemberTitle === 'function') await group.setMemberTitle(userId, title)
+  else if (typeof group.setGroupMemberTitle === 'function') await group.setGroupMemberTitle(userId, title)
+  else throw new Error('当前适配器不支持设置自定义头衔')
+}
+
+/** 等级头衔（根据等级自定义） */
+async function executeLevelTitle(groupId, userId, level, title) {
+  const bot = global.Bot || global.bot
+  const group = bot?.pickGroup?.(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  // 尝试多种适配器方法
+  if (typeof group.setLevelTitle === 'function') await group.setLevelTitle(userId, level, title)
+  else if (typeof group.setGroupLevelTitle === 'function') await group.setGroupLevelTitle(userId, level, title)
+  else if (typeof group.setTitleByLevel === 'function') await group.setTitleByLevel(userId, level, title)
+  else throw new Error('当前适配器不支持设置等级头衔')
 }
