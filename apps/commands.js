@@ -787,6 +787,21 @@ export class AICommands extends plugin {
       lines.push(`  错误: ${err.message}`)
     }
 
+    // 6) 能力总结
+    lines.push('')
+    lines.push('【6. 操作能力检测】')
+    const caps = [
+      ['禁言', typeof group?.muteMember === 'function' || typeof group?.mute === 'function'],
+      ['踢出', typeof group?.kickMember === 'function' || typeof group?.kick === 'function'],
+      ['设置管理员', typeof group?.setAdmin === 'function'],
+      ['设置头衔', typeof group?.setTitle === 'function'],
+      ['获取成员信息', typeof group?.getMemberInfo === 'function' || typeof group?.getMember === 'function' || typeof group?.getMemberMap === 'function'],
+      ['获取群信息', typeof group?.getGroupInfo === 'function' || typeof group?.getInfo === 'function'],
+    ]
+    for (const [name, ok] of caps) {
+      lines.push(`  ${ok ? '✅' : '❌'} ${name}`)
+    }
+
     return e.reply(lines.join('\n'))
   }
 
