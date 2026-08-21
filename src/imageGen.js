@@ -1,5 +1,5 @@
 import * as cfg from '../config/index.js'
-import { isAllowedOutboundUrl } from './security.js'
+import { isAllowedOutboundUrl, safeFetchWithRedirects, safeAxiosRequest } from './security.js'
 import { normalizeApiBase } from './helper.js'
 import { safeLogger } from './globals.js'
 
@@ -125,24 +125,23 @@ export async function generateImage(prompt, opts = {}) {
   try {
     safeLogger.info(`[ai0-plugin] 图片生成请求：endpoint=${endpoint} model=${model} size=${size} prompt=${prompt.slice(0, 80)}`)
 
-    const resp = await fetch(endpoint, {
-      method: 'POST',
+    // 使用 safeAxiosRequest 走 DNS pinning + 逐跳 SSRF 校验
+    const resp = await safeAxiosRequest('POST', endpoint, body, {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${ic.apiKey}`
       },
-      body: JSON.stringify(body),
       signal: controller.signal,
-      redirect: 'manual'
+      timeout
     })
 
     clearTimeout(timer)
 
-    const respText = await resp.text()
+    const respText = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data || {})
     let data = null
     try { data = JSON.parse(respText) } catch (_) { data = { raw: respText } }
 
-    if (!resp.ok) {
+    if (!resp.status || resp.status < 200 || resp.status >= 300) {
       const errMsg = data?.error?.message || data?.message || respText.slice(0, 200)
       safeLogger.error(`[ai0-plugin] 图片生成 HTTP ${resp.status}: ${errMsg}`)
       return { ok: false, error: `HTTP ${resp.status}: ${errMsg}`, status: resp.status }
@@ -165,7 +164,7 @@ export async function generateImage(prompt, opts = {}) {
     }
   } catch (err) {
     clearTimeout(timer)
-    if (err.name === 'AbortError') {
+    if (err.name === 'AbortError' || err.name === 'CanceledError') {
       return { ok: false, error: `图片生成超时（${timeout}ms）` }
     }
     return { ok: false, error: err.message || String(err) }
@@ -173,39 +172,12 @@ export async function generateImage(prompt, opts = {}) {
 }
 
 /**
- * 下载图片 URL 为 Buffer
+ * 下载图片 URL 为 Buffer（统一走 safeFetchWithRedirects，含 DNS pinning）
  */
 export async function downloadImage(url, maxBytes = 20 * 1024 * 1024) {
-  // SSRF 防护：拒绝指向私有/回环/链路本地地址的 URL（图片 URL 来自 AI 生成结果或群消息，攻击者可控）
-  const check = await isAllowedOutboundUrl(url).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
-  if (!check.ok) return { ok: false, error: `下载图片失败: ${check.reason || '拒绝访问该 URL'}` }
-
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 60000)
-
-  try {
-    // 关闭自动跟随重定向：重定向 Location 可能绕过 SSRF 校验，需逐个校验后才能跟随
-    const resp = await fetch(url, { signal: controller.signal, redirect: 'manual' })
-    if (resp.status >= 300 && resp.status < 400) {
-      const loc = resp.headers.get('location')
-      if (!loc) return { ok: false, error: '下载图片失败: 重定向无 Location 头' }
-      const next = new URL(loc, url).toString()
-      const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标校验失败' }))
-      if (!chk2.ok) return { ok: false, error: `下载图片失败: ${chk2.reason || '拒绝重定向目标'}` }
-      const r2 = await fetch(next, { signal: controller.signal, redirect: 'manual' })
-      if (r2.status >= 300 && r2.status < 400) return { ok: false, error: '下载图片失败: 重定向次数过多' }
-      if (!r2.ok) return { ok: false, error: `下载图片失败: HTTP ${r2.status}` }
-      return readBody(r2, maxBytes)
-    }
-    if (!resp.ok) {
-      return { ok: false, error: `下载图片失败: HTTP ${resp.status}` }
-    }
-    return readBody(resp, maxBytes)
-  } catch (err) {
-    return { ok: false, error: `下载图片失败: ${err.message}` }
-  } finally {
-    clearTimeout(timer)
-  }
+  const result = await safeFetchWithRedirects(url, { signal: AbortSignal.timeout(60000) })
+  if (!result.ok) return { ok: false, error: `下载图片失败: ${result.error}` }
+  return readBody(result.response, maxBytes)
 }
 
 /** 流式读取响应体并限制总大小，防止恶意 URL 返回超大响应拖垮内存 */

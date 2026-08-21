@@ -3,8 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { safeLogger } from './globals.js'
-import { isAllowedOutboundUrl } from './security.js'
+import { isAllowedOutboundUrl, safeFetchWithRedirects } from './security.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -894,34 +893,9 @@ function guessExtFromBuffer(buf) {
 }
 
 async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {
-  // SSRF 防护：拒绝指向私有/回环/链路本地地址的 URL（图片 URL 来自群消息，攻击者可控）
-  const check = await isAllowedOutboundUrl(url).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
-  if (!check.ok) return { ok: false, error: check.reason || '拒绝访问该 URL' }
-
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 30000)
-  try {
-    // 关闭自动跟随重定向：重定向 Location 可能绕过 SSRF 校验，需逐个校验后才能跟随
-    const resp = await fetch(url, { signal: controller.signal, redirect: 'manual' })
-    if (resp.status >= 300 && resp.status < 400) {
-      const loc = resp.headers.get('location')
-      if (!loc) return { ok: false, error: `HTTP ${resp.status}` }
-      const next = new URL(loc, url).toString()
-      const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标校验失败' }))
-      if (!chk2.ok) return { ok: false, error: chk2.reason || '拒绝重定向目标' }
-      // 重定向目标通过校验 → 用安全函数跟随（最多 3 跳）
-      const r2 = await fetch(next, { signal: controller.signal, redirect: 'manual' })
-      if (r2.status >= 300 && r2.status < 400) return { ok: false, error: '重定向次数过多' }
-      if (!r2.ok) return { ok: false, error: `HTTP ${r2.status}` }
-      return readBody(r2, maxBytes)
-    }
-    if (!resp.ok) return { ok: false, error: `HTTP ${resp.status}` }
-    return readBody(resp, maxBytes)
-  } catch (err) {
-    return { ok: false, error: err.message || String(err) }
-  } finally {
-    clearTimeout(timer)
-  }
+  const result = await safeFetchWithRedirects(url, { signal: AbortSignal.timeout(30000) })
+  if (!result.ok) return { ok: false, error: result.error }
+  return readBody(result.response, maxBytes)
 }
 
 /** 流式读取响应体并限制总大小，防止恶意 URL 返回超大响应拖垮内存 */

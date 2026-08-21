@@ -130,11 +130,23 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
   while (true) {
     const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
     if (!check.ok) return { ok: false, error: check.reason || '拒绝访问该 URL' }
-    // Ensure we don't let fetch auto-redirect
-    const fetchOpts = { ...(opts || {}), redirect: 'manual' }
+    // DNS Rebinding 防护：使用已解析 IP 直连，Host 头保留原始域名
+    let connectUrl = current
+    let fetchOpts = { ...(opts || {}), redirect: 'manual' }
+    if (check.resolvedIp) {
+      try {
+        const u = new URL(current)
+        if (!net.isIP(u.hostname)) {
+          const origHostname = u.hostname
+          u.hostname = check.resolvedIp
+          connectUrl = u.toString()
+          fetchOpts.headers = { ...(fetchOpts.headers || {}), 'Host': origHostname + (u.port ? `:${u.port}` : '') }
+        }
+      } catch (_) {}
+    }
     let resp
     try {
-      resp = await fetch(current, fetchOpts)
+      resp = await fetch(connectUrl, fetchOpts)
     } catch (err) {
       return { ok: false, error: err.message || String(err) }
     }
@@ -144,10 +156,8 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
       const next = new URL(loc, current).toString()
       redirects += 1
       if (redirects > maxRedirects) return { ok: false, error: '重定向次数过多' }
-      // validate next before following
       const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
       if (!chk2.ok) return { ok: false, error: chk2.reason || '拒绝重定向目标' }
-      // follow to next
       current = next
       continue
     }
