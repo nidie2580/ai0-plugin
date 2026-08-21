@@ -32,8 +32,9 @@ function cleanupTmpDir() {
 function readFrameworkMasters() {
   const masters = new Set()
   try {
-    if (typeof global !== 'undefined' && global.Config) {
-      const g = global.Config
+    // 兼容标准 Yunzai (global.Config) 和 XRK-Yunzai (globalThis.Config / global.cfg)
+    const g = (typeof globalThis !== 'undefined' && globalThis.Config) || (typeof global !== 'undefined' && global.Config) || null
+    if (g) {
       for (const k of ['master', 'masters', 'masterQQ', 'qq', 'owner']) {
         const v = g[k]
         if (!v) continue

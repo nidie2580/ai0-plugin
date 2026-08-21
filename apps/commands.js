@@ -615,7 +615,7 @@ export class AICommands extends plugin {
       '  4) 如果 YAML 里写的是裸 host: 0.0.0.0（没加引号），部分解析器会把它当作数字 0，建议写 host: "0.0.0.0" 更稳妥',
       '',
       '💡 如果主人判定一直是❌：',
-      '  1) XRK-Yunzai 自带主人系统（config/matcher 中的 master），通常在 Yunzai 根目录 config/ 配置即可。我们会自动读取它。',
+      '  1) 插件会自动读取 Yunzai 框架的主人配置（globalThis.Config.master / matcher.master），以及插件自身的 permissions.masters。',
       '  2) 也可以改 plugins/ai0-plugin/config/config.yaml 的 permissions.masters，然后发送 #ai重载 或重启。',
       '  3) 不确定就把这里的诊断截图发出来对照。'
     ]
