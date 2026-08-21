@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 import cookieParser from 'cookie-parser'
@@ -127,15 +128,22 @@ function requireAuth(req, res, next) {
   next()
 }
 
+function safeCompare(a, b) {
+  const x = Buffer.from(String(a || ''), 'utf-8')
+  const y = Buffer.from(String(b || ''), 'utf-8')
+  if (x.length !== y.length) return false
+  return crypto.timingSafeEqual(x, y)
+}
+
 function requireCsrf(req, res, next) {
   const sessionToken = req.cookies?.ai0_session || req.headers['x-ai0-session']
   const csrfCookie = req.cookies?.ai0_csrf
   const csrfHeader = req.headers['x-csrf-token']
-  if (!csrfCookie || !csrfHeader || csrfCookie !== csrfHeader) {
+  if (!csrfCookie || !csrfHeader || !safeCompare(csrfCookie, csrfHeader)) {
     return res.status(403).json({ ok: false, msg: 'CSRF 校验失败' })
   }
   const storedCsrf = auth.getSessionCsrf(sessionToken)
-  if (!storedCsrf || storedCsrf !== csrfCookie) {
+  if (!storedCsrf || !safeCompare(storedCsrf, csrfCookie)) {
     return res.status(403).json({ ok: false, msg: 'CSRF token 无效' })
   }
   next()
@@ -247,7 +255,7 @@ export function createApp() {
     res.status(500).send('页面文件缺失，请检查 web/ 目录')
   })
 
-  app.use('/assets', express.static(path.join(WEB_DIR, 'assets')))
+  app.use('/assets', express.static(path.join(WEB_DIR, 'assets'), { dotfiles: 'deny' }))
 
   app.get('/magic/:token', (req, res) => {
     const token = req.params.token
@@ -525,6 +533,9 @@ export function createApp() {
   // ---- 多 API 平台：探测某 provider 的 /models ----
   app.post('/api/providers/probe', requireAuth, requireCsrf, async (req, res) => {
     const { modelKey = null } = req.body || {}
+    if (modelKey && (typeof modelKey !== 'string' || modelKey.length > 128)) {
+      return res.json({ ok: false, msg: 'modelKey 格式无效' })
+    }
     try {
       const t0 = Date.now()
       const info = await llm.listAvailableModels({ modelKey })
@@ -570,7 +581,11 @@ export function createApp() {
   })
 
   app.post('/api/test-model', requireAuth, requireCsrf, async (req, res) => {
-    const { message = '请用一句话介绍你自己', modelKey = null } = req.body || {}
+    let { message = '请用一句话介绍你自己', modelKey = null } = req.body || {}
+    if (typeof message !== 'string') message = String(message)
+    if (message.length > 10000) {
+      return res.json({ ok: false, msg: '消息过长（最多 10000 字符）' })
+    }
     try {
       // 先探测 /models 并返回归一化后的 url 用于 UI 诊断展示
       const probe = await llm.probeModelConnection({ modelKey })
@@ -646,6 +661,9 @@ export function createApp() {
     const { prompt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') {
       return res.json({ ok: false, msg: '请提供测试提示词' })
+    }
+    if (prompt.length > 4000) {
+      return res.json({ ok: false, msg: '提示词过长（最多 4000 字符）' })
     }
     try {
       const result = await imageGen.generateImage(prompt)

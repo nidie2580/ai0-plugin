@@ -283,9 +283,9 @@ export async function chatCompletions(messages, {
   } catch (e) {
     const s = summarizeAxiosError(e)
     logger && logger.error && logger.error(`[ai0-plugin] LLM 调用异常(${s.method} ${s.url}): code=${s.code} message=${s.message}`)
-    let msg = `请求异常：${s.message}`
+    let msg = '请求异常，请检查模型配置或稍后重试'
     if (s.code === 'ECONNREFUSED') msg = '连接被拒绝：请确认 apiBase 地址/端口正确，且服务已启动。'
-    else if (s.code === 'ETIMEDOUT' || s.code === 'ECONNABORTED') msg = '连接超时：apiBase 不可达或网络太慢（可尝试调大 timeout）。'
+    else if (s.code === 'ETIMEDOUT' || s.code === 'ECONNABORTED') msg = '连接超时：请稍后重试或调大 timeout。'
     else if (s.code === 'ENOTFOUND') msg = 'DNS 解析失败：apiBase 域名无法解析。'
     throw new Error(msg)
   }

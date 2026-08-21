@@ -1,6 +1,7 @@
 import * as cfg from '../config/index.js'
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { isAllowedOutboundUrl } from './security.js'
 
@@ -869,7 +870,7 @@ function safeSegmentImage(filePath) {
 }
 
 function rand6() {
-  return Math.random().toString(36).slice(2, 8)
+  return crypto.randomBytes(3).toString('hex')
 }
 
 function safeUrlPathname(u) {

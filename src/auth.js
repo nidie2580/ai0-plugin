@@ -124,13 +124,18 @@ export function verifyCode(id, code, clientIp = 'unknown') {
     return { ok: false, msg: '验证码已过期' }
   }
   if (String(rec.code) !== String(code)) {
-    rec.failCount = (rec.failCount || 0) + 1
-    // 同一 id 连续错 5 次 → 作废（防猜）
-    if (rec.failCount >= 5) {
-      codes.delete(id)
-      return { ok: false, msg: '验证码错误次数过多，已作废，请重新生成' }
+    // timing-safe 比较，防止时序攻击逐字符猜解
+    const a = Buffer.from(String(rec.code), 'utf-8')
+    const b = Buffer.from(String(code), 'utf-8')
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      rec.failCount = (rec.failCount || 0) + 1
+      // 同一 id 连续错 5 次 → 作废（防猜）
+      if (rec.failCount >= 5) {
+        codes.delete(id)
+        return { ok: false, msg: '验证码错误次数过多，已作废，请重新生成' }
+      }
+      return { ok: false, msg: '验证码错误' }
     }
-    return { ok: false, msg: '验证码错误' }
   }
   rec.used = true
   codes.delete(id)
