@@ -64,8 +64,13 @@ setTimeout(async () => {
 
 const appsDir = path.join(__dirname, 'apps')
 const apps = {}
+const ALLOWED_APPS = new Set(['chat.js', 'commands.js', 'groupOps.js'])
 if (fs.existsSync(appsDir)) {
   for (const file of fs.readdirSync(appsDir).filter(f => f.endsWith('.js'))) {
+    if (!ALLOWED_APPS.has(file)) {
+      logger.warn && logger.warn(`[ai0-plugin] 跳过未授权模块 ${file}（不在白名单中）`)
+      continue
+    }
     try {
       const mod = await import(`./apps/${file}`)
       for (const key of Object.keys(mod)) {

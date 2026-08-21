@@ -202,13 +202,16 @@ export class AICommands extends plugin {
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置模型\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置模型 <模型ID>')
+    // 过滤控制字符，限制长度，防止 YAML 注入
+    const safe = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').slice(0, 128)
+    if (!safe) return this.e.reply('❌ 模型ID 包含非法字符')
     const config = cfg.loadConfig()
     const def = config.model?.default || 'openai-compatible'
     if (!config.model) config.model = {}
     if (!config.model[def]) config.model[def] = {}
-    config.model[def].model = text
+    config.model[def].model = safe
     cfg.saveConfig(config)
-    return this.e.reply(`✅ 已将默认模型ID设置为：${text}`)
+    return this.e.reply(`✅ 已将默认模型ID设置为：${safe}`)
   }
 
   async setApiKey() {
@@ -218,6 +221,11 @@ export class AICommands extends plugin {
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置apikey\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置apikey <你的apikey>')
+    // API Key 仅允许常见安全字符集：字母、数字、连字符、下划线、点号
+    // 覆盖 sk-xxx、gsk_xxx、Bearer token 等常见格式
+    if (!/^[A-Za-z0-9._\-]{4,512}$/.test(text)) {
+      return this.e.reply('❌ API Key 格式不合法（仅允许字母、数字、连字符、下划线、点号，4-512位）')
+    }
     const config = cfg.loadConfig()
     const def = config.model?.default || 'openai-compatible'
     if (!config.model) config.model = {}
@@ -234,13 +242,21 @@ export class AICommands extends plugin {
     }
     const text = helper.getMessageText(this.e).replace(/^#ai设置api\s+/, '').trim()
     if (!text) return this.e.reply('用法：#ai设置api <apiBaseURL>')
+    // 校验 URL 格式：必须是 http/https 协议
+    let parsed
+    try { parsed = new URL(text) } catch { return this.e.reply('❌ URL 格式不合法（需以 http:// 或 https:// 开头）') }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return this.e.reply('❌ 仅支持 http:// 和 https:// 协议')
+    }
+    // 过滤控制字符
+    const safe = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').slice(0, 512)
     const config = cfg.loadConfig()
     const def = config.model?.default || 'openai-compatible'
     if (!config.model) config.model = {}
     if (!config.model[def]) config.model[def] = {}
-    config.model[def].apiBase = text
+    config.model[def].apiBase = safe
     cfg.saveConfig(config)
-    return this.e.reply(`✅ API Base 已设置为：${text}`)
+    return this.e.reply(`✅ API Base 已设置为：${safe}`)
   }
 
   async addMaster() {
