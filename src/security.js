@@ -123,6 +123,7 @@ export async function isAllowedOutboundUrl(u) {
 /**
  * Safe fetch that validates each URL (including redirect targets) before requesting.
  * Returns { ok: true, response, finalUrl } on success or { ok: false, error } on failure.
+ * Uses axios internally for proper TLS servername (SNI) support.
  */
 export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 3) {
   let current = origUrl
@@ -130,9 +131,9 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
   while (true) {
     const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
     if (!check.ok) return { ok: false, error: check.reason || '拒绝访问该 URL' }
-    // DNS Rebinding 防护：使用已解析 IP 直连，Host 头保留原始域名
+    // DNS Rebinding 防护：使用已解析 IP 直连，Host 头保留原始域名，servername 用于 TLS SNI
     let connectUrl = current
-    let fetchOpts = { ...(opts || {}), redirect: 'manual' }
+    let axiosOpts = { ...(opts || {}), maxRedirects: 0, validateStatus: () => true }
     if (check.resolvedIp) {
       try {
         const u = new URL(current)
@@ -140,18 +141,19 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
           const origHostname = u.hostname
           u.hostname = check.resolvedIp
           connectUrl = u.toString()
-          fetchOpts.headers = { ...(fetchOpts.headers || {}), 'Host': origHostname + (u.port ? `:${u.port}` : '') }
+          axiosOpts.headers = { ...(axiosOpts.headers || {}), 'Host': origHostname + (u.port ? `:${u.port}` : '') }
+          axiosOpts.servername = origHostname
         }
       } catch (_) {}
     }
     let resp
     try {
-      resp = await fetch(connectUrl, fetchOpts)
+      resp = await axios.get(connectUrl, axiosOpts)
     } catch (err) {
       return { ok: false, error: err.message || String(err) }
     }
     if (resp.status >= 300 && resp.status < 400) {
-      const loc = resp.headers.get('location')
+      const loc = resp.headers?.location
       if (!loc) return { ok: false, error: `HTTP ${resp.status}` }
       const next = new URL(loc, current).toString()
       redirects += 1
@@ -161,7 +163,8 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
       current = next
       continue
     }
-    return { ok: true, response: resp, finalUrl: current }
+    // 封装为类似 fetch Response 的接口
+    return { ok: true, response: { status: resp.status, headers: resp.headers, data: resp.data }, finalUrl: current }
   }
 }
 

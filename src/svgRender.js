@@ -24,7 +24,7 @@ if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true })
 const MODELS_PER_PAGE = 14          // 每个平台每页展示多少条（含省略提示）
 const MAX_PLATFORMS_PER_IMAGE = 8   // 单张图最多展示几个平台（超出则继续分页）
 
-export { MODELS_PER_PAGE, MAX_PLATFORMS_PER_IMAGE }
+export { MODELS_PER_PAGE, MAX_PLATFORMS_PER_IMAGE, esc }
 
 // ======== 基础工具 ========
 function esc(s) {

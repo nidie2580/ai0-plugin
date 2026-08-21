@@ -17,7 +17,7 @@ globalThis.logger = {
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const TEST_USER = `__unit_test_${process.pid}`
+const TEST_USER = `${process.pid}`
 const HISTORY_DIR = path.join(__dirname, '..', '..', 'data', 'history')
 
 function cleanTestUser() {

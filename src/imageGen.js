@@ -180,9 +180,16 @@ export async function downloadImage(url, maxBytes = 20 * 1024 * 1024) {
   return readBody(result.response, maxBytes)
 }
 
-/** 流式读取响应体并限制总大小，防止恶意 URL 返回超大响应拖垮内存 */
+/** 流式读取响应体并限制总大小（兼容 fetch Response 和 axios Response） */
 async function readBody(resp, maxBytes) {
-  const declared = Number(resp.headers.get('content-length') || 0)
+  // axios Response: headers 是普通对象，data 已是 Buffer/ArrayBuffer
+  if (resp.data !== undefined) {
+    const buf = Buffer.isBuffer(resp.data) ? resp.data : Buffer.from(resp.data)
+    if (buf.length > maxBytes) return { ok: false, error: `下载图片失败: 图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
+    return { ok: true, buffer: buf }
+  }
+  // fetch Response: headers.get() + body.getReader()
+  const declared = Number(resp.headers.get?.('content-length') || resp.headers['content-length'] || 0)
   if (declared > maxBytes) return { ok: false, error: `下载图片失败: 图片过大(${Math.round(declared / 1024 / 1024)}MB)已拒绝` }
   let buf
   if (resp.body && typeof resp.body.getReader === 'function') {

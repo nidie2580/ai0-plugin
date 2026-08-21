@@ -39,7 +39,12 @@ function runInUserQueue(userId, fn) {
 }
 
 function historyFile(userId, sessionId) {
-  const dir = path.join(HISTORY_DIR, String(userId))
+  // userId 格式校验：1-20位纯数字，防止路径遍历
+  const safeUserId = String(userId)
+  if (!/^\d{1,20}$/.test(safeUserId)) {
+    throw new Error('invalid userId format')
+  }
+  const dir = path.join(HISTORY_DIR, safeUserId)
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   return path.join(dir, `${sessionId}.json`)
 }
