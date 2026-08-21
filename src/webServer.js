@@ -132,11 +132,16 @@ export function createApp() {
   app.use(express.json({ limit: '10mb' }))
   app.use(express.urlencoded({ extended: true }))
 
-  // —— 反向代理真实 IP 识别（给限速用）：兼容 Cloudflare / X-Forwarded-For / X-Real-IP
+  // —— 反向代理真实 IP 识别（给限速/IP绑定用）：兼容 Cloudflare / X-Forwarded-For / X-Real-IP
+  // 安全要点：只有当请求来自"可信代理来源"时才信任 X-Forwarded-For 等头，否则攻击者
+  // 绕过代理直连端口时可伪造 XFF 头绕过 IP 绑定/限速。可信来源 = 回环地址 + web.trustedProxies
+  // 配置的代理网段（支持 CIDR / 单 IP）。默认只信任本机（127.0.0.1 / ::1），即反代部署在同一台机器。
   function getClientIp(req) {
     const trustProxy = cfg.get('web.trustProxy', false)
-    let ip = req.socket?.remoteAddress || req.ip || 'unknown'
-    if (trustProxy) {
+    const socketIp = req.socket?.remoteAddress || req.ip || 'unknown'
+    const canTrustXff = trustProxy && isTrustedProxy(socketIp)
+    let ip = socketIp
+    if (canTrustXff) {
       const pickFromHeaders = [
         'cf-connecting-ip',       // Cloudflare
         'x-forwarded-for',        // 标准
@@ -156,6 +161,44 @@ export function createApp() {
     // 去 IPv6 包装，如 ::ffff:127.0.0.1 → 127.0.0.1
     if (ip && ip.startsWith('::ffff:')) ip = ip.slice(7)
     return ip || 'unknown'
+  }
+
+  // 判断 socket 对端 IP 是否为可信代理（本机回环 或 配置的 trustedProxies 网段）
+  function isTrustedProxy(socketIp) {
+    if (!socketIp || socketIp === 'unknown') return false
+    const ip = socketIp.startsWith('::ffff:') ? socketIp.slice(7) : socketIp
+    const trusted = cfg.get('web.trustedProxies', [])
+    const list = Array.isArray(trusted) ? trusted : [trusted]
+    // 回环总是可信（反代与插件同机部署的常见情形）
+    if (ip === '127.0.0.1' || ip === '::1') return true
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'string') continue
+      const e = entry.trim()
+      if (!e) continue
+      if (e.includes('/')) {
+        const [base, prefixRaw] = e.split('/')
+        const prefix = Number(prefixRaw)
+        if (!base || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) continue
+        if (isIpv4InCidr(ip, base, prefix)) return true
+      } else if (e === ip) {
+        return true
+      }
+    }
+    return false
+  }
+
+  function isIpv4InCidr(ip, base, prefix) {
+    const toInt = (s) => {
+      const p = s.split('.').map(Number)
+      if (p.length !== 4 || p.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null
+      return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0
+    }
+    const ipInt = toInt(ip)
+    const baseInt = toInt(base)
+    if (ipInt === null || baseInt === null) return false
+    if (prefix === 0) return true
+    const mask = (0xffffffff << (32 - prefix)) >>> 0
+    return (ipInt & mask) === (baseInt & mask)
   }
   // 每请求挂一个 req.clientIp
   app.use((req, res, next) => {
@@ -192,6 +235,7 @@ export function createApp() {
       return res.send('链接无效或已过期')
     }
     const session = auth.issueSession()
+    auth.consumeMagicLink(req.params.token)
     const secure = req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')
     res.cookie('ai0_session', session, {
       httpOnly: true,
@@ -232,21 +276,33 @@ export function createApp() {
     res.json({ ok: true, loggedIn: auth.verifySession(token) })
   })
 
-  // 任何人都可以访问的诊断接口（无敏感信息，只返回主人来源结构、合并后主人数量、是否有配置apiKey等）
+  // 诊断接口：未认证只返回最小化状态（避免向未登录访问者泄露 apiBase/模型名/主人数量/web绑定等配置细节）；
+  // 认证后返回完整诊断信息。
   app.get('/api/diag', (req, res) => {
     try {
+      const authed = auth.verifySession(req.cookies?.ai0_session || req.headers['x-ai0-session'])
+      const info = getServerInfo()
+      if (!authed) {
+        return res.json({
+          ok: true,
+          authed: false,
+          server: {
+            running: info.running
+          }
+        })
+      }
       const sources = helper.listMasterSources()
       const allMasters = helper.listMasters()
       const cfgData = cfg.loadConfig()
       const def = cfgData.model?.default || '(未设置)'
       const mm = (cfgData.model && def && cfgData.model[def]) || {}
       const apiKeyMasked = !!(mm.apiKey && !/^\s*$/.test(mm.apiKey) && !/sk-your-api|^\*+$/.test(mm.apiKey))
-      const info = getServerInfo()
       const bindFromCfg = (cfgData.web && typeof cfgData.web === 'object')
         ? { host: (cfgData.web.host == null ? null : String(cfgData.web.host)), port: cfgData.web.port == null ? null : Number(cfgData.web.port) }
         : null
       res.json({
         ok: true,
+        authed: true,
         master: {
           frameworkCount: sources.framework.length,
           pluginCount: sources.plugin.length,
@@ -271,19 +327,16 @@ export function createApp() {
   })
 
   // ---- 管理 ----
+  const API_KEY_PLACEHOLDER = '********'
   app.get('/api/config', requireAuth, (req, res) => {
     const c = cfg.loadConfig()
-    // 脱敏 apikey
+    // 完全脱敏 apikey：不返回任何真实字符（连首尾都不暴露），有值统一用占位符替代。
     const safe = JSON.parse(JSON.stringify(c))
     if (safe.model) {
       for (const k of Object.keys(safe.model)) {
         if (safe.model[k] && typeof safe.model[k] === 'object' && safe.model[k].apiKey) {
           const key = safe.model[k].apiKey
-          if (key.length > 8) {
-            safe.model[k].apiKey = key.slice(0, 4) + '****' + key.slice(-4)
-          } else {
-            safe.model[k].apiKey = '****'
-          }
+          safe.model[k].apiKey = (key && !/^\s*$/.test(key) && !/^\*+$/.test(key)) ? API_KEY_PLACEHOLDER : key
         }
       }
     }
@@ -430,12 +483,10 @@ export function createApp() {
   app.get('/api/image-config', requireAuth, (req, res) => {
     const c = cfg.loadConfig()
     const ic = c.imageGen || {}
-    // 脱敏 apiKey
+    // 完全脱敏 apiKey：不返回任何真实字符，有值统一用占位符替代
     const safe = JSON.parse(JSON.stringify(ic))
-    if (safe.apiKey && safe.apiKey.length > 8) {
-      safe.apiKey = safe.apiKey.slice(0, 4) + '****' + safe.apiKey.slice(-4)
-    } else if (safe.apiKey) {
-      safe.apiKey = '****'
+    if (safe.apiKey && !/^\s*$/.test(safe.apiKey) && !/^\*+$/.test(safe.apiKey)) {
+      safe.apiKey = API_KEY_PLACEHOLDER
     }
     res.json({ ok: true, config: safe })
   })

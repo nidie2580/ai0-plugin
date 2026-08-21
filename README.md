@@ -83,6 +83,16 @@ npm install
 
 ## ⚙️ 配置
 
+> **🔐 安全提示（务必阅读）**
+> - 下方示例中的 `apiKey` 均为**占位符**，请勿直接使用。把真实密钥写进 `config.yaml` 后，
+>   **不要**将包含密钥的 `config.yaml` 提交到公开仓库（`config.yaml` 默认已被 `.gitignore` 忽略）。
+> - **推荐用环境变量代替**，密钥完全不落盘：
+>   - `AI0_LLM_API_KEY`：默认模型的 API Key（必填项，推荐）
+>   - `AI0_LLM_API_BASE`：默认模型的 API Base（可选，覆盖配置文件）
+>   - `AI0_IMAGE_API_KEY`：图片生成的 API Key（可选）
+>   - 例：`AI0_LLM_API_KEY=sk-xxxxx AI0_LLM_API_BASE=https://api.deepseek.com/v1 npm run web`
+> - 设置了环境变量后，`config.yaml` 中的 `apiKey` 可留空或直接删除。
+
 打开 `plugins/ai0-plugin/config/config.yaml`：
 
 ```yaml
@@ -92,7 +102,7 @@ model:
   openai-compatible:
     name: "AI0模型"
     apiBase: "https://api.openai.com/v1"   # 改这里
-    apiKey: "sk-xxxxxx"                    # 改这里
+    apiKey: "YOUR_API_KEY_HERE"            # 改这里（或用环境变量 AI0_LLM_API_KEY）
     model: "gpt-3.5-turbo"                # 改这里
     temperature: 0.8
     maxTokens: 2000

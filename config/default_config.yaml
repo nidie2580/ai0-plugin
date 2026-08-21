@@ -6,10 +6,12 @@ model:
   default: openai-compatible
 
   # OpenAI 兼容格式（支持任意兼容此格式的服务）
+  # ⚠️ 安全提醒：下面 apiKey 仅为占位示例，请勿填入真实密钥后提交到公开仓库！
+  #    建议使用环境变量 AI0_LLM_API_KEY 替代，避免密钥出现在配置文件中。
   openai-compatible:
     name: "AI0模型"
     apiBase: "https://api.openai.com/v1"
-    apiKey: "sk-your-api-key-here"
+    apiKey: "YOUR_API_KEY_HERE"
     model: "gpt-3.5-turbo"
     temperature: 0.8
     maxTokens: 2000
@@ -130,3 +132,11 @@ web:
   #   "0.0.0.0"    允许局域网/公网访问（请同时放行 云服务器安全组 + 系统防火墙 TCP 端口）
   #   "::"         IPv6 all（同上）
   host: "127.0.0.1"
+  # 是否信任反向代理的 X-Forwarded-For / X-Real-IP / CF-Connecting-IP 头。
+  #  仅当你已经在前面架了 Nginx/Caddy/Cloudflare 并正确设置头时才设为 true。
+  trustProxy: false
+  # 可信代理来源网段（仅当 trustProxy=true 时生效，配合上面的头来还原真实客户端 IP）。
+  #  安全说明：只有请求确实来自这些代理时才会信任转发头，否则攻击者可伪造 XFF 绕过 IP 绑定/限速。
+  #  默认 ["127.0.0.1","::1"]（回环），即反向代理与插件部署在同一台机器，无需配置。
+  #  若反向代理在其他机器/网段，如 Nginx 在 10.0.0.10：trustedProxies: ["10.0.0.10"]
+  trustedProxies: []

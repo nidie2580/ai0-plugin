@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "web": "node src/standalone-web.js"
+    "web": "node src/standalone-web.js",
+    "test": "node --test \"tests/unit/*.test.js\"",
+    "test:integration": "node tests/integration/run_integration_tests.js"
   },
   "keywords": [
     "yunzai",

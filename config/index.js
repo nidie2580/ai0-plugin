@@ -180,6 +180,11 @@ web:
   # 是否信任反向代理的 X-Forwarded-For / X-Real-IP / CF-Connecting-IP 头。
   #  仅当你已经在前面架了 Nginx/Caddy/Cloudflare 并正确设置头时才设为 true。
   trustProxy: false
+  # 可信代理来源网段（仅当 trustProxy=true 时生效，配合上面的头来还原真实客户端 IP）。
+  #  安全说明：只有请求确实来自这些代理时才会信任转发头，否则攻击者可伪造 XFF 绕过 IP 绑定/限速。
+  #  默认 ["127.0.0.1","::1"]（回环），即反向代理与插件部署在同一台机器，无需配置。
+  #  若反向代理在其他机器/网段，如 Nginx 在 10.0.0.10：trustedProxies: ["10.0.0.10"]
+  trustedProxies: []
 `
 
 if (!fs.existsSync(DEFAULT_CONFIG)) {
@@ -231,6 +236,7 @@ export function loadConfig() {
     try { mtime = fs.statSync(USER_CONFIG).mtimeMs } catch (_) {}
     const userContent = fs.readFileSync(USER_CONFIG, 'utf-8')
     const parsed = YAML.parse(userContent) || {}
+    applyEnvOverrides(parsed)
     cachedConfig = parsed
     lastMtime = mtime
     lastParseError = null
@@ -246,6 +252,7 @@ export function loadConfig() {
         const parsed = YAML.parse(raw) || {}
         logger.warn && logger.warn(`[ai0-plugin] config.yaml 格式损坏（${primaryErr.message}），已自动从 config.yaml.bak 恢复`)
         try { atomicWriteYaml(USER_CONFIG, raw) } catch (_) {}
+        applyEnvOverrides(parsed)
         cachedConfig = parsed
         try { lastMtime = fs.statSync(USER_CONFIG).mtimeMs } catch (_) { lastMtime = 0 }
         lastParseError = null
@@ -258,6 +265,7 @@ export function loadConfig() {
     logger.error && logger.error(`[ai0-plugin] 配置解析失败，退回内置默认模板（请修复 config.yaml：${primaryErr.message}）`)
     try {
       const parsed = YAML.parse(defaultConfigContent) || {}
+      applyEnvOverrides(parsed)
       cachedConfig = parsed
       lastMtime = 0
       return cachedConfig
@@ -265,6 +273,31 @@ export function loadConfig() {
       return {}
     }
   }
+}
+
+// 用环境变量覆盖敏感配置（可选替代方案）：设置后可不在 config.yaml 中填写密钥。
+//   AI0_LLM_API_KEY    → 覆盖默认模型的 apiKey
+//   AI0_LLM_API_BASE   → 覆盖默认模型的 apiBase（可选）
+//   AI0_IMAGE_API_KEY  → 覆盖图片生成的 apiKey（可选）
+// 返回是否有覆盖发生（供调用方判断是否需要重建缓存）。
+function applyEnvOverrides(parsed) {
+  const def = parsed.model && parsed.model.default
+  const envLlmKey = process.env.AI0_LLM_API_KEY
+  if (def && envLlmKey) {
+    const mm = parsed.model[def]
+    if (mm && typeof mm === 'object') mm.apiKey = envLlmKey
+  }
+  const envLlmBase = process.env.AI0_LLM_API_BASE
+  if (def && envLlmBase) {
+    const mm = parsed.model[def]
+    if (mm && typeof mm === 'object') mm.apiBase = envLlmBase
+  }
+  const envImgKey = process.env.AI0_IMAGE_API_KEY
+  if (envImgKey) {
+    if (!parsed.imageGen || typeof parsed.imageGen !== 'object') parsed.imageGen = {}
+    parsed.imageGen.apiKey = envImgKey
+  }
+  return !!(envLlmKey || envLlmBase || envImgKey)
 }
 
 /** 最近一次配置解析错误（#ai诊断 展示用） */

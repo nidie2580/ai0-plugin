@@ -71,7 +71,7 @@ export function saveHistory(userId, sessionId, messages) {
   const key = `${userId}/${sessionId}`
   inflightSaves.set(key, messages)
 
-  runInUserQueue(userId, async () => {
+  return runInUserQueue(userId, async () => {
     const latest = inflightSaves.get(key)
     if (latest === undefined) return
     inflightSaves.delete(key)

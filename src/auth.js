@@ -14,6 +14,10 @@ export const AUTH_CFG = {
   rateMaxAttempts: 10,
   // 单个 magic link 校验速率（防止重放撞 token）
   magicRatePerIp: 30,
+  // magic link 是否绑定首次访问 IP（防止链接被转发到其他 IP 后仍可用）。
+  // 注意：若部署在反向代理后且未正确设置 web.trustProxy，所有请求的 clientIp 可能相同，
+  // 绑定仍会生效（只是绑到代理 IP）；若用户经常更换出口 IP，可设为 false 仅保留单次使用。
+  magicBindIp: true,
 }
 
 function randomId(len = 32) {
@@ -115,6 +119,10 @@ export function generateMagicLink() {
   return token
 }
 
+/** 校验 magic link 是否有效。默认绑定首次访问 IP：链接被转发到其他 IP 后无法再使用。
+ *  校验通过并不会消费链接，调用方应在成功发放 session 后调用 consumeMagicLink(token)。
+ *  @returns {ok, msg?, boundIp?}
+ */
 export function verifyMagicLink(token, clientIp = 'unknown') {
   // magic link token 碰撞空间大（40字节hex），但还是要限频，防枚举
   const ipLimit = checkRateLimit('magic-ip', clientIp, AUTH_CFG.magicRatePerIp, AUTH_CFG.rateWindowMs * 2)
@@ -127,11 +135,21 @@ export function verifyMagicLink(token, clientIp = 'unknown') {
     MAGIC_LINKS.delete(token)
     return { ok: false, msg: '链接已过期' }
   }
-  // 记录首次访问IP（便于审计/追查）
-  rec.ip = clientIp
-  rec.used = true
-  MAGIC_LINKS.delete(token)
-  return { ok: true }
+  // IP 绑定：首次访问记录来源 IP；同一链接之后只允许该 IP 使用。
+  // 仅在开启 magicBindIp 时生效；关闭时退化为纯单次使用。
+  if (AUTH_CFG.magicBindIp) {
+    if (rec.ip === null) {
+      rec.ip = clientIp
+    } else if (rec.ip !== clientIp) {
+      return { ok: false, msg: '该链接已绑定其他 IP，请通过生成链接时的 IP 访问' }
+    }
+  }
+  return { ok: true, boundIp: rec.ip }
+}
+
+/** 消费（作废）一个 magic link。成功发放 session 后调用。 */
+export function consumeMagicLink(token) {
+  return MAGIC_LINKS.delete(token)
 }
 
 export function issueSession() {
