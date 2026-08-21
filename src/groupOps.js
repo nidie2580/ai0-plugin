@@ -468,6 +468,34 @@ export async function buildGroupContext(e) {
   if (allowTitle) {
     lines.push('  - 设置头衔：所有人可给自己设；群主/管理员/主人可给他人设')
   }
+  const allowGroupName = cfg.get('groupOps.allowGroupName', true) !== false
+  const allowMuteAll = cfg.get('groupOps.allowMuteAll', true) !== false
+  const allowMuteTimed = cfg.get('groupOps.allowMuteTimed', true) !== false
+  const allowTitleDisplay = cfg.get('groupOps.allowTitleDisplay', true) !== false
+  const allowNotice = cfg.get('groupOps.allowNotice', true) !== false
+  const allowSearch = cfg.get('groupOps.allowSearch', true) !== false
+  const allowBlacklist = cfg.get('groupOps.allowBlacklist', true) !== false
+  if (allowGroupName && botCanManage) {
+    lines.push('  - 改群名：需要请求者是群主/管理员/机器人主人，机器人必须是群主/管理员。')
+  }
+  if (allowMuteAll && botCanManage) {
+    lines.push('  - 全体禁言：开启/关闭全体禁言模式。需要请求者是群主/管理员/机器人主人。')
+  }
+  if (allowMuteTimed && botCanManage) {
+    lines.push('  - 定时禁言：禁言指定时长（最长30天）。权限同禁言。')
+  }
+  if (allowTitleDisplay && botInferred === 'owner') {
+    lines.push('  - 头衔展示：开启/关闭群头衔展示功能。仅群主可操作。')
+  }
+  if (allowNotice && botCanManage) {
+    lines.push('  - 改公告：修改群公告内容。需要请求者是群主/管理员/机器人主人。')
+  }
+  if (allowSearch && botInferred === 'owner') {
+    lines.push('  - 群搜索：开启/关闭群搜索功能。仅群主可操作。')
+  }
+  if (allowBlacklist && botCanManage) {
+    lines.push('  - 黑名单：拉黑/解除拉黑群成员。需要请求者是群主/管理员/机器人主人。')
+  }
 
   lines.push('', '【操作输出格式】')
   lines.push('如果你判断请求合法且需要执行群操作，请在回复末尾另起一行，用以下格式输出操作指令（用户不会看到这行，系统会解析并执行）：')
@@ -477,6 +505,17 @@ export async function buildGroupContext(e) {
   lines.push('  设管理员：[action:set_admin:目标QQ]')
   lines.push('  撤管理员：[action:remove_admin:目标QQ]')
   lines.push('  设头衔：[action:set_title:目标QQ:头衔文字]')
+  lines.push('  改群名：[action:set_group_name:新群名]')
+  lines.push('  全体禁言开：[action:mute_all:1]')
+  lines.push('  全体禁言关：[action:mute_all:0]')
+  lines.push('  定时禁言：[action:timed_mute:目标QQ:时长秒数]')
+  lines.push('  头衔展示开：[action:title_display:1]')
+  lines.push('  头衔展示关：[action:title_display:0]')
+  lines.push('  改公告：[action:set_notice:公告内容]')
+  lines.push('  群搜索开：[action:group_search:1]')
+  lines.push('  群搜索关：[action:group_search:0]')
+  lines.push('  拉黑：[action:blacklist:add:目标QQ]')
+  lines.push('  解除拉黑：[action:blacklist:remove:目标QQ]')
   lines.push('示例：用户说"禁言一下@123 10分钟"，你的回复可以是：')
   lines.push('  好的，我来帮你禁言该成员10分钟。')
   lines.push('  [action:mute:123:600]')
@@ -545,8 +584,13 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
     if (!requesterCanSetAdmin) {
       return { ok: false, reason: '仅机器人主人/群主可设置/取消管理员' }
     }
+  } else if (type === 'title_display' || type === 'group_search') {
+    // 头衔展示和群搜索仅群主可操作
+    if (!requesterIsMaster && requesterRole !== 'owner') {
+      return { ok: false, reason: '仅机器人主人/群主可执行此操作' }
+    }
   } else {
-    // mute/kick
+    // mute/kick/set_group_name/mute_all/timed_mute/set_notice/blacklist
     if (!requesterElevated) {
       return { ok: false, reason: '发送者无权限（仅群主/管理员/机器人主人可发起此操作）' }
     }
@@ -558,36 +602,43 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
     if (botRole !== 'owner') {
       return { ok: false, reason: '机器人不是群主，无法设置/取消管理员', requesterRole, botRole }
     }
+  } else if (type === 'title_display' || type === 'group_search') {
+    // 头衔展示和群搜索仅群主可操作
+    if (botRole !== 'owner') {
+      return { ok: false, reason: '机器人不是群主，无法执行此操作', requesterRole, botRole }
+    }
   } else {
     if (botRole !== 'owner' && botRole !== 'admin') {
       return { ok: false, reason: '机器人不是群主或管理员', requesterRole, botRole }
     }
   }
 
-  // —— 条件 4 & 5: 目标保护 ——
-  const targetStr = String(targetUid)
-  // 条件 5: 目标是机器人主人 → 拒绝
-  if (masters.includes(targetStr)) {
-    // 例外：remove_admin + 机器人是群主 + 发送者是主人 → 允许
-    if (type === 'remove_admin' && botRole === 'owner' && requesterIsMaster) {
-      // 允许，继续
-    } else {
-      return { ok: false, reason: `目标 ${targetUid} 是机器人主人，不可操作`, requesterRole, botRole }
+  // —— 条件 4 & 5: 目标保护（仅对需要目标的操作）——
+  if (targetUid) {
+    const targetStr = String(targetUid)
+    // 条件 5: 目标是机器人主人 → 拒绝
+    if (masters.includes(targetStr)) {
+      // 例外：remove_admin + 机器人是群主 + 发送者是主人 → 允许
+      if (type === 'remove_admin' && botRole === 'owner' && requesterIsMaster) {
+        // 允许，继续
+      } else {
+        return { ok: false, reason: `目标 ${targetUid} 是机器人主人，不可操作`, requesterRole, botRole }
+      }
     }
-  }
-  // 条件 4: 目标是群主或管理员 → 拒绝（同上例外）
-  let targetRole = 'unknown'
-  try {
-    const tInfo = await getMemberInfo(groupId, targetStr)
-    targetRole = _roleOf(tInfo) || 'unknown'
-  } catch (_) {}
-  const isTargetOwnerByUin = ownerUin && targetStr === String(ownerUin)
-  const isTargetProtected = targetRole === 'owner' || targetRole === 'admin' || isTargetOwnerByUin
-  if (isTargetProtected) {
-    if (type === 'remove_admin' && botRole === 'owner' && requesterIsMaster) {
-      // 允许群主的主人取消管理员
-    } else {
-      return { ok: false, reason: `目标 ${targetUid} 受保护（群主/管理员）`, requesterRole, botRole }
+    // 条件 4: 目标是群主或管理员 → 拒绝（同上例外）
+    let targetRole = 'unknown'
+    try {
+      const tInfo = await getMemberInfo(groupId, targetStr)
+      targetRole = _roleOf(tInfo) || 'unknown'
+    } catch (_) {}
+    const isTargetOwnerByUin = ownerUin && targetStr === String(ownerUin)
+    const isTargetProtected = targetRole === 'owner' || targetRole === 'admin' || isTargetOwnerByUin
+    if (isTargetProtected) {
+      if (type === 'remove_admin' && botRole === 'owner' && requesterIsMaster) {
+        // 允许群主的主人取消管理员
+      } else {
+        return { ok: false, reason: `目标 ${targetUid} 受保护（群主/管理员）`, requesterRole, botRole }
+      }
     }
   }
 
@@ -674,6 +725,27 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
       if (type === 'set_title' && cfg.get('groupOps.allowTitle', true) === false) {
         results.push({ type, ok: false, msg: '头衔功能未启用' }); continue
       }
+      if (type === 'set_group_name' && cfg.get('groupOps.allowGroupName', true) === false) {
+        results.push({ type, ok: false, msg: '群名修改功能未启用' }); continue
+      }
+      if (type === 'mute_all' && cfg.get('groupOps.allowMuteAll', true) === false) {
+        results.push({ type, ok: false, msg: '全体禁言功能未启用' }); continue
+      }
+      if (type === 'timed_mute' && cfg.get('groupOps.allowMuteTimed', true) === false) {
+        results.push({ type, ok: false, msg: '定时禁言功能未启用' }); continue
+      }
+      if (type === 'title_display' && cfg.get('groupOps.allowTitleDisplay', true) === false) {
+        results.push({ type, ok: false, msg: '头衔展示功能未启用' }); continue
+      }
+      if (type === 'set_notice' && cfg.get('groupOps.allowNotice', true) === false) {
+        results.push({ type, ok: false, msg: '群公告功能未启用' }); continue
+      }
+      if (type === 'group_search' && cfg.get('groupOps.allowSearch', true) === false) {
+        results.push({ type, ok: false, msg: '群搜索功能未启用' }); continue
+      }
+      if (type === 'blacklist' && cfg.get('groupOps.allowBlacklist', true) === false) {
+        results.push({ type, ok: false, msg: '黑名单功能未启用' }); continue
+      }
 
       if (type === 'mute') {
         const duration = parseInt(args[1], 10)
@@ -704,6 +776,66 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         }
         await executeSetTitle(groupId, targetUid, titleText.slice(0, 18))
         results.push({ type, ok: true, msg: `已为 ${targetUid} 设置头衔：${titleText.slice(0, 18)}` })
+
+      } else if (type === 'set_group_name') {
+        const groupName = args.slice(1).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        if (!groupName) {
+          results.push({ type, ok: false, msg: '未指定群名' }); continue
+        }
+        if (groupName.length > 30) {
+          results.push({ type, ok: false, msg: '群名不能超过30个字符' }); continue
+        }
+        await executeSetGroupName(groupId, groupName)
+        safeLogger.info(`[ai0-plugin] 群操作: set_group_name 群${groupId} 群名${groupName} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: `已将群名更改为：${groupName}` })
+
+      } else if (type === 'mute_all') {
+        const enable = args[1] === '1' || args[1]?.toLowerCase() === 'on'
+        await executeMuteAll(groupId, enable)
+        safeLogger.info(`[ai0-plugin] 群操作: mute_all 群${groupId} ${enable ? '开启' : '关闭'} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: enable ? '已开启全体禁言' : '已关闭全体禁言' })
+
+      } else if (type === 'timed_mute') {
+        const duration = parseInt(args[1], 10)
+        const seconds = Number.isFinite(duration) ? Math.max(0, duration) : cfg.get('groupOps.defaultMuteDuration', 600)
+        const maxSeconds = 30 * 24 * 60 * 60 // 30天
+        if (seconds > maxSeconds) {
+          results.push({ type, ok: false, msg: '禁言时长不能超过30天' }); continue
+        }
+        await executeMute(groupId, targetUid, seconds)
+        const display = seconds === 0 ? '解除禁言' : formatDuration(seconds)
+        safeLogger.info(`[ai0-plugin] 群操作: timed_mute 群${groupId} 目标${targetUid} 时长${display} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: `已${display} ${targetUid}` })
+
+      } else if (type === 'title_display') {
+        const enable = args[1] === '1' || args[1]?.toLowerCase() === 'on'
+        await executeTitleDisplay(groupId, enable)
+        safeLogger.info(`[ai0-plugin] 群操作: title_display 群${groupId} ${enable ? '开启' : '关闭'} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: enable ? '已开启头衔展示' : '已关闭头衔展示' })
+
+      } else if (type === 'set_notice') {
+        const noticeContent = args.slice(1).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        if (!noticeContent) {
+          results.push({ type, ok: false, msg: '未指定公告内容' }); continue
+        }
+        await executeSetNotice(groupId, noticeContent)
+        safeLogger.info(`[ai0-plugin] 群操作: set_notice 群${groupId} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: '已更新群公告' })
+
+      } else if (type === 'group_search') {
+        const enable = args[1] === '1' || args[1]?.toLowerCase() === 'on'
+        await executeGroupSearch(groupId, enable)
+        safeLogger.info(`[ai0-plugin] 群操作: group_search 群${groupId} ${enable ? '开启' : '关闭'} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: enable ? '已开启群搜索' : '已关闭群搜索' })
+
+      } else if (type === 'blacklist') {
+        const action = args[1]?.toLowerCase()
+        if (!action || !['add', 'remove'].includes(action)) {
+          results.push({ type, ok: false, msg: '无效的黑名单操作（支持：add/remove）' }); continue
+        }
+        await executeBlacklist(groupId, targetUid, action)
+        safeLogger.info(`[ai0-plugin] 群操作: blacklist ${action} 群${groupId} 目标${targetUid} 请求者${requesterUid}`)
+        results.push({ type, ok: true, msg: action === 'add' ? `已将 ${targetUid} 加入黑名单` : `已将 ${targetUid} 移出黑名单` })
 
       } else {
         results.push({ type, ok: false, msg: `未知操作类型：${type}` })
@@ -749,4 +881,79 @@ async function executeSetTitle(groupId, userId, title) {
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setTitle === 'function') await group.setTitle(userId, title)
   else throw new Error('当前适配器不支持设置头衔')
+}
+
+/** 更改群名 */
+async function executeSetGroupName(groupId, name) {
+  const bot = global.Bot || global.bot
+  const group = bot?.pickGroup?.(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  if (typeof group.setGroupName === 'function') await group.setGroupName(name)
+  else if (typeof group.setName === 'function') await group.setName(name)
+  else if (typeof group.setGroupName === 'function') await group.setGroupName(name)
+  else throw new Error('当前适配器不支持修改群名')
+}
+
+/** 全体禁言（开启/关闭） */
+async function executeMuteAll(groupId, enable) {
+  const bot = global.Bot || global.bot
+  const group = bot?.pickGroup?.(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  if (typeof group.muteAll === 'function') await group.muteAll(enable)
+  else if (typeof group.setMuteAll === 'function') await group.setMuteAll(enable)
+  else if (typeof group.groupMuteAll === 'function') await group.groupMuteAll(enable)
+  else throw new Error('当前适配器不支持全体禁言')
+}
+
+/** 头衔展示管理（开启/关闭） */
+async function executeTitleDisplay(groupId, enable) {
+  const bot = global.Bot || global.bot
+  const group = bot?.pickGroup?.(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  if (typeof group.setTitleDisplay === 'function') await group.setTitleDisplay(enable)
+  else if (typeof group.setAllowTitle === 'function') await group.setAllowTitle(enable)
+  else if (typeof group.allowTitle === 'function') await group.allowTitle(enable)
+  else throw new Error('当前适配器不支持头衔展示管理')
+}
+
+/** 更改群公告 */
+async function executeSetNotice(groupId, content) {
+  const bot = global.Bot || global.bot
+  const group = bot?.pickGroup?.(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  if (typeof group.setNotice === 'function') await group.setNotice(content)
+  else if (typeof group.setGroupNotice === 'function') await group.setGroupNotice(content)
+  else if (typeof group.setAnnouncement === 'function') await group.setAnnouncement(content)
+  else throw new Error('当前适配器不支持修改群公告')
+}
+
+/** 群搜索方式管理（开启/关闭） */
+async function executeGroupSearch(groupId, enable) {
+  const bot = global.Bot || global.bot
+  const group = bot?.pickGroup?.(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  if (typeof group.setSearch === 'function') await group.setSearch(enable)
+  else if (typeof group.setGroupSearch === 'function') await group.setGroupSearch(enable)
+  else if (typeof group.allowSearch === 'function') await group.allowSearch(enable)
+  else throw new Error('当前适配器不支持群搜索管理')
+}
+
+/** 黑名单管理（添加/移除） */
+async function executeBlacklist(groupId, userId, action) {
+  const bot = global.Bot || global.bot
+  const group = bot?.pickGroup?.(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  if (action === 'add') {
+    if (typeof group.setBlacklist === 'function') await group.setBlacklist(userId)
+    else if (typeof group.addBlacklist === 'function') await group.addBlacklist(userId)
+    else if (typeof group.blacklistAdd === 'function') await group.blacklistAdd(userId)
+    else throw new Error('当前适配器不支持添加黑名单')
+  } else if (action === 'remove') {
+    if (typeof group.removeBlacklist === 'function') await group.removeBlacklist(userId)
+    else if (typeof group.delBlacklist === 'function') await group.delBlacklist(userId)
+    else if (typeof group.blacklistRemove === 'function') await group.blacklistRemove(userId)
+    else throw new Error('当前适配器不支持移除黑名单')
+  } else {
+    throw new Error('无效的黑名单操作')
+  }
 }
