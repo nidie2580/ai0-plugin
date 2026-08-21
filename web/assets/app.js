@@ -722,7 +722,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         (r.url ? `图片URL: ${r.url}` : (r.b64 ? '图片已返回(base64)' : ''))
       if (r.url) {
         preview.classList.remove('hidden')
-        preview.innerHTML = `<img src="${escapeHtml(r.url)}" style="max-width:100%;border-radius:8px" />`
+        preview.innerHTML = `<img src="${escapeHtml(r.url)}" class="img-preview" />`
       }
     } else {
       info.className = 'save-msg err'

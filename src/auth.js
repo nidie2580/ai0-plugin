@@ -5,6 +5,12 @@ const codes = new Map()
 const MAGIC_LINKS = new Map()
 const rateLimit = new Map()   // key(scope:id) → { count, resetAt }
 
+// Map 容量上限，防止内存耗尽攻击
+const MAX_TOKENS = 10_000
+const MAX_CODES = 200
+const MAX_MAGIC_LINKS = 200
+const MAX_RATE_LIMIT = 10_000
+
 export const AUTH_CFG = {
   codeExpireMs: 5 * 60 * 1000,
   tokenExpireMs: 2 * 60 * 60 * 1000,
@@ -43,6 +49,23 @@ function cleanup() {
   for (const [k, v] of codes) if (v.expireAt < now) codes.delete(k)
   for (const [k, v] of MAGIC_LINKS) if (v.expireAt < now) MAGIC_LINKS.delete(k)
   for (const [k, v] of rateLimit) if (v.resetAt < now) rateLimit.delete(k)
+  // 容量保护：过期清理后若仍超限，FIFO 淘汰旧条目
+  evictOverCapacity(tokens, MAX_TOKENS)
+  evictOverCapacity(codes, MAX_CODES)
+  evictOverCapacity(MAGIC_LINKS, MAX_MAGIC_LINKS)
+  evictOverCapacity(rateLimit, MAX_RATE_LIMIT)
+}
+
+/** 清理超容量 Map：保留最新的一半条目（FIFO 淘汰） */
+function evictOverCapacity(map, max) {
+  if (map.size <= max) return
+  const toDelete = map.size - Math.floor(max / 2)
+  let deleted = 0
+  for (const k of map.keys()) {
+    if (deleted >= toDelete) break
+    map.delete(k)
+    deleted++
+  }
 }
 
 setInterval(cleanup, 30_000).unref?.()

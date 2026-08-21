@@ -75,6 +75,10 @@ function isPrivateIpv6(ip) {
   if (l.startsWith('fc') || l.startsWith('fd')) return true        // fc00::/7 ULA
   if (/^fe[89ab][0-9a-f]/.test(l)) return true                     // fe80::/10 链路本地
   if (l.startsWith('ff')) return true                              // ff00::/8 组播
+  if (l.startsWith('2001:db8')) return true                        // 2001:db8::/32 文档保留
+  if (l.startsWith('100::')) return true                           // 100::/64 黑洞地址
+  if (/^2001:(0[0-1])/i.test(l)) return true                      // 2001::/23 (含 Teredo)
+  if (l.startsWith('64:ff9b:')) return true                        // 64:ff9b::/96 NAT64 前缀
   return false
 }
 
@@ -170,14 +174,15 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
           const u = new URL(current)
           // 仅对域名（非 IP）应用 DNS pinning
           if (!net.isIP(u.hostname)) {
+            const origHostname = u.hostname
             u.hostname = check.resolvedIp
             connectUrl = u.toString()
-            // 设置 Host 头为原始域名
+            // 设置 Host 头为原始域名 + servername 用于 TLS SNI
             opts = Object.assign({}, opts)
-            opts.headers = Object.assign({}, opts.headers, { 'Host': u.hostname })
-            // 恢复原始 hostname 用于 Host 头
+            opts.headers = Object.assign({}, opts.headers)
             const origUrl = new URL(current)
             opts.headers['Host'] = origUrl.hostname + (origUrl.port ? `:${origUrl.port}` : '')
+            opts.servername = origHostname
           }
         } catch (_) {}
       }

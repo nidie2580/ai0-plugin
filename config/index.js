@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import YAML from 'yaml'
 
@@ -207,9 +208,9 @@ let lastParseError = null   // 最近一次 YAML 解析失败信息（给 #ai诊
 function atomicWriteYaml(filePath, content) {
   const dir = path.dirname(filePath)
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  const tmp = filePath + `.tmp.${process.pid}.${Date.now()}`
+  const tmp = filePath + `.tmp.${crypto.randomBytes(16).toString('hex')}`
   const bak = filePath + '.bak'
-  fs.writeFileSync(tmp, content, 'utf-8', { mode: 0o600 })
+  fs.writeFileSync(tmp, content, { encoding: 'utf-8', mode: 0o600 })
   // 存在旧文件 → 先写 .bak
   try {
     if (fs.existsSync(filePath)) fs.copyFileSync(filePath, bak)

@@ -159,7 +159,7 @@ export function createApp() {
       res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
     }
     // 基础 CSP：限制资源来源，脚本仅允许外部文件（移除 unsafe-inline 防止内联脚本注入）
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'")
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'")
     next()
   })
 
@@ -405,6 +405,22 @@ export function createApp() {
     // — P0-2: 禁止通过 API 修改 permissions.masters —
     if (config.permissions?.masters) {
       return res.json({ ok: false, msg: '禁止通过 API 修改 permissions.masters，请在 config.yaml 中手动编辑' })
+    }
+
+    // — P0-2: 模型子键白名单 —
+    if (config.model && typeof config.model === 'object') {
+      const ALLOWED_MODEL_FIELDS = new Set([
+        'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout'
+      ])
+      for (const [key, val] of Object.entries(config.model)) {
+        if (key === 'default') continue
+        if (val && typeof val === 'object' && !Array.isArray(val)) {
+          const bad = Object.keys(val).filter(k => !ALLOWED_MODEL_FIELDS.has(k))
+          if (bad.length) {
+            return res.json({ ok: false, msg: `模型 "${key}" 含有不允许的字段: ${bad.join(', ')}` })
+          }
+        }
+      }
     }
 
     // — P0-2: 数值字段范围校验 —

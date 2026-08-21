@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import { safeAxiosRequest } from './security.js'
@@ -58,8 +59,8 @@ export function loadHistory(userId, sessionId) {
           const arr = JSON.parse(raw)
           // 备份有效 → 把备份回写到主文件
           try {
-            const tmp = file + '.tmp.' + Date.now()
-            fs.writeFileSync(tmp, JSON.stringify(arr, null, 2), 'utf-8', { mode: 0o600 })
+            const tmp = file + '.tmp.' + crypto.randomBytes(16).toString('hex')
+            fs.writeFileSync(tmp, JSON.stringify(arr, null, 2), { encoding: 'utf-8', mode: 0o600 })
             fs.renameSync(tmp, file)
             logger.warn && logger.warn(`[ai0-plugin] ${file} 已损坏，已从 .bak 恢复`)
           } catch (_) {}
@@ -88,12 +89,12 @@ export function saveHistory(userId, sessionId, messages) {
     inflightSaves.delete(key)
 
     const file = historyFile(userId, sessionId)
-    const tmp = file + `.tmp.${process.pid}.${Date.now()}`
+    const tmp = file + `.tmp.${crypto.randomBytes(16).toString('hex')}`
     const bak = file + '.bak'
     try {
       const data = JSON.stringify(latest, null, 2)
       // 先写到 tmp
-      fs.writeFileSync(tmp, data, 'utf-8', { mode: 0o600 })
+      fs.writeFileSync(tmp, data, { encoding: 'utf-8', mode: 0o600 })
       // 尽量刷盘（兼容旧 node 忽略）；fd 用完必须 close，避免句柄泄漏
       try {
         const fd = fs.openSync(tmp, 'r')
@@ -253,7 +254,7 @@ export async function chatCompletions(messages, {
   const normalizedBase = normalizeApiBase(rawBase, 'openai')
   const url = buildEndpoint(normalizedBase, '/chat/completions')
 
-  if (!isAllowedOutboundUrl(url)) {
+  if (!(await isAllowedOutboundUrl(url)).ok) {
     throw new Error('apiBase URL 未通过安全校验（禁止访问私有/回环/链路本地地址）')
   }
 
