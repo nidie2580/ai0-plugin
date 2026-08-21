@@ -2,8 +2,8 @@
 
 // Simple integration tests for redirect and login-code flows
 import http from 'node:http'
-import { safeFetchWithRedirects } from '../src/security.js'
-import { generateTerminalCode } from '../src/auth.js'
+import { safeFetchWithRedirects } from '../../src/security.js'
+import { generateTerminalCode } from '../../src/auth.js'
 
 const PORT = 30456
 
