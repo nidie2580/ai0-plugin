@@ -200,7 +200,7 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
           }
         } catch (_) {}
       }
-      const conf = Object.assign({}, opts, { method, url: connectUrl, data, maxRedirects: 0, validateStatus: () => true })
+      const conf = Object.assign({}, opts, { method, url: connectUrl, data, maxRedirects: 0, validateStatus: () => true, proxy: false })
       const resp = await axios.request(conf)
       if (resp.status >= 300 && resp.status < 400) {
         const loc = resp.headers?.location
