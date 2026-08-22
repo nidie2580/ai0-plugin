@@ -686,6 +686,10 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
       const tInfo = await getMemberInfo(groupId, targetStr)
       targetRole = _roleOf(tInfo) || 'unknown'
     } catch (_) {}
+    // fail-closed: 无法确定目标身份时拒绝操作
+    if (targetRole === 'unknown') {
+      return { ok: false, reason: `无法确定目标 ${targetUid} 的身份，拒绝操作`, requesterRole, botRole }
+    }
     const isTargetOwnerByUin = ownerUin && targetStr === String(ownerUin)
     const isTargetProtected = targetRole === 'owner' || targetRole === 'admin' || isTargetOwnerByUin
     if (isTargetProtected) {
@@ -949,8 +953,11 @@ async function executeMute(groupId, userId, seconds) {
   const bot = global.Bot || global.bot
   const group = bot?.pickGroup?.(groupId)
   if (!group) throw new Error('无法获取群信息')
-  if (typeof group.muteMember === 'function') await group.muteMember(userId, seconds)
-  else if (typeof group.mute === 'function') await group.mute(userId, seconds)
+  // 统一 30 天封顶（与 timed_mute 一致）
+  const MAX_MUTE_SECONDS = 30 * 24 * 60 * 60
+  const cappedSeconds = Math.min(Number(seconds) || 0, MAX_MUTE_SECONDS)
+  if (typeof group.muteMember === 'function') await group.muteMember(userId, cappedSeconds)
+  else if (typeof group.mute === 'function') await group.mute(userId, cappedSeconds)
   else throw new Error('当前适配器不支持禁言操作')
 }
 
