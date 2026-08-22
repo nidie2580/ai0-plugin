@@ -153,6 +153,34 @@ function requireCsrf(req, res, next) {
   next()
 }
 
+/**
+ * web.host 白名单 + trustProxy 校验（纯函数，便于单测）
+ * @param {string} host 用户传入的 host 值
+ * @param {boolean} trustProxy 当前已配置的 web.trustProxy
+ * @returns {{ ok: boolean, msg?: string }}
+ */
+export function validateWebHost(host, trustProxy) {
+  const ALLOWED_HOST = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0', '::'])
+  const h = typeof host === 'string' ? host.trim() : String(host)
+  // RFC1918 私有段 + loopback 通配
+  const isPrivateIpv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(h) &&
+    (Number(RegExp.$1) === 10 ||
+     (Number(RegExp.$1) === 172 && Number(RegExp.$2) >= 16 && Number(RegExp.$2) <= 31) ||
+     (Number(RegExp.$1) === 192 && Number(RegExp.$2) === 168) ||
+     Number(RegExp.$1) === 127)
+  if (!ALLOWED_HOST.has(h) && !isPrivateIpv4) {
+    return { ok: false, msg: 'web.host 仅允许 loopback / 私有地址 / 0.0.0.0；如需对外暴露请改 config.yaml 并配置 HTTPS' }
+  }
+  // — P0 补强：通配 0.0.0.0/:: 对外暴露前，强制要求已配置 trustProxy —
+  // 否则 Magic Link IP 绑定会从 X-Forwarded-For 取值，
+  // 攻击者可伪造 XFF 绕过 IP 绑定 / 触发 IP 劫持 DoS
+  const isWildcard = h === '0.0.0.0' || h === '::'
+  if (isWildcard && !trustProxy) {
+    return { ok: false, msg: '将 host 设为 0.0.0.0/:: 对外暴露前，请先在 config.yaml 中设置 web.trustProxy: true（需配合反向代理使用），否则 Magic Link IP 绑定失效，存在安全风险。' }
+  }
+  return { ok: true }
+}
+
 export function createApp() {
   const app = express()
   app.use(cookieParser())
@@ -472,22 +500,11 @@ export function createApp() {
       if (w.port != null && (typeof w.port !== 'number' || w.port < 1 || w.port > 65535)) {
         return res.json({ ok: false, msg: 'web.port 必须为 1-65535 之间的数字' })
       }
-      // — P0(三轮严审): web.host 白名单校验，禁止通过 API 把后台暴露到公网 —
-      // 仅允许 loopback / 私有地址 / 通配本机；通配 0.0.0.0/:: 需显式配置（不允许通过 API 改）
+      // — P0(三轮严审) + P0 补强: web.host 白名单 + 通配时强制 trustProxy —
       if (w.host != null) {
-        const ALLOWED_HOST = new Set([
-          '127.0.0.1', 'localhost', '::1', '0.0.0.0', '::'
-        ])
-        const host = typeof w.host === 'string' ? w.host.trim() : String(w.host)
-        // RFC1918 私有段 + loopback 通配
-        const isPrivateIpv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host) &&
-          (Number(RegExp.$1) === 10 ||
-           (Number(RegExp.$1) === 172 && Number(RegExp.$2) >= 16 && Number(RegExp.$2) <= 31) ||
-           (Number(RegExp.$1) === 192 && Number(RegExp.$2) === 168) ||
-           Number(RegExp.$1) === 127)
-        if (!ALLOWED_HOST.has(host) && !isPrivateIpv4) {
-          return res.json({ ok: false, msg: 'web.host 仅允许 loopback / 私有地址 / 0.0.0.0；如需对外暴露请改 config.yaml 并配置 HTTPS' })
-        }
+        const trustProxy = cfg.get('web.trustProxy', false)
+        const r = validateWebHost(w.host, trustProxy)
+        if (!r.ok) return res.json(r)
       }
     }
     const chat = config.chat
