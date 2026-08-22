@@ -551,8 +551,8 @@ export async function buildGroupContext(e) {
   lines.push('  改公告：[action:set_notice:公告内容]')
   lines.push('  群搜索开：[action:group_search:1]')
   lines.push('  群搜索关：[action:group_search:0]')
-  lines.push('  拉黑：[action:blacklist:add:目标QQ]')
-  lines.push('  解除拉黑：[action:blacklist:remove:目标QQ]')
+  lines.push('  拉黑：[action:blacklist:目标QQ:add]')
+  lines.push('  解除拉黑：[action:blacklist:目标QQ:remove]')
   lines.push('  自定义头衔：[action:custom_title:目标QQ:头衔文字]（目标必须是发送者自己）')
   lines.push('  等级头衔：[action:level_title:目标QQ:等级:头衔文字]')
   lines.push('示例：用户说"禁言一下@123 10分钟"，你的回复可以是：')
@@ -750,13 +750,17 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
   const requesterElevated = requesterIsMaster || requesterRole === 'owner' || requesterRole === 'admin'
   const requesterCanSetAdmin = requesterIsMaster || requesterRole === 'owner'
 
+  // 无目标操作集合：这些操作的 args[0] 不是目标 QQ，而是开关值/内容字符串
+  // 必须同时：① 跳过 QQ 号正则校验；② targetUid 置 null 跳过目标保护检查；③ 取参改为 args[0]
+  const TARGETLESS_OPS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search'])
+
   for (const match of matches) {
     const { type, args } = match
     try {
-      const targetUid = args[0]
-      // 无目标操作（mute_all/title_display/set_group_name/set_notice/group_search）跳过 QQ 号校验
-      const TARGETLESS_OPS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search'])
-      if (!TARGETLESS_OPS.has(type)) {
+      const isTargetless = TARGETLESS_OPS.has(type)
+      // 无目标操作：targetUid 置 null，跳过目标保护检查（避免 getMemberInfo 查 '1'/'0'/'新群名' 等假值导致 fail-closed 拒绝）
+      const targetUid = isTargetless ? null : args[0]
+      if (!isTargetless) {
         if (!targetUid) {
           results.push({ type, ok: false, msg: '未指定目标QQ' })
           continue
@@ -846,7 +850,8 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: true, msg: `已为 ${targetUid} 设置头衔：${titleText.slice(0, 18)}` })
 
       } else if (type === 'set_group_name') {
-        const groupName = args.slice(1).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        // 无目标操作：取 args[0] 作为群名（不是 args.slice(1)）
+        const groupName = String(args[0] || '').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
         if (!groupName) {
           results.push({ type, ok: false, msg: '未指定群名' }); continue
         }
@@ -858,7 +863,8 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: true, msg: `已将群名更改为：${groupName}` })
 
       } else if (type === 'mute_all') {
-        const enable = args[1] === '1' || args[1]?.toLowerCase() === 'on'
+        // 无目标操作：取 args[0] 作为开关（不是 args[1]）
+        const enable = args[0] === '1' || args[0]?.toLowerCase() === 'on'
         await executeMuteAll(groupId, enable)
         safeLogger.info(`[ai0-plugin] 群操作: mute_all 群${groupId} ${enable ? '开启' : '关闭'} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: enable ? '已开启全体禁言' : '已关闭全体禁言' })
@@ -876,13 +882,15 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: true, msg: `已${display} ${targetUid}` })
 
       } else if (type === 'title_display') {
-        const enable = args[1] === '1' || args[1]?.toLowerCase() === 'on'
+        // 无目标操作：取 args[0] 作为开关（不是 args[1]）
+        const enable = args[0] === '1' || args[0]?.toLowerCase() === 'on'
         await executeTitleDisplay(groupId, enable)
         safeLogger.info(`[ai0-plugin] 群操作: title_display 群${groupId} ${enable ? '开启' : '关闭'} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: enable ? '已开启头衔展示' : '已关闭头衔展示' })
 
       } else if (type === 'set_notice') {
-        const noticeContent = args.slice(1).join(':').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        // 无目标操作：取 args[0] 作为公告内容（不是 args.slice(1)）
+        const noticeContent = String(args[0] || '').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
         if (!noticeContent) {
           results.push({ type, ok: false, msg: '未指定公告内容' }); continue
         }
@@ -891,12 +899,15 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: true, msg: '已更新群公告' })
 
       } else if (type === 'group_search') {
-        const enable = args[1] === '1' || args[1]?.toLowerCase() === 'on'
+        // 无目标操作：取 args[0] 作为开关（不是 args[1]）
+        const enable = args[0] === '1' || args[0]?.toLowerCase() === 'on'
         await executeGroupSearch(groupId, enable)
         safeLogger.info(`[ai0-plugin] 群操作: group_search 群${groupId} ${enable ? '开启' : '关闭'} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: enable ? '已开启群搜索' : '已关闭群搜索' })
 
       } else if (type === 'blacklist') {
+        // 统一格式：[action:blacklist:目标QQ:add|remove]
+        // args[0] = 目标QQ（已在上方通过正则校验），args[1] = add/remove
         const action = args[1]?.toLowerCase()
         if (!action || !['add', 'remove'].includes(action)) {
           results.push({ type, ok: false, msg: '无效的黑名单操作（支持：add/remove）' }); continue

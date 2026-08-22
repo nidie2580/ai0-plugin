@@ -10,6 +10,30 @@ import { safeLogger } from '../src/globals.js'
 let svgR = null
 try { svgR = await import('../src/svgRender.js') } catch (_) {}
 
+/**
+ * 群操作指令参数转义：用于把文本（群名/公告/头衔等）安全塞进 [action:type:arg1:arg2...] 标签。
+ *
+ * 注意：绝不能用全局 escape() —— 它是废弃的 URI 编码函数，会把中文转成 %E6%96%B0%E7%BE%A4%E5%90%8D，
+ * 然后下传到 groupOps 解析后真正落地的群名就是这串乱码。
+ *
+ * 这里只需做"不影响 [action:...] 标签解析"的最小过滤：
+ *  - 去掉 ':' 冒号（分隔符，会破坏 args 拆分）
+ *  - 去掉 ']' 右方括号（结束符，会提前截断）
+ *  - 去掉 '[' 左方括号（避免嵌套）
+ *  - 去掉控制字符
+ */
+function escapeColons(s) {
+  return String(s ?? '')
+    .replace(/[\[\]:]/g, '')     // 去掉标签分隔符
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')  // 去掉控制字符
+    .trim()
+}
+
+/** 判断 parseAndExecuteActions 返回结果是否全部成功（修复假成功反馈） */
+function allActionsOk(r) {
+  return Array.isArray(r?.results) && r.results.length > 0 && r.results.every(x => x.ok)
+}
+
 export class AICommands extends plugin {
   constructor() {
     super({
@@ -110,12 +134,13 @@ export class AICommands extends plugin {
           permission: 'master'
         },
         {
-          reg: '^#ai定时禁言\\s+(\\d+)\\s+(分钟|小时|秒)?$',
+          // #ai定时禁言 @目标 <数字>[单位] —— 目标QQ通过@或纯数字传入
+          reg: '^#ai定时禁言\\s+(?:@?\\[at:qq=(\\d{5,12})\\]|@?(\\d{5,12}))\\s+(\\d+)\\s*(分钟|小时|秒)?$',
           fnc: 'timedMute',
           permission: 'master'
         },
         {
-          reg: '^ai头衔展示\\s+(开|关|启用|禁用|1|0)$',
+          reg: '^#ai头衔展示\\s+(开|关|启用|禁用|1|0)$',
           fnc: 'toggleTitleDisplay',
           permission: 'master'
         },
@@ -125,13 +150,19 @@ export class AICommands extends plugin {
           permission: 'master'
         },
         {
-          reg: '^#ai群搜索\\s+(.+)$',
+          // #ai群搜索 开|关 —— 群搜索方式管理（开关语义）
+          reg: '^#ai群搜索\\s+(开|关|启用|禁用|1|0)$',
           fnc: 'groupSearch',
           permission: 'master'
         },
         {
           reg: '^#ai拉黑\\s+(\\d{5,12})$',
-          fnc: 'blacklist',
+          fnc: 'blacklistAdd',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai(解除拉黑|取消拉黑|解黑)\\s+(\\d{5,12})$',
+          fnc: 'blacklistRemove',
           permission: 'master'
         }
       ]
@@ -1269,7 +1300,7 @@ export class AICommands extends plugin {
     return e.reply(lines.join('\n'))
   }
 
-  // —— 群管理硬编码指令实现（P3-U: 双线道）——
+  // —— 群管理硬编码指令实现（双线道：AI 意图 + 显式命令）——
 
   async renameGroup() {
     if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
@@ -1278,7 +1309,10 @@ export class AICommands extends plugin {
     if (!newName) return e.reply('请提供新群名，如: #ai改群名 新群名')
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
-    const ok = await groupOps.parseAndExecuteActions(`[action:set_group_name:${escape(newName)}]`, gid, e)
+    // 使用 escapeColons 替代全局 escape()，避免中文群名被 URI 编码成 %E6%96%B0... 乱码
+    const r = await groupOps.parseAndExecuteActions(`[action:set_group_name:${escapeColons(newName)}]`, gid, e)
+    const ok = allActionsOk(r)
+    if (!ok && r?.results?.[0]?.msg) return e.reply(`修改群名失败：${r.results[0].msg}`)
     return e.reply(ok ? `已修改群名为: ${newName}` : '修改群名失败')
   }
 
@@ -1289,7 +1323,9 @@ export class AICommands extends plugin {
     if (!gid) return e.reply('请在群聊中使用此命令')
     const arg = e.raw_message?.replace(/^#ai(全体|全员)禁言\s*/, '').trim()
     const on = !arg || ['开', '启用', '1'].includes(arg)
-    const ok = await groupOps.parseAndExecuteActions(`[action:mute_all:${on ? 1 : 0}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:mute_all:${on ? 1 : 0}]`, gid, e)
+    const ok = allActionsOk(r)
+    if (!ok && r?.results?.[0]?.msg) return e.reply(`操作失败：${r.results[0].msg}`)
     return e.reply(ok ? `${on ? '已开启' : '已关闭'}全体禁言` : '操作失败')
   }
 
@@ -1298,16 +1334,22 @@ export class AICommands extends plugin {
     const e = this.e
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
-    const match = e.raw_message?.match(/^#ai定时禁言\s+(\d+)\s*(分钟|小时|秒)?/)
-    if (!match) return e.reply('用法: #ai定时禁言 <数字> [分钟|小时|秒]')
-    let dur = parseInt(match[1], 10)
-    const unit = match[2] || '分钟'
+    // 正则匹配：#ai定时禁言 @目标 <数字>[单位] 或 #ai定时禁言 <QQ> <数字>[单位]
+    const match = e.raw_message?.match(/^#ai定时禁言\s+(?:@?\[at:qq=(\d{5,12})\]|@?(\d{5,12}))\s+(\d+)\s*(分钟|小时|秒)?/)
+    if (!match) return e.reply('用法: #ai定时禁言 @目标 <数字> [分钟|小时|秒]\n示例: #ai定时禁言 @张三 10 分钟')
+    const targetQQ = match[1] || match[2]
+    if (!targetQQ) return e.reply('未识别到目标 QQ 号，请 @目标 或直接给出 QQ 号')
+    let dur = parseInt(match[3], 10)
+    const unit = match[4] || '分钟'
     if (unit === '小时') dur *= 3600
     else if (unit === '秒') dur *= 1
     else dur *= 60
     if (dur > 30 * 86400) return e.reply('禁言时长不能超过 30 天')
-    const ok = await groupOps.parseAndExecuteActions(`[action:mute_all:1]`, gid, e)
-    return e.reply(ok ? `已开启全体禁言（${dur}秒后自动解除需配合群管理）` : '操作失败')
+    // 走 timed_mute 执行链（已在 groupOps 验证可用）：[action:timed_mute:QQ:秒]
+    const r = await groupOps.parseAndExecuteActions(`[action:timed_mute:${targetQQ}:${dur}]`, gid, e)
+    const ok = allActionsOk(r)
+    if (!ok && r?.results?.[0]?.msg) return e.reply(`定时禁言失败：${r.results[0].msg}`)
+    return e.reply(ok ? `已禁言 ${targetQQ} ${match[3]}${unit}` : '定时禁言失败')
   }
 
   async toggleTitleDisplay() {
@@ -1315,9 +1357,11 @@ export class AICommands extends plugin {
     const e = this.e
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
-    const arg = e.raw_message?.replace(/^ai头衔展示\s*/, '').trim()
+    const arg = e.raw_message?.replace(/^#ai头衔展示\s*/, '').trim()
     const on = ['开', '启用', '1'].includes(arg)
-    const ok = await groupOps.parseAndExecuteActions(`[action:title_display:${on ? 1 : 0}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:title_display:${on ? 1 : 0}]`, gid, e)
+    const ok = allActionsOk(r)
+    if (!ok && r?.results?.[0]?.msg) return e.reply(`操作失败：${r.results[0].msg}`)
     return e.reply(ok ? `${on ? '已开启' : '已关闭'}头衔展示` : '操作失败')
   }
 
@@ -1328,29 +1372,51 @@ export class AICommands extends plugin {
     if (!notice) return e.reply('请提供公告内容，如: #ai改公告 新公告内容')
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
-    const ok = await groupOps.parseAndExecuteActions(`[action:set_notice:${escape(notice)}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:set_notice:${escapeColons(notice)}]`, gid, e)
+    const ok = allActionsOk(r)
+    if (!ok && r?.results?.[0]?.msg) return e.reply(`修改公告失败：${r.results[0].msg}`)
     return e.reply(ok ? '公告已更新' : '修改公告失败')
   }
 
   async groupSearch() {
     if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
-    const query = e.raw_message?.replace(/^#ai群搜索\s*/, '').trim() || ''
-    if (!query) return e.reply('请提供搜索关键词，如: #ai群搜索 关键词')
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
-    const ok = await groupOps.parseAndExecuteActions(`[action:group_search:${escape(query)}]`, gid, e)
-    return e.reply(ok ? '搜索已执行' : '搜索失败')
+    // 群搜索是"搜索方式开关"（开/关），不是"搜索关键词"
+    const arg = e.raw_message?.replace(/^#ai群搜索\s*/, '').trim() || ''
+    const on = ['开', '启用', '1'].includes(arg)
+    const r = await groupOps.parseAndExecuteActions(`[action:group_search:${on ? 1 : 0}]`, gid, e)
+    const ok = allActionsOk(r)
+    if (!ok && r?.results?.[0]?.msg) return e.reply(`操作失败：${r.results[0].msg}`)
+    return e.reply(ok ? `${on ? '已开启' : '已关闭'}群搜索` : '操作失败')
   }
 
-  async blacklist() {
+  async blacklistAdd() {
     if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const match = e.raw_message?.match(/^#ai拉黑\s+(\d{5,12})/)
     if (!match) return e.reply('请提供有效的 QQ 号，如: #ai拉黑 123456789')
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
-    const ok = await groupOps.parseAndExecuteActions(`[action:blacklist:${match[1]}]`, gid, e)
-    return e.reply(ok ? `已拉黑 QQ: ${match[1]}` : '操作失败')
+    // 统一格式：[action:blacklist:目标QQ:add]
+    const r = await groupOps.parseAndExecuteActions(`[action:blacklist:${match[1]}:add]`, gid, e)
+    const ok = allActionsOk(r)
+    if (!ok && r?.results?.[0]?.msg) return e.reply(`拉黑失败：${r.results[0].msg}`)
+    return e.reply(ok ? `已拉黑 QQ: ${match[1]}` : '拉黑失败')
+  }
+
+  async blacklistRemove() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const match = e.raw_message?.match(/^#ai(解除拉黑|取消拉黑|解黑)\s+(\d{5,12})/)
+    if (!match) return e.reply('请提供有效的 QQ 号，如: #ai解除拉黑 123456789')
+    const gid = e.group_id
+    if (!gid) return e.reply('请在群聊中使用此命令')
+    // 统一格式：[action:blacklist:目标QQ:remove]
+    const r = await groupOps.parseAndExecuteActions(`[action:blacklist:${match[2]}:remove]`, gid, e)
+    const ok = allActionsOk(r)
+    if (!ok && r?.results?.[0]?.msg) return e.reply(`解除拉黑失败：${r.results[0].msg}`)
+    return e.reply(ok ? `已解除拉黑 QQ: ${match[2]}` : '解除拉黑失败')
   }
 }

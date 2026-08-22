@@ -22,6 +22,9 @@ function isPrivateIp(ip) {
   return false
 }
 
+// 导出用于单元测试（仅测试用，业务代码请用 isPrivateIp / isAllowedOutboundUrl）
+export const __test__ = { isPrivateIp, isPrivateIpv4, isPrivateIpv6 }
+
 function parseIpv4(ip) {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip)
   if (!m) return null
@@ -88,6 +91,13 @@ function isPrivateIpv6(ip) {
     const ipv4 = v6TailToIpv4([parseInt(mc[1], 16), parseInt(mc[2], 16)])
     if (ipv4) return isPrivateIpv4(ipv4)
     return true
+  }
+  // IPv4-compatible 点分形式：::a.b.c.d（如 ::127.0.0.1、::10.0.0.1）
+  // RFC 4291 已弃用，但部分实现仍可能产生；含点号不匹配上方正则，单独判断
+  let md = l.match(/^::(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/) || l.match(/^0:0:0:0:0:0:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/)
+  if (md) {
+    // 该形式本身就属保留地址段；若 IPv4 部分是私有/回环则拒绝，否则也保守拒绝
+    return isPrivateIpv4(md[1]) || true
   }
   return false
 }
