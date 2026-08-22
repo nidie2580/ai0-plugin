@@ -528,7 +528,7 @@ export async function handleChat(e) {
             // 再发送图片
             if (imgResult.imageBuffer) {
               try {
-                await e.reply(helper.safeSegmentImage(imgResult.imageBuffer))
+                await e.reply(helper.getImageSegment(imgResult.imageBuffer))
               } catch (imgErr) {
                 safeLogger.error(`[ai0-plugin] 发送图片失败: ${imgErr.message}`)
                 await helper.replyText(e, '图片生成成功但发送失败，请查看日志。')

@@ -20,8 +20,11 @@
     </div>
 
     <div class="tab-pane active" id="tab-code">
-      <p class="hint">打开 Yunzai 运行终端查看最新打印的验证码。<br>或由主人向机器人发送 <code>#ai验证码</code> 获取。</p>
-      <label>验证码
+      <p class="hint">由主人向机器人发送 <code>#ai验证码</code>，同时获取 ID 和 Code。</p>
+      <label>验证码 ID
+        <input id="codeIdInput" maxlength="32" placeholder="验证码 ID（生成时的 32 位 hex）" inputmode="text" autocomplete="off" />
+      </label>
+      <label>验证码 Code
         <input id="codeInput" maxlength="16" placeholder="16 位字母数字组合" inputmode="text" autocomplete="off" />
       </label>
       <button class="btn primary" id="loginBtn">登录</button>

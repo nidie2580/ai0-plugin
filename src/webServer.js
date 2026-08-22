@@ -299,9 +299,8 @@ export function createApp() {
   // ==================== API ====================
   app.post('/api/login/code', (req, res) => {
     const { codeId, code } = req.body || {}
-    const id = codeId || auth.getPendingCodeId()
-    if (!id) return res.json({ ok: false, msg: '当前没有待验证的验证码，请先在终端生成' })
-    const r = auth.verifyCode(id, code, req.clientIp)
+    if (!codeId) return res.json({ ok: false, msg: '请输入验证码 ID' })
+    const r = auth.verifyCode(codeId, code, req.clientIp)
     if (!r.ok) return res.json(r)
     const session = auth.issueSession(req.clientIp)
     const secure = req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')
@@ -419,8 +418,9 @@ export function createApp() {
     }
 
     // — P0-2: 禁止通过 API 修改 permissions.masters —
+    // 前端保存时总是带 masters 键（即便为空数组），改为删除而非整体拒绝
     if (config.permissions?.masters) {
-      return res.json({ ok: false, msg: '禁止通过 API 修改 permissions.masters，请在 config.yaml 中手动编辑' })
+      delete config.permissions.masters
     }
 
     // — P0-2: 模型子键白名单 —

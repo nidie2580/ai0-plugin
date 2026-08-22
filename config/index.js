@@ -288,7 +288,7 @@ export function loadConfig() {
 //   AI0_LLM_API_BASE   → 覆盖默认模型的 apiBase（可选）
 //   AI0_IMAGE_API_KEY  → 覆盖图片生成的 apiKey（可选）
 // 返回是否有覆盖发生（供调用方判断是否需要重建缓存）。
-function applyEnvOverrides(parsed) {
+export function applyEnvOverrides(parsed) {
   const overridden = []
   const def = parsed.model && parsed.model.default
   const envLlmKey = process.env.AI0_LLM_API_KEY
@@ -327,9 +327,25 @@ export function getLastConfigError() {
 
 export function saveConfig(config) {
   try {
-    const content = YAML.stringify(config)
+    // 过滤掉环境变量覆盖的键，防止密钥明文落盘
+    const envKeys = getEnvOverriddenKeys()
+    const cleaned = JSON.parse(JSON.stringify(config))
+    for (const dotKey of envKeys) {
+      const parts = dotKey.split('.')
+      let target = cleaned
+      for (let i = 0; i < parts.length - 1; i++) {
+        target = target?.[parts[i]]
+      }
+      if (target && typeof target === 'object') {
+        delete target[parts[parts.length - 1]]
+      }
+    }
+    const content = YAML.stringify(cleaned)
     atomicWriteYaml(USER_CONFIG, content)
-    cachedConfig = config
+    // 缓存时重新应用 env 覆盖键，防止 web 保存后 env 失效直到重启
+    const withEnv = JSON.parse(JSON.stringify(cleaned))
+    applyEnvOverrides(withEnv)
+    cachedConfig = withEnv
     try { lastMtime = fs.statSync(USER_CONFIG).mtimeMs } catch (_) { lastMtime = Date.now() }
     lastParseError = null
     return true

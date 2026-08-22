@@ -39,23 +39,34 @@ if (route === 'login') {
     })
   })
 
+  const codeIdInput = $('#codeIdInput')
   const input = $('#codeInput')
   const err = $('#err')
   input?.addEventListener('input', () => {
     input.value = input.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)
     err.textContent = ''
   })
+  codeIdInput?.addEventListener('input', () => {
+    codeIdInput.value = codeIdInput.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 32)
+    err.textContent = ''
+  })
   input?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
+  codeIdInput?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
 
   $('#loginBtn')?.addEventListener('click', doLogin)
 
   async function doLogin() {
+    const codeId = (codeIdInput?.value || '').trim()
     const code = input.value.trim()
-    if (code.length !== 6) {
-      err.textContent = '请输入 6 位数字验证码'
+    if (!codeId || codeId.length !== 32) {
+      err.textContent = '请输入 32 位验证码 ID'
       return
     }
-    const r = await api('/api/login/code', { method: 'POST', body: { code } })
+    if (code.length !== 16) {
+      err.textContent = '请输入 16 位字母数字验证码'
+      return
+    }
+    const r = await api('/api/login/code', { method: 'POST', body: { codeId, code } })
     if (r.ok) {
       location.href = '/'
     } else {

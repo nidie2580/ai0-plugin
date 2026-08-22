@@ -102,6 +102,7 @@ export class AICommands extends plugin {
   }
 
   async help() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const info = ws.getServerInfo()
     // 生成 SVG 图片：本地文件绝对路径，用 segment.image(绝对路径) 发送
@@ -178,6 +179,7 @@ export class AICommands extends plugin {
   }
 
   async resetSession() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!userId) return false
     chatSvc.newSession(userId)
@@ -185,6 +187,7 @@ export class AICommands extends plugin {
   }
 
   async showModel() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const config = cfg.loadConfig()
     const def = config.model?.default || '未设置'
     const m = config.model?.[def] || {}
@@ -213,6 +216,7 @@ export class AICommands extends plugin {
   }
 
   async setModel() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
@@ -232,6 +236,7 @@ export class AICommands extends plugin {
   }
 
   async setApiKey() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
@@ -252,6 +257,7 @@ export class AICommands extends plugin {
   }
 
   async setApiBase() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
@@ -276,6 +282,7 @@ export class AICommands extends plugin {
   }
 
   async addMaster() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
@@ -295,6 +302,7 @@ export class AICommands extends plugin {
   }
 
   async reloadConfig() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const userId = helper.getUserId(e)
     if (!helper.isMaster(userId, e)) {
@@ -360,6 +368,7 @@ export class AICommands extends plugin {
   }
 
   async webAdmin() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const userId = helper.getUserId(e)
     const isGroup = !!e.group_id
@@ -454,6 +463,7 @@ export class AICommands extends plugin {
   }
 
   async webStart() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
@@ -479,6 +489,7 @@ export class AICommands extends plugin {
   }
 
   async webStop() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
@@ -488,6 +499,7 @@ export class AICommands extends plugin {
   }
 
   async genCode() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用')
@@ -501,20 +513,22 @@ export class AICommands extends plugin {
     } catch (e) {
       // 继续即可
     }
-    const { code } = auth.generateTerminalCode()
+    const { id, code } = auth.generateTerminalCode()
     const info = ws.getServerInfo()
     const lines = [
       '🔐 网页管理登录验证码（5分钟有效）：',
       '',
-      `    ${code}`,
+      `    ID: ${id}`,
+      `    Code: ${code}`,
       '',
       info.url ? `访问：${info.url}` : '',
-      '（验证码会同时打印在 Yunzai 运行终端）'
+      '（在网页端需同时填入 ID 和 Code；终端也会同步打印）'
     ].filter(Boolean)
     return this.e.reply(lines.join('\n'))
   }
 
   async diagnose() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const userId = helper.getUserId(e)
     const groupId = helper.getGroupId(e)
@@ -644,6 +658,7 @@ export class AICommands extends plugin {
 
   /** #ai群诊断：输出群+成员接口的原始数据与可用方法清单 */
   async groupDiagnose() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     if (!e.group_id) return e.reply('⚠️ 此命令仅在群聊中可用。')
     const groupId = e.group_id
@@ -820,6 +835,7 @@ export class AICommands extends plugin {
   }
 
   async testModel() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const text = helper.getMessageText(e)
     const m = (text || '').match(/^#ai(测试模型|模型测试|测模型)\s*(\S+)?\s*$/)
@@ -920,6 +936,7 @@ export class AICommands extends plugin {
    * 切换到非默认平台时，会同步把 default 字段指向新平台。
    */
   async switchModel() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const userId = helper.getUserId(e)
     if (!helper.isMaster(userId, e)) {

@@ -133,7 +133,7 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
     if (!check.ok) return { ok: false, error: check.reason || '拒绝访问该 URL' }
     // DNS Rebinding 防护：使用已解析 IP 直连，Host 头保留原始域名，servername 用于 TLS SNI
     let connectUrl = current
-    let axiosOpts = { ...(opts || {}), maxRedirects: 0, validateStatus: () => true, proxy: false }
+    let axiosOpts = { ...(opts || {}), maxRedirects: 0, validateStatus: () => true, proxy: false, responseType: 'arraybuffer' }
     if (check.resolvedIp) {
       try {
         const u = new URL(current)

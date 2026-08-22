@@ -754,14 +754,17 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
     const { type, args } = match
     try {
       const targetUid = args[0]
-      if (!targetUid) {
-        results.push({ type, ok: false, msg: '未指定目标QQ' })
-        continue
-      }
-      // P1-4: targetUid 格式校验（5-12位纯数字）
-      if (!/^\d{5,12}$/.test(String(targetUid))) {
-        results.push({ type, ok: false, msg: `目标QQ号格式无效: ${targetUid}` })
-        continue
+      // 无目标操作（mute_all/title_display/set_group_name/set_notice/group_search）跳过 QQ 号校验
+      const TARGETLESS_OPS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search'])
+      if (!TARGETLESS_OPS.has(type)) {
+        if (!targetUid) {
+          results.push({ type, ok: false, msg: '未指定目标QQ' })
+          continue
+        }
+        if (!/^\d{5,12}$/.test(String(targetUid))) {
+          results.push({ type, ok: false, msg: `目标QQ号格式无效: ${targetUid}` })
+          continue
+        }
       }
 
       // —— 4 条硬验证（本地判定，不依赖 AI）——

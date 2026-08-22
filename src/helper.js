@@ -35,7 +35,7 @@ function readFrameworkMasters() {
     // 兼容标准 Yunzai (global.Config) 和 XRK-Yunzai (globalThis.Config / global.cfg)
     const g = (typeof globalThis !== 'undefined' && globalThis.Config) || (typeof global !== 'undefined' && global.Config) || null
     if (g) {
-      for (const k of ['master', 'masters', 'masterQQ', 'qq', 'owner']) {
+      for (const k of ['master', 'masters', 'masterQQ', 'owner']) {
         const v = g[k]
         if (!v) continue
         ;(Array.isArray(v) ? v : [v]).forEach(x => {
@@ -44,7 +44,7 @@ function readFrameworkMasters() {
       }
       if (g.matcher) {
         const m = g.matcher
-        for (const k of ['master', 'masters', 'masterQQ', 'qq', 'owner']) {
+        for (const k of ['master', 'masters', 'masterQQ', 'owner']) {
           const v = m[k]
           if (!v) continue
           ;(Array.isArray(v) ? v : [v]).forEach(x => {
@@ -114,8 +114,9 @@ export function isUserAllowed(userId, groupId = null, e = null) {
   if (gid != null && blockedGroups.includes(gid)) return false
 
   if (mode) {
-    const userOk = !uid || allowedUsers.length === 0 || allowedUsers.includes(uid)
-    const groupOk = gid == null || allowedGroups.length === 0 || allowedGroups.includes(gid)
+    // fail-closed: 白名单模式下空列表 = 拒绝所有（而非放行）
+    const userOk = !uid ? true : (allowedUsers.length > 0 && allowedUsers.includes(uid))
+    const groupOk = gid == null ? true : (allowedGroups.length > 0 && allowedGroups.includes(gid))
     return userOk && groupOk
   }
 
@@ -531,11 +532,11 @@ export function splitUnicodeSafe(text, targetChunk = 3000, options = {}) {
     // 如果当前字符是 low surrogate（位于 U+DC00..U+DFFF），就往前退一格（把前面的 high 也包含进来）
     const code = text.charCodeAt(limit)
     if (code >= 0xDC00 && code <= 0xDFFF && limit > 0) {
-      return limit
+      return limit - 1
     }
     // 如果下一个字符是 low surrogate，我们这里是 high surrogate → 退回到这一对之前
     const nextCode = limit + 1 < len ? text.charCodeAt(limit + 1) : 0
-    if (nextCode >= 0xDC00 && nextCode <= 0xDFFF) return limit
+    if (nextCode >= 0xDC00 && nextCode <= 0xDFFF && limit > 0) return limit - 1
     return limit
   }
 
