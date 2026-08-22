@@ -147,12 +147,18 @@ export async function isAllowedOutboundUrl(u) {
 export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 3) {
   let current = origUrl
   let redirects = 0
+  // — 副作用修复：先克隆 opts.headers，避免跨主机重定向时 delete 调用方的对象 —
+  // 否则调用方传进来的 opts.headers（尤其是全局复用对象）会被"脏改"，下一次同
+  // 主机请求会缺失 authorization/cookie，造成偶发 401 / 状态串扰。
+  let workingOpts = opts && typeof opts === 'object'
+    ? { ...opts, headers: opts.headers ? { ...opts.headers } : undefined }
+    : {}
   while (true) {
     const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
     if (!check.ok) return { ok: false, error: check.reason || '拒绝访问该 URL' }
     // DNS Rebinding 防护：使用已解析 IP 直连，Host 头保留原始域名，servername 用于 TLS SNI
     let connectUrl = current
-    let axiosOpts = { ...(opts || {}), maxRedirects: 0, validateStatus: () => true, proxy: false, responseType: 'arraybuffer' }
+    let axiosOpts = { ...workingOpts, maxRedirects: 0, validateStatus: () => true, proxy: false, responseType: 'arraybuffer' }
     if (check.resolvedIp) {
       try {
         const u = new URL(current)
@@ -181,9 +187,9 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
       // 跨主机重定向时剥离认证头，防止凭证泄露
       const origHostname = new URL(current).hostname
       if (nextUrl.hostname !== origHostname) {
-        if (opts && opts.headers) {
-          delete opts.headers.authorization
-          delete opts.headers.cookie
+        if (workingOpts.headers) {
+          delete workingOpts.headers.authorization
+          delete workingOpts.headers.cookie
         }
       }
       const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))

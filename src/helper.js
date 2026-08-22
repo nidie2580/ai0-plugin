@@ -926,17 +926,22 @@ async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {
   return { ok: true, buffer: buf }
 }
 
-/** 流式读取响应体并限制总大小（兼容 fetch Response 和 axios Response） */
-async function readBody(resp, maxBytes) {
+/** 流式读取响应体并限制总大小（兼容 fetch Response 和 axios Response）
+ *  提取为公共函数：imageGen.js 与 helper.js 共用，避免重复实现。
+ *  @param {{data?: *, headers: object|Headers, body?: {getReader?:Function}, arrayBuffer?:Function}} resp - fetch 或 axios 风格的响应对象
+ *  @param {number} maxBytes - 允许的最大字节数
+ *  @param {string} [errorPrefix='下载图片失败: '] - 错误消息前缀（便于不同调用场景定制）
+ */
+export async function readBody(resp, maxBytes, errorPrefix = '下载图片失败: ') {
   // axios Response: headers 是普通对象，data 已是 Buffer/ArrayBuffer
   if (resp.data !== undefined) {
     const buf = Buffer.isBuffer(resp.data) ? resp.data : Buffer.from(resp.data)
-    if (buf.length > maxBytes) return { ok: false, error: `图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
+    if (buf.length > maxBytes) return { ok: false, error: `${errorPrefix}图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
     return { ok: true, buffer: buf }
   }
   // fetch Response: headers.get() + body.getReader()
   const declared = Number(resp.headers.get?.('content-length') || resp.headers['content-length'] || 0)
-  if (declared > maxBytes) return { ok: false, error: `图片过大(${Math.round(declared / 1024 / 1024)}MB)已拒绝` }
+  if (declared > maxBytes) return { ok: false, error: `${errorPrefix}图片过大(${Math.round(declared / 1024 / 1024)}MB)已拒绝` }
   let buf
   if (resp.body && typeof resp.body.getReader === 'function') {
     const reader = resp.body.getReader()
@@ -948,16 +953,16 @@ async function readBody(resp, maxBytes) {
       total += value.length
       if (total > maxBytes) {
         await reader.cancel().catch(() => {})
-        return { ok: false, error: `图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
+        return { ok: false, error: `${errorPrefix}图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
       }
       chunks.push(value)
     }
     buf = Buffer.concat(chunks)
   } else {
     buf = Buffer.from(await resp.arrayBuffer())
-    if (buf.length > maxBytes) return { ok: false, error: '图片过大已拒绝' }
+    if (buf.length > maxBytes) return { ok: false, error: `${errorPrefix}图片过大已拒绝` }
   }
-  if (!buf || buf.length < 16) return { ok: false, error: '图片为空或过小' }
+  if (!buf || buf.length < 16) return { ok: false, error: `${errorPrefix}图片为空或过小` }
   return { ok: true, buffer: buf }
 }
 

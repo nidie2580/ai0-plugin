@@ -377,6 +377,15 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   let providersCache = null  // 完整 config 缓存（含 model 字段）
   let providersList = []     // [{ key, name, apiBase, apiKey, model, temperature, maxTokens, timeout, _origKey }]
   let providersDefault = ''
+  // 与后端 API_KEY_PLACEHOLDER 完全一致（/api/config 返回的脱敏占位符）。
+  // 任何时候保存：若 apiKey 是空串或占位符，视为"未修改"，发送占位符让后端还原原值。
+  const API_KEY_PLACEHOLDER = '********'
+  function normalizeApiKeyForSave(v) {
+    const s = String(v == null ? '' : v).trim()
+    if (!s) return API_KEY_PLACEHOLDER           // 空串 → 保留原 key，避免误清空
+    if (s === API_KEY_PLACEHOLDER) return s      // 占位符原样回传
+    return s
+  }
 
   $('#saveProviders')?.addEventListener('click', saveProviders)
   $('#addProviderBtn')?.addEventListener('click', () => addProvider())
@@ -457,7 +466,15 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         const f = el.dataset.field
         if (!providersList[idx] || !f) return
         let v = el.value
-        if (f === 'temperature' || f === 'maxTokens' || f === 'timeout') v = parseFloat(v) || 0
+        if (f === 'temperature' || f === 'maxTokens' || f === 'timeout') {
+          v = parseFloat(v) || 0
+        } else if (typeof v === 'string') {
+          // —— P3: 文本字段 trim，避免首尾空白导致：(a) 配置被认为"无效"/"冲突" ——
+          // (b) 恰好只含空白的 apiKey 在输入框里看不见，会被当成空串发给后端覆
+          // 盖真实 key。注意 apiKey 仅在用户真的输入了"非占位符 + 非空"内容时
+          // 才会实际变更（见 saveProviders 的保留占位符逻辑）。
+          v = v.trim()
+        }
         providersList[idx][f] = v
       })
     })
@@ -552,9 +569,9 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     for (const p of providersList) {
       newModel[p.key] = {
         name: p.name || '',
-        apiBase: p.apiBase || '',
-        apiKey: p.apiKey || '',
-        model: p.model || '',
+        apiBase: String(p.apiBase || '').trim(),
+        apiKey: normalizeApiKeyForSave(p.apiKey),
+        model: String(p.model || '').trim(),
         temperature: Number(p.temperature) || 0.8,
         maxTokens: Number(p.maxTokens) || 2000,
         timeout: Number(p.timeout) || 60000
@@ -587,13 +604,19 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     // 直接读取当前页面输入的临时数据（不强制先保存到后端）
     const card = $$('#providersList .provider-card')[idx]
     const apiBase = card?.querySelector(`[data-field="apiBase"]`)?.value?.trim() || p.apiBase
-    const apiKey = card?.querySelector(`[data-field="apiKey"]`)?.value?.trim() || p.apiKey
+    const apiKeyRaw = card?.querySelector(`[data-field="apiKey"]`)?.value?.trim()
+    const apiKey = apiKeyRaw || p.apiKey
     const key = card?.querySelector(`[data-field="key"]`)?.value?.trim() || p.key
     // 如果 key/apiBase/apiKey 跟现有 config 里的不一致，需要先临时保存到后端再探测
     const cfgResp = await api('/api/config')
     const modelCfg = cfgResp.config?.model || {}
     const exist = modelCfg[key]
-    const needSave = !exist || exist.apiBase !== apiBase || (apiKey && !apiKey.includes('****') && exist.apiKey !== apiKey)
+    // —— P3: 使用精确匹配占位符，而非 !apiKey.includes('****') ——
+    // 否则若某个真实 key 恰好含有 4 个连续星（极少见但可能），会被错判为"未改"而跳过保存。
+    const keyActuallyModified = !!apiKeyRaw && apiKeyRaw !== API_KEY_PLACEHOLDER
+    const needSave = !exist
+      || exist.apiBase !== apiBase
+      || (keyActuallyModified && exist.apiKey !== apiKeyRaw)
     if (needSave) {
       // 临时保存一下，方便后端用最新的 key 探测
       await saveProviders()
@@ -692,7 +715,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const ic = {
       enabled: $('#img_enabled').value === 'true',
       apiBase: $('#img_apiBase').value.trim(),
-      apiKey: $('#img_apiKey').value.trim(),
+      apiKey: normalizeApiKeyForSave($('#img_apiKey').value),
       model: $('#img_model').value.trim() || 'dall-e-3',
       defaultSize: $('#img_defaultSize').value.trim() || '1024x1024',
       quality: $('#img_quality').value || 'standard',

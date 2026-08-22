@@ -75,7 +75,7 @@ export function loadHistory(userId, sessionId) {
           return arr
         }
       } catch (_) {}
-      safeLogger.warn(`[ai0-plugin] 会话历史损坏且无备份，已丢弃: ${file} (${err.message})`)
+      safeLogger.warn(`[ai0-plugin] 会话历史损坏且无备份，已丢弃: ${file} (${sanitizeLog(err.message)})`)
       return []
     }
   }
@@ -127,7 +127,7 @@ export function saveHistory(userId, sessionId, messages) {
       // 原子 rename
       fs.renameSync(tmp, file)
     } catch (err) {
-      safeLogger.error(`[ai0-plugin] 保存历史失败: ${err.message}`)
+      safeLogger.error(`[ai0-plugin] 保存历史失败: ${sanitizeLog(err.message)}`)
       try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp) } catch (_) {}
     }
   })
@@ -136,34 +136,36 @@ export function saveHistory(userId, sessionId, messages) {
 export function cleanupOldSessions(userId, maxSessions, timeoutMs) {
   const dir = path.join(HISTORY_DIR, String(userId))
   if (!fs.existsSync(dir)) return
+  // —— 清理逻辑合并为单次 readdir + 单次排序：——
+  // 1) 先按 mtime 从新到旧排好序
+  // 2) 第一遍遍历：标记 timeout 过期的为已删，同时收集活跃文件
+  // 3) 对超过 maxSessions 的活跃文件（靠后的 = 最旧的）直接删除
+  // 避免了之前的两次 readdir + 两次 stat 同步 I/O，也防止两趟之间的竞态。
   const files = fs.readdirSync(dir)
     .filter(f => f.endsWith('.json'))
     .map(f => {
       const p = path.join(dir, f)
-      return { p, stat: fs.statSync(p) }
+      let stat
+      try { stat = fs.statSync(p) } catch { return null }
+      return { p, mtime: stat.mtimeMs }
     })
-    .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime)
 
-  if (timeoutMs > 0) {
-    const now = Date.now()
-    for (const f of files) {
-      if (now - f.stat.mtimeMs > timeoutMs) {
-        try { fs.unlinkSync(f.p) } catch {}
-      }
+  const now = Date.now()
+  const active = []
+  for (const f of files) {
+    const timedOut = timeoutMs > 0 && now - f.mtime > timeoutMs
+    if (timedOut) {
+      try { fs.unlinkSync(f.p) } catch {}
+    } else {
+      active.push(f)
     }
   }
-
-  const remaining = fs.readdirSync(dir).filter(f => f.endsWith('.json'))
-  if (remaining.length > maxSessions) {
-    const toDelete = remaining
-      .map(f => {
-        const p = path.join(dir, f)
-        return { p, stat: fs.statSync(p) }
-      })
-      .sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs)
-      .slice(0, remaining.length - maxSessions)
-    for (const f of toDelete) {
-      try { fs.unlinkSync(f.p) } catch {}
+  if (active.length > maxSessions) {
+    // 已按"新→旧"排序，从下标 maxSessions 开始都是超量的旧文件
+    for (let i = maxSessions; i < active.length; i++) {
+      try { fs.unlinkSync(active[i].p) } catch {}
     }
   }
 }
@@ -210,13 +212,16 @@ export async function listAvailableModels({ modelKey = null } = {}) {
   const config = cfg.loadConfig()
   const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
   const m = config.model?.[modelCfgKey] || {}
-  if (!m.apiKey || !m.apiBase) return { ok: false, models: [], error: '未配置 apiBase 或 apiKey' }
-  const base = normalizeApiBase(m.apiBase)
+  // 输入净化（与 callLLM 保持一致）
+  const apiKey = String(m.apiKey || '').trim()
+  const apiBase = String(m.apiBase || '').trim()
+  if (!apiKey || !apiBase) return { ok: false, models: [], error: '未配置 apiBase 或 apiKey' }
+  const base = normalizeApiBase(apiBase)
   const modelsUrl = `${base}/models`
   try {
     const resp = await safeAxiosRequest('get', modelsUrl, null, {
       headers: {
-        'Authorization': `Bearer ${m.apiKey}`,
+        'Authorization': `Bearer ${apiKey}`,
         'Accept': 'application/json'
       },
       timeout: 15000,
@@ -237,7 +242,10 @@ export async function probeModelConnection({ modelKey = null } = {}) {
   const config = cfg.loadConfig()
   const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
   const m = config.model?.[modelCfgKey] || {}
-  if (!m.apiKey || !m.apiBase) {
+  // 输入净化（与 callLLM 保持一致）
+  const apiKey = String(m.apiKey || '').trim()
+  const apiBase = String(m.apiBase || '').trim()
+  if (!apiKey || !apiBase) {
     return { ok: false, reason: '未配置 apiBase 或 apiKey' }
   }
   const t0 = Date.now()
@@ -264,11 +272,17 @@ export async function chatCompletions(messages, {
   const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
   const m = config.model?.[modelCfgKey] || {}
 
-  if (!m.apiKey || !m.apiBase) {
+  // —— P3: URL / apiKey 输入净化 ——
+  // 1) apiKey 禁止空字符串或纯空白（否则 Authorization: Bearer 会变成 Bearer 空串
+  //    或一串空格，日志用 redactKey 检测 /^\s*$/ 标记"未设置"，但请求仍会发出）。
+  // 2) apiBase 先 trim 再做归一化与 SSRF 校验，避免首尾空白导致的错误归一化/误判。
+  const rawKey = String(m.apiKey || '').trim()
+  const rawBase = String(m.apiBase || '').trim()
+
+  if (!rawKey || !rawBase) {
     throw new Error('模型 API 未配置，请在 config/config.yaml 中设置 apiBase 和 apiKey')
   }
 
-  const rawBase = String(m.apiBase || '')
   const normalizedBase = normalizeApiBase(rawBase)
   const url = buildEndpoint(normalizedBase, '/chat/completions')
 
@@ -285,7 +299,7 @@ export async function chatCompletions(messages, {
   }
 
   if (typeof logger !== 'undefined') {
-    safeLogger.info(`[ai0-plugin] LLM 请求：base(原始)=${rawBase}  base(归一化)=${normalizedBase}  url=${url}  model=${model}  apiKey=${redactKey(m.apiKey)}`)
+    safeLogger.info(`[ai0-plugin] LLM 请求：base(原始)=${sanitizeLog(rawBase)}  base(归一化)=${sanitizeLog(normalizedBase)}  url=${sanitizeLog(url)}  model=${sanitizeLog(model)}  apiKey=${redactKey(m.apiKey)}`)
   }
 
   let resp
@@ -293,14 +307,14 @@ export async function chatCompletions(messages, {
     resp = await safeAxiosRequest('post', url, body, {
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${m.apiKey}`
+        'Authorization': `Bearer ${rawKey}`
       },
       timeout: m.timeout ?? 60000,
       signal,
     })
   } catch (e) {
     const s = summarizeAxiosError(e)
-    safeLogger.error(`[ai0-plugin] LLM 调用异常(${s.method} ${s.url}): code=${s.code} message=${s.message}`)
+    safeLogger.error(`[ai0-plugin] LLM 调用异常(${sanitizeLog(s.method)} ${sanitizeLog(s.url)}): code=${sanitizeLog(s.code)} message=${sanitizeLog(s.message)}`)
     let msg = '请求异常，请检查模型配置或稍后重试'
     if (s.code === 'ECONNREFUSED') msg = '连接被拒绝：请确认 apiBase 地址/端口正确，且服务已启动。'
     else if (s.code === 'ETIMEDOUT' || s.code === 'ECONNABORTED') msg = '连接超时：请稍后重试或调大 timeout。'

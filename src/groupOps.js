@@ -21,6 +21,20 @@ import { safeLogger } from './globals.js'
 const customTitleRateLimit = new Map()
 const CUSTOM_TITLE_RATE_LIMIT_WINDOW = 15 * 60 * 1000 // 15分钟
 const CUSTOM_TITLE_RATE_LIMIT_MAX = 3 // 最大请求次数
+// Map 容量上限：防止海量用户访问时内存泄漏
+const MAX_CUSTOM_TITLE_RATE_ENTRIES = 5000
+
+/** FIFO 淘汰超容量 Map 条目（保留较新的一半） */
+function evictMapOverCapacity(map, max) {
+  if (map.size <= max) return
+  const toDelete = map.size - Math.floor(max / 2)
+  let deleted = 0
+  for (const k of map.keys()) {
+    if (deleted >= toDelete) break
+    map.delete(k)
+    deleted++
+  }
+}
 
 /**
  * 检查用户自定义头衔请求是否超过限流
@@ -28,7 +42,15 @@ const CUSTOM_TITLE_RATE_LIMIT_MAX = 3 // 最大请求次数
  * @returns {{ok: boolean, reason?: string}}
  */
 function checkCustomTitleRateLimit(userId) {
+  // 内存保护：每次检查前尝试清理过期 + 容量上限
   const now = Date.now()
+  for (const [uid, timestamps] of customTitleRateLimit) {
+    const remaining = timestamps.filter(ts => now - ts < CUSTOM_TITLE_RATE_LIMIT_WINDOW)
+    if (remaining.length === 0) customTitleRateLimit.delete(uid)
+    else if (remaining.length !== timestamps.length) customTitleRateLimit.set(uid, remaining)
+  }
+  evictMapOverCapacity(customTitleRateLimit, MAX_CUSTOM_TITLE_RATE_ENTRIES)
+
   const userRequests = customTitleRateLimit.get(userId) || []
 
   // 清理过期的请求记录

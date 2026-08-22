@@ -1,6 +1,6 @@
 import * as cfg from '../config/index.js'
 import { isAllowedOutboundUrl, safeFetchWithRedirects, safeAxiosRequest } from './security.js'
-import { normalizeApiBase } from './helper.js'
+import { normalizeApiBase, readBody } from './helper.js'
 import { safeLogger, sanitizeLog } from './globals.js'
 
 /**
@@ -11,6 +11,8 @@ import { safeLogger, sanitizeLog } from './globals.js'
 
 // —— 每用户每日用量跟踪 ——
 const dailyUsage = new Map() // key: `YYYY-MM-DD:userId` → { count, tokens }
+// dailyUsage Map 容量上限：海量用户访问时防止内存耗尽
+const MAX_DAILY_USAGE_ENTRIES = 10_000
 
 function todayKey(userId) {
   const now = new Date()
@@ -20,9 +22,29 @@ function todayKey(userId) {
   return `${y}-${m}-${d}:${userId}`
 }
 
+/** FIFO 淘汰超容量 Map 条目（保留较新的一半） */
+function evictOverCapacity(map, max) {
+  if (map.size <= max) return
+  const toDelete = map.size - Math.floor(max / 2)
+  let deleted = 0
+  for (const k of map.keys()) {
+    if (deleted >= toDelete) break
+    map.delete(k)
+    deleted++
+  }
+}
+
 /** 检查用户配额，返回 { ok, reason? } */
 export function checkUserQuota(userId) {
   if (!userId) return { ok: false, reason: '无法识别用户' }
+  // 每次检查前先清理昨日数据 + 容量保护（避免等 1 小时定时器的真空期）
+  const now = new Date()
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  for (const k of dailyUsage.keys()) {
+    if (!k.startsWith(today + ':')) dailyUsage.delete(k)
+  }
+  evictOverCapacity(dailyUsage, MAX_DAILY_USAGE_ENTRIES)
+
   const ic = getImageGenConfig()
   const allowedUsers = ic.allowedUsers || []
   // 白名单检查：非空白名单时，只有列表中的用户可用
@@ -56,15 +78,17 @@ export function recordUsage(userId) {
   const key = todayKey(userId)
   const prev = dailyUsage.get(key) || { count: 0, tokens: 0 }
   dailyUsage.set(key, { count: prev.count + 1, tokens: prev.tokens + 1000 })
+  evictOverCapacity(dailyUsage, MAX_DAILY_USAGE_ENTRIES)
 }
 
-// 每天凌晨清理昨日记录
+// 每天清理昨日记录（1 小时轮询 + 操作前主动清理双保险）
 setInterval(() => {
   const now = new Date()
   const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
   for (const [k] of dailyUsage) {
     if (!k.startsWith(today + ':')) dailyUsage.delete(k)
   }
+  evictOverCapacity(dailyUsage, MAX_DAILY_USAGE_ENTRIES)
 }, 3600_000).unref?.()
 
 /** 获取图片生成配置 */
@@ -76,7 +100,11 @@ export function getImageGenConfig() {
 /** 是否启用 */
 export function isEnabled() {
   const ic = getImageGenConfig()
-  return ic.enabled === true && !!ic.apiBase && !!ic.apiKey && !!ic.model
+  // 首尾空白不算有效值 —— 与 llm.js 保持一致
+  return ic.enabled === true
+    && !!String(ic.apiBase || '').trim()
+    && !!String(ic.apiKey || '').trim()
+    && !!String(ic.model || '').trim()
 }
 
 /**
@@ -89,7 +117,11 @@ export function isEnabled() {
 export async function generateImage(prompt, opts = {}) {
   const ic = getImageGenConfig()
   if (!ic.enabled) return { ok: false, error: '图片生成功能未启用' }
-  if (!ic.apiBase || !ic.apiKey || !ic.model) {
+  // —— P3: apiBase / apiKey / model 输入净化（trim 空白，否则会被当成有效值） ——
+  const apiBase = String(ic.apiBase || '').trim()
+  const apiKey = String(ic.apiKey || '').trim()
+  const modelBase = String(ic.model || '').trim()
+  if (!apiBase || !apiKey || !modelBase) {
     return { ok: false, error: '图片生成配置不完整（需要 apiBase、apiKey、model）' }
   }
 
@@ -99,13 +131,13 @@ export async function generateImage(prompt, opts = {}) {
     if (!quota.ok) return { ok: false, error: quota.reason }
   }
 
-  const base = normalizeApiBase(ic.apiBase)
+  const base = normalizeApiBase(apiBase)
   const endpoint = `${base}/images/generations`
   const check = await isAllowedOutboundUrl(endpoint).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
   if (!check.ok) {
     return { ok: false, error: check.reason || 'apiBase URL 未通过安全校验（禁止访问私有/回环/链路本地地址）' }
   }
-  const model = opts.model || ic.model || 'dall-e-3'
+  const model = opts.model || modelBase || 'dall-e-3'
   const size = opts.size || ic.defaultSize || '1024x1024'
   const quality = opts.quality || ic.quality || 'standard'
   const n = 1
@@ -127,13 +159,13 @@ export async function generateImage(prompt, opts = {}) {
   const timer = setTimeout(() => controller.abort(), timeout)
 
   try {
-    safeLogger.info(`[ai0-plugin] 图片生成请求：endpoint=${endpoint} model=${model} size=${size} prompt=${prompt.slice(0, 80)}`)
+    safeLogger.info(`[ai0-plugin] 图片生成请求：endpoint=${sanitizeLog(endpoint)} model=${sanitizeLog(model)} size=${sanitizeLog(size)} prompt=${sanitizeLog(prompt.slice(0, 80))}`)
 
     // 使用 safeAxiosRequest 走 DNS pinning + 逐跳 SSRF 校验
     const resp = await safeAxiosRequest('POST', endpoint, body, {
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${ic.apiKey}`
+        'Authorization': `Bearer ${apiKey}`
       },
       signal: controller.signal,
       timeout
@@ -178,45 +210,12 @@ export async function generateImage(prompt, opts = {}) {
 
 /**
  * 下载图片 URL 为 Buffer（统一走 safeFetchWithRedirects，含 DNS pinning）
+ * readBody 已提取到 helper.js，避免重复实现。
  */
 export async function downloadImage(url, maxBytes = 20 * 1024 * 1024) {
   const result = await safeFetchWithRedirects(url, { signal: AbortSignal.timeout(60000) })
   if (!result.ok) return { ok: false, error: `下载图片失败: ${result.error}` }
-  return readBody(result.response, maxBytes)
-}
-
-/** 流式读取响应体并限制总大小（兼容 fetch Response 和 axios Response） */
-async function readBody(resp, maxBytes) {
-  // axios Response: headers 是普通对象，data 已是 Buffer/ArrayBuffer
-  if (resp.data !== undefined) {
-    const buf = Buffer.isBuffer(resp.data) ? resp.data : Buffer.from(resp.data)
-    if (buf.length > maxBytes) return { ok: false, error: `下载图片失败: 图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
-    return { ok: true, buffer: buf }
-  }
-  // fetch Response: headers.get() + body.getReader()
-  const declared = Number(resp.headers.get?.('content-length') || resp.headers['content-length'] || 0)
-  if (declared > maxBytes) return { ok: false, error: `下载图片失败: 图片过大(${Math.round(declared / 1024 / 1024)}MB)已拒绝` }
-  let buf
-  if (resp.body && typeof resp.body.getReader === 'function') {
-    const reader = resp.body.getReader()
-    const chunks = []
-    let total = 0
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      total += value.length
-      if (total > maxBytes) {
-        await reader.cancel().catch(() => {})
-        return { ok: false, error: `下载图片失败: 图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
-      }
-      chunks.push(value)
-    }
-    buf = Buffer.concat(chunks)
-  } else {
-    buf = Buffer.from(await resp.arrayBuffer())
-    if (buf.length > maxBytes) return { ok: false, error: '下载图片失败: 图片过大已拒绝' }
-  }
-  return { ok: true, buffer: buf }
+  return readBody(result.response, maxBytes, '下载图片失败: ')
 }
 
 /**

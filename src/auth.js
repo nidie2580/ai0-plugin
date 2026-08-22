@@ -1,4 +1,14 @@
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// ES module 中无 __dirname 内置量，自行推导 src/auth.js 所在目录
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// 会话持久化文件：进程重启后已登录用户无需重新登录
+const DATA_DIR = path.join(__dirname, '..', 'data')
+const SESSION_FILE = path.join(DATA_DIR, 'sessions.json')
 
 const tokens = new Map()
 const codes = new Map()
@@ -68,7 +78,74 @@ function evictOverCapacity(map, max) {
   }
 }
 
-setInterval(cleanup, 30_000).unref?.()
+// —— P3: 会话持久化 ——
+// tokens (session token) 和 MAGIC_LINKS 写入磁盘；codes / rateLimit 是短生命周期，
+// 重启自然重置不会泄露也不会影响安全。load 在启动时执行一次；save 在每次 cleanup
+// 周期结束后异步刷盘，以及进程退出前尽力刷一次。
+function loadSessions() {
+  try {
+    if (!fs.existsSync(SESSION_FILE)) return
+    const raw = fs.readFileSync(SESSION_FILE, 'utf-8')
+    const parsed = JSON.parse(raw)
+    const now = Date.now()
+    // 7 天绝对上限，与 verifySession 保持一致，避免加载远古 session
+    const ABSOLUTE_MAX_MS = 7 * 24 * 60 * 60 * 1000
+    if (Array.isArray(parsed.tokens)) {
+      for (const [k, v] of parsed.tokens) {
+        if (!v || typeof v !== 'object') continue
+        if (typeof v.expireAt !== 'number' || v.expireAt < now) continue
+        if (typeof v.createdAt === 'number' && now - v.createdAt > ABSOLUTE_MAX_MS) continue
+        tokens.set(k, v)
+      }
+    }
+    if (Array.isArray(parsed.magicLinks)) {
+      for (const [k, v] of parsed.magicLinks) {
+        if (!v || typeof v !== 'object') continue
+        if (typeof v.expireAt !== 'number' || v.expireAt < now) continue
+        MAGIC_LINKS.set(k, v)
+      }
+    }
+  } catch (err) {
+    // 加载失败仅记录（可能文件损坏 / 首次运行），不阻塞启动
+    try {
+      const { safeLogger, sanitizeLog } = await_import_global_error_only()
+      safeLogger?.(`[ai0-plugin] 加载会话持久化文件失败: ${sanitizeLog?.(err?.message) || err?.message}`)
+    } catch (_) {}
+  }
+}
+// 不 import globals.js 顶部（避免循环依赖）；错误路径内只做弱引用。正常路径无日志。
+function await_import_global_error_only() { return { safeLogger: (...a) => console.error(...a), sanitizeLog: x => String(x ?? '') } }
+
+let saveTimer = null
+function saveSessions() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 })
+    const payload = {
+      tokens: Array.from(tokens.entries()),
+      magicLinks: Array.from(MAGIC_LINKS.entries()),
+    }
+    // 临时文件 + rename，保证原子写（断电/崩溃不会留下半写的 JSON）
+    const tmp = SESSION_FILE + '.tmp'
+    fs.writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 })
+    fs.renameSync(tmp, SESSION_FILE)
+  } catch (_) { /* 持久化失败不影响前台服务；下次重试 */ }
+}
+
+// 启动时加载（在 cleanup timer 前执行，首次 cleanup 会立刻剔除过期/超限）
+loadSessions()
+// 每 30 秒：先 cleanup，再异步 save（节流）
+setInterval(() => {
+  cleanup()
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(saveSessions, 200).unref?.()
+}, 30_000).unref?.()
+// 优雅退出前尽力刷盘（SIGTERM / SIGINT；SIGKILL 无法捕获）
+const onShutdown = () => { try { saveSessions() } catch (_) {} }
+try {
+  process.on('SIGTERM', onShutdown)
+  process.on('SIGINT', onShutdown)
+  process.on('exit', onShutdown)
+} catch (_) {}
 
 /** 简单滑动窗口限速：允许 pass=true 放行并计数；超过阈值返回 false。
  *  scope='code' | 'magic' | 'login'；id 是 IP/验证码id 等
@@ -195,11 +272,23 @@ export function verifyMagicLink(token, clientIp = 'unknown') {
   const ipLimit = checkRateLimit('magic-ip', clientIp, AUTH_CFG.magicRatePerIp, AUTH_CFG.rateWindowMs * 2)
   if (!ipLimit.ok) return { ok: false, msg: `尝试过于频繁，请 ${Math.ceil(ipLimit.resetIn/1000)} 秒后重试` }
 
+  // —— 时序均衡（P2 修复）：任何快速失败路径都先执行一次恒长 timingSafeEqual，——
+  // 让 "token 不存在 / 已使用 / 已过期 / IP 不匹配" 与 "验证通过" 五条路径响应时间尽量一致，
+  // 防止攻击者通过响应时间差异枚举有效的 magic token。
+  const tokenBuf = Buffer.from(String(token || ''), 'utf-8')
+  const dummyBuf = Buffer.from('x'.repeat(40), 'utf-8') // 与 token 等长假值（40 字节 hex）
+  const equalize = () => {
+    if (tokenBuf.length === dummyBuf.length) {
+      try { crypto.timingSafeEqual(tokenBuf, dummyBuf) } catch (_) {}
+    }
+  }
+
   const rec = MAGIC_LINKS.get(token)
-  if (!rec) return { ok: false, msg: '链接无效或已过期' }
-  if (rec.used) return { ok: false, msg: '链接已使用（免登录链接仅能使用一次）' }
+  if (!rec) { equalize(); return { ok: false, msg: '链接无效或已过期' } }
+  if (rec.used) { equalize(); return { ok: false, msg: '链接已使用（免登录链接仅能使用一次）' } }
   if (Date.now() > rec.expireAt) {
     MAGIC_LINKS.delete(token)
+    equalize()
     return { ok: false, msg: '链接已过期' }
   }
   // IP 绑定：首次访问记录来源 IP；同一链接之后只允许该 IP 使用。
@@ -208,11 +297,13 @@ export function verifyMagicLink(token, clientIp = 'unknown') {
     if (rec.ip === null) {
       rec.ip = clientIp
     } else if (rec.ip !== clientIp) {
+      equalize()
       return { ok: false, msg: '该链接已绑定其他 IP，请通过生成链接时的 IP 访问' }
     }
   }
   // 原子标记为已消费，消除竞态窗口
   rec.used = true
+  equalize()
   return { ok: true, boundIp: rec.ip }
 }
 
@@ -242,17 +333,30 @@ export function issueSession(createIp = 'unknown') {
 }
 
 export function verifySession(token, currentIp = null) {
-  if (!token) return false
+  // —— 时序均衡（P2 修复）：所有 early-return 前先做一次恒长 timingSafeEqual ——
+  // session token 为 48 字节 hex；dummyBuf 取同样长度。攻击者无法通过响应
+  // 时间差异分辨 "token 空 / token 无效 / 过期 / 绝对上限过期 / 验证通过"。
+  const tokenBuf = Buffer.from(String(token || ''), 'utf-8')
+  const dummyBuf = Buffer.from('x'.repeat(48), 'utf-8')
+  const equalize = () => {
+    if (tokenBuf.length === dummyBuf.length) {
+      try { crypto.timingSafeEqual(tokenBuf, dummyBuf) } catch (_) {}
+    }
+  }
+
+  if (!token) { equalize(); return false }
   const rec = tokens.get(token)
-  if (!rec) return false
+  if (!rec) { equalize(); return false }
   if (Date.now() > rec.expireAt) {
     tokens.delete(token)
+    equalize()
     return false
   }
   // 7天绝对上限：无论是否活跃，session 最长存活 7 天
   const ABSOLUTE_MAX_MS = 7 * 24 * 60 * 60 * 1000
   if (rec.createdAt && Date.now() - rec.createdAt > ABSOLUTE_MAX_MS) {
     tokens.delete(token)
+    equalize()
     return false
   }
   // IP 变更检测：记录变更次数，供审计使用
@@ -261,6 +365,7 @@ export function verifySession(token, currentIp = null) {
     rec.lastIp = currentIp
   }
   rec.expireAt = Date.now() + AUTH_CFG.tokenExpireMs
+  equalize()
   return true
 }
 

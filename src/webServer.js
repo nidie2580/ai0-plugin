@@ -163,11 +163,18 @@ export function validateWebHost(host, trustProxy) {
   const ALLOWED_HOST = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0', '::'])
   const h = typeof host === 'string' ? host.trim() : String(host)
   // RFC1918 私有段 + loopback 通配
-  const isPrivateIpv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(h) &&
-    (Number(RegExp.$1) === 10 ||
-     (Number(RegExp.$1) === 172 && Number(RegExp.$2) >= 16 && Number(RegExp.$2) <= 31) ||
-     (Number(RegExp.$1) === 192 && Number(RegExp.$2) === 168) ||
-     Number(RegExp.$1) === 127)
+  // 避免使用已废弃的 RegExp.$1..$N（有竞态风险，非线程安全语义），改用 exec() 返回数组直接解构
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h)
+  const isPrivateIpv4 = !!ipv4Match && (() => {
+    const a = Number(ipv4Match[1])
+    const b = Number(ipv4Match[2])
+    return (
+      a === 10 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      a === 127
+    )
+  })()
   if (!ALLOWED_HOST.has(h) && !isPrivateIpv4) {
     return { ok: false, msg: 'web.host 仅允许 loopback / 私有地址 / 0.0.0.0；如需对外暴露请改 config.yaml 并配置 HTTPS' }
   }
@@ -184,8 +191,8 @@ export function validateWebHost(host, trustProxy) {
 export function createApp() {
   const app = express()
   app.use(cookieParser())
-  app.use(express.json({ limit: '10mb' }))
-  app.use(express.urlencoded({ extended: true }))
+  app.use(express.json({ limit: '2mb' }))
+  app.use(express.urlencoded({ extended: true, limit: '1mb' }))
 
   // —— 安全响应头（统一合并，防御 XSS、Clickjacking、MIME 嗅探等）
   app.use((req, res, next) => {
@@ -194,12 +201,15 @@ export function createApp() {
     res.setHeader('Referrer-Policy', 'no-referrer')
     res.setHeader('X-XSS-Protection', '0')
     res.removeHeader('X-Powered-By')
+    // Permissions-Policy: 禁用不必要的浏览器 API，减少攻击面
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=(), payment=(), usb=(), bluetooth=(), magnetometer=(), gyroscope=(), accelerometer=()')
     // HSTS: 仅在 HTTPS 时启用，强制浏览器使用 HTTPS
     if (req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')) {
       res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
     }
     // 基础 CSP：限制资源来源，脚本仅允许外部文件（移除 unsafe-inline 防止内联脚本注入）
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'")
+    // frame-ancestors 'self'：防止点击劫持（CSP2 版，替代 X-Frame-Options，二者同时设置更稳健）
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self'")
     next()
   })
 
@@ -445,11 +455,13 @@ export function createApp() {
     }
     // — 发现E 修复：限制 JSON 嵌套深度，防止深度嵌套栈溢出 DoS —
     // 实际配置 4 层就够（model.openai.apiKey / groupOps.masters 等），上限设 8
+    // 数组也计入深度（数组元素可能为对象，如 permissions.masters: [[{}], ...] 亦可嵌套）
     function getDepth(obj, cur = 1) {
       if (cur > 16) return cur  // 早停防恶意递归
       let max = cur
-      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-        for (const v of Object.values(obj)) {
+      if (obj && typeof obj === 'object') {
+        const values = Array.isArray(obj) ? obj : Object.values(obj)
+        for (const v of values) {
           if (v && typeof v === 'object') {
             const d = getDepth(v, cur + 1)
             if (d > max) max = d
