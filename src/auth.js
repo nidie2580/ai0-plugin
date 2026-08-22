@@ -88,7 +88,7 @@ export function checkRateLimit(scope, id, maxAttempts = AUTH_CFG.rateMaxAttempts
   return { ok: true, remain: maxAttempts - rec.count, resetIn: Math.max(0, rec.resetAt - now) }
 }
 
-export function generateTerminalCode() {
+export function generateTerminalCode(clientIp = 'unknown') {
   cleanup()
   const code = randomAlphanumeric(16)
   const id = randomId(16)
@@ -97,6 +97,7 @@ export function generateTerminalCode() {
     expireAt: Date.now() + AUTH_CFG.codeExpireMs,
     used: false,
     failCount: 0,
+    createdIp: clientIp,
   })
   const logLine = `[ai0-plugin] ===== 网页管理验证码：${code} ===== (5分钟内有效)`
   if (typeof logger !== 'undefined') {
@@ -122,6 +123,10 @@ export function verifyCode(id, code, clientIp = 'unknown') {
   if (Date.now() > rec.expireAt) {
     codes.delete(id)
     return { ok: false, msg: '验证码已过期' }
+  }
+  // IP 绑定校验：验证码创建时绑定的 IP 必须与验证时一致
+  if (rec.createdIp && rec.createdIp !== 'unknown' && rec.createdIp !== clientIp) {
+    return { ok: false, msg: '验证码与当前 IP 不匹配' }
   }
   // 始终走 timing-safe 比较，不使用前置明文 !== 短路（防止时序泄漏）
   const a = Buffer.from(String(rec.code), 'utf-8')
@@ -213,6 +218,12 @@ export function verifySession(token, currentIp = null) {
   const rec = tokens.get(token)
   if (!rec) return false
   if (Date.now() > rec.expireAt) {
+    tokens.delete(token)
+    return false
+  }
+  // 7天绝对上限：无论是否活跃，session 最长存活 7 天
+  const ABSOLUTE_MAX_MS = 7 * 24 * 60 * 60 * 1000
+  if (rec.createdAt && Date.now() - rec.createdAt > ABSOLUTE_MAX_MS) {
     tokens.delete(token)
     return false
   }
