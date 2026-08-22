@@ -1,7 +1,7 @@
 import * as cfg from '../config/index.js'
 import { isAllowedOutboundUrl, safeFetchWithRedirects, safeAxiosRequest } from './security.js'
 import { normalizeApiBase } from './helper.js'
-import { safeLogger } from './globals.js'
+import { safeLogger, sanitizeLog } from './globals.js'
 
 /**
  * AI0-Plugin 图片生成模块
@@ -147,7 +147,8 @@ export async function generateImage(prompt, opts = {}) {
 
     if (!resp.status || resp.status < 200 || resp.status >= 300) {
       const errMsg = data?.error?.message || data?.message || respText.slice(0, 200)
-      safeLogger.error(`[ai0-plugin] 图片生成 HTTP ${resp.status}: ${errMsg}`)
+      // sanitizeLog 防止 API 返回的 \r\n 在日志中注入伪造行 / 覆盖前条
+      safeLogger.error(`[ai0-plugin] 图片生成 HTTP ${resp.status}: ${sanitizeLog(errMsg)}`)
       return { ok: false, error: `HTTP ${resp.status}: ${errMsg}`, status: resp.status }
     }
 

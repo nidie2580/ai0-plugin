@@ -18,7 +18,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PLUGIN_ROOT = path.join(__dirname, '..')
 const TMP_DIR = path.join(PLUGIN_ROOT, 'data', 'tmp')
-if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true })
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 })
 
 // ===== 分页参数 =====
 const MODELS_PER_PAGE = 14          // 每个平台每页展示多少条（含省略提示）
@@ -34,6 +34,7 @@ function esc(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+    .replace(/\//g, '&#x2F;')
 }
 
 function defs() {

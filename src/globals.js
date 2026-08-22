@@ -39,3 +39,11 @@ function createSegmentProxy() {
 
 export const safeLogger = createLoggerProxy()
 export const safeSegment = createSegmentProxy()
+
+/**
+ * 日志净化：剥离 \r \n 控制字符，防止外部数据在日志中注入伪造行 / 通过 \r 覆盖前条。
+ * 用于任何拼入 safeLogger 的外部输入（API 错误消息、响应体预览等）。
+ */
+export function sanitizeLog(s) {
+  return String(s ?? '').replace(/[\r\n\u2028\u2029]/g, ' ')
+}

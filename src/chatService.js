@@ -498,9 +498,12 @@ export async function handleChat(e) {
 
   if (replyText) {
     // 群聊且开启了群操作，解析AI回复中的群操作指令并执行
+    // historyText 用于存历史（不含操作报告，避免污染 AI 上下文）
+    let historyText = replyText
     if (isGroup && groupContext) {
       try {
         const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId, e)
+        historyText = cleanText
         replyText = cleanText
         if (results.length) {
           const actionReport = results.map(r =>
@@ -534,8 +537,8 @@ export async function handleChat(e) {
                 await helper.replyText(e, '图片生成成功但发送失败，请查看日志。')
               }
             }
-            // 存入历史（不含操作指令）
-            history.push({ role: 'assistant', content: replyText + '\n[已生成并发送图片]' })
+            // 存入历史（不含操作指令与操作报告，避免污染 AI 上下文）
+            history.push({ role: 'assistant', content: historyText + '\n[已生成并发送图片]' })
             llm.saveHistory(userId, sessionId, history)
             return true
           } else {
@@ -547,7 +550,8 @@ export async function handleChat(e) {
       }
     }
 
-    history.push({ role: 'assistant', content: replyText })
+    // 存入历史使用 historyText（不含群操作报告，避免污染 AI 上下文）
+    history.push({ role: 'assistant', content: historyText })
     llm.saveHistory(userId, sessionId, history)
   }
 

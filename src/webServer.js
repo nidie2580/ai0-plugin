@@ -415,6 +415,25 @@ export function createApp() {
     if (Array.isArray(config)) {
       return res.json({ ok: false, msg: '配置格式错误：不接受数组' })
     }
+    // — 发现E 修复：限制 JSON 嵌套深度，防止深度嵌套栈溢出 DoS —
+    // 实际配置 4 层就够（model.openai.apiKey / groupOps.masters 等），上限设 8
+    function getDepth(obj, cur = 1) {
+      if (cur > 16) return cur  // 早停防恶意递归
+      let max = cur
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        for (const v of Object.values(obj)) {
+          if (v && typeof v === 'object') {
+            const d = getDepth(v, cur + 1)
+            if (d > max) max = d
+          }
+        }
+      }
+      return max
+    }
+    const depth = getDepth(config)
+    if (depth > 8) {
+      return res.json({ ok: false, msg: `配置嵌套深度 ${depth} 超过上限 8，拒绝处理` })
+    }
 
     // — P0-2: 白名单校验顶层字段 —
     const ALLOWED_TOP_KEYS = new Set([
@@ -452,6 +471,23 @@ export function createApp() {
     if (w) {
       if (w.port != null && (typeof w.port !== 'number' || w.port < 1 || w.port > 65535)) {
         return res.json({ ok: false, msg: 'web.port 必须为 1-65535 之间的数字' })
+      }
+      // — P0(三轮严审): web.host 白名单校验，禁止通过 API 把后台暴露到公网 —
+      // 仅允许 loopback / 私有地址 / 通配本机；通配 0.0.0.0/:: 需显式配置（不允许通过 API 改）
+      if (w.host != null) {
+        const ALLOWED_HOST = new Set([
+          '127.0.0.1', 'localhost', '::1', '0.0.0.0', '::'
+        ])
+        const host = typeof w.host === 'string' ? w.host.trim() : String(w.host)
+        // RFC1918 私有段 + loopback 通配
+        const isPrivateIpv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host) &&
+          (Number(RegExp.$1) === 10 ||
+           (Number(RegExp.$1) === 172 && Number(RegExp.$2) >= 16 && Number(RegExp.$2) <= 31) ||
+           (Number(RegExp.$1) === 192 && Number(RegExp.$2) === 168) ||
+           Number(RegExp.$1) === 127)
+        if (!ALLOWED_HOST.has(host) && !isPrivateIpv4) {
+          return res.json({ ok: false, msg: 'web.host 仅允许 loopback / 私有地址 / 0.0.0.0；如需对外暴露请改 config.yaml 并配置 HTTPS' })
+        }
       }
     }
     const chat = config.chat

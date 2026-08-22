@@ -81,12 +81,13 @@ describe('auth: 验证码 (terminal code)', () => {
     assert.match(r.msg, /过期|不存在/)
   })
 
-  test('getPendingCodeId 返回待用验证码', () => {
+  test('getPendingCodeId 已废弃，永远返回 null（防泄露有效 ID）', () => {
     const { id } = generateTerminalCode()
     const pending = getPendingCodeId()
-    assert.ok(pending)
-    // 返回的 id 必须是可用的（用错误码校验不会抛异常且结果确定）
-    const r = verifyCode(pending, '000000', '127.0.0.8')
+    // 修复后永远返回 null，杜绝攻击者通过此 API 枚举有效 ID
+    assert.equal(pending, null)
+    // 历史回归：原 id 仍可正常校验
+    const r = verifyCode(id, '000000', '127.0.0.8')
     assert.equal(typeof r.ok, 'boolean')
   })
 

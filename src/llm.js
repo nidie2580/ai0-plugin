@@ -5,14 +5,14 @@ import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import { safeAxiosRequest, isAllowedOutboundUrl } from './security.js'
 import { normalizeApiBase } from './helper.js'
-import { safeLogger } from './globals.js'
+import { safeLogger, sanitizeLog } from './globals.js'
 
 export { normalizeApiBase }
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const HISTORY_DIR = path.join(__dirname, '..', 'data', 'history')
-if (!fs.existsSync(HISTORY_DIR)) fs.mkdirSync(HISTORY_DIR, { recursive: true })
+if (!fs.existsSync(HISTORY_DIR)) fs.mkdirSync(HISTORY_DIR, { recursive: true, mode: 0o700 })
 
 // ————————————————————————————————————————————————————————————
 // 每用户串行化队列 & 原子写入 + 崩溃恢复
@@ -45,7 +45,7 @@ function historyFile(userId, sessionId) {
     throw new Error('invalid userId format')
   }
   const dir = path.join(HISTORY_DIR, safeUserId)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   return path.join(dir, `${sessionId}.json`)
 }
 
@@ -211,7 +211,7 @@ export async function listAvailableModels({ modelKey = null } = {}) {
   const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
   const m = config.model?.[modelCfgKey] || {}
   if (!m.apiKey || !m.apiBase) return { ok: false, models: [], error: '未配置 apiBase 或 apiKey' }
-  const base = normalizeApiBase(m.apiBase, 'openai')
+  const base = normalizeApiBase(m.apiBase)
   const modelsUrl = `${base}/models`
   try {
     const resp = await safeAxiosRequest('get', modelsUrl, null, {
@@ -269,7 +269,7 @@ export async function chatCompletions(messages, {
   }
 
   const rawBase = String(m.apiBase || '')
-  const normalizedBase = normalizeApiBase(rawBase, 'openai')
+  const normalizedBase = normalizeApiBase(rawBase)
   const url = buildEndpoint(normalizedBase, '/chat/completions')
 
   if (!(await isAllowedOutboundUrl(url)).ok) {
@@ -316,7 +316,7 @@ export async function chatCompletions(messages, {
         ? resp.data.slice(0, 2000)
         : JSON.stringify(resp.data || {}).slice(0, 3000)
     } catch (_) {}
-    safeLogger.error(`[ai0-plugin] LLM HTTP ${status} ${resp.statusText || ''} | URL=${url}` + (bodyPreview ? `\n响应体:\n${bodyPreview}` : ''))
+    safeLogger.error(`[ai0-plugin] LLM HTTP ${status} ${sanitizeLog(resp.statusText || '')} | URL=${sanitizeLog(url)}` + (bodyPreview ? `\n响应体:\n${sanitizeLog(bodyPreview)}` : ''))
 
     // 友好化常见错误
     let extra = ''

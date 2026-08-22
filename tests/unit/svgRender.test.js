@@ -22,8 +22,16 @@ describe('svgRender: esc()', () => {
     assert.equal(esc('a"b'), 'a&quot;b')
   })
 
+  it("转义 ' 为 &#39;（防 SVG 单引号属性逃逸）", () => {
+    assert.equal(esc("a'b"), 'a&#39;b')
+  })
+
+  it('转义 / 为 &#x2F;（防 </script> 标签内嵌 JSON 场景）', () => {
+    assert.equal(esc('a/b'), 'a&#x2F;b')
+  })
+
   it('组合转义', () => {
-    assert.equal(esc('<script>alert("xss")&</script>'), '&lt;script&gt;alert(&quot;xss&quot;)&amp;&lt;/script&gt;')
+    assert.equal(esc('<script>alert("xss")&</script>'), '&lt;script&gt;alert(&quot;xss&quot;)&amp;&lt;&#x2F;script&gt;')
   })
 
   it('空值返回空字符串', () => {

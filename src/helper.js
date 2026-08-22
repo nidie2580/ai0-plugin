@@ -9,7 +9,7 @@ import { safeLogger } from './globals.js'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const TMP_DIR = path.join(__dirname, '..', 'data', 'tmp-stickers')
-try { if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true }) } catch (_) {}
+try { if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 }) } catch (_) {}
 
 // 临时文件清理：只保留近 1 小时内的，避免长期运行堆积
 let _cleanupRan = 0
@@ -511,7 +511,7 @@ export async function replyForward(e, text) {
       return e.reply(forwardMsg)
     }
   } catch (err) {
-    logger.warn && logger.warn(`[ai0-plugin] 转发消息失败，降级为普通回复: ${err.message}`)
+    safeLogger.warn(`[ai0-plugin] 转发消息失败，降级为普通回复: ${err.message}`)
   }
   return e.reply(text)
 }
@@ -648,7 +648,7 @@ export async function replyText(e, text, options = {}) {
         const fwd = await (e.bot ?? Bot).makeForwardMsg(nodes)
         return e.reply(fwd)
       } catch (err) {
-        logger.warn && logger.warn(`[ai0-plugin] 长文本合并转发失败，降级逐条回复: ${err.message}`)
+        safeLogger.warn(`[ai0-plugin] 长文本合并转发失败，降级逐条回复: ${err.message}`)
       }
     }
     // 合并转发不可用 → 逐条分段发（每段仍做 Unicode 安全）
@@ -662,7 +662,7 @@ export async function replyText(e, text, options = {}) {
           await new Promise(r => setTimeout(r, 220))
         }
       } catch (err) {
-        logger.warn && logger.warn(`[ai0-plugin] 分段发送第 ${i + 1}/${chunks.length} 段失败: ${err.message}`)
+        safeLogger.warn(`[ai0-plugin] 分段发送第 ${i + 1}/${chunks.length} 段失败: ${err.message}`)
       }
     }
     return true
@@ -965,8 +965,9 @@ async function readBody(resp, maxBytes) {
  * API Base URL 归一化：去 query/hash、裁剪误写的端点路径、自动补 /v1
  * llm.js 和 imageGen.js 共用此函数，避免重复实现
  */
-export function normalizeApiBase(rawBase, _provider) {
-  // _provider 预留给未来使用（不同 provider 的 URL 规范化策略可能不同），当前未使用
+export function normalizeApiBase(rawBase) {
+  // 签名统一为单参数：所有调用方（llm.js / imageGen.js / commands.js）均不传 provider，
+  // 函数行为不依赖 provider，避免签名不一致误导后续维护者
   if (!rawBase || typeof rawBase !== 'string') return ''
   let base = rawBase.trim()
   if (!base) return ''

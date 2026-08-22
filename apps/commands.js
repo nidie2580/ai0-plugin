@@ -463,6 +463,9 @@ export class AICommands extends plugin {
     const token = auth.generateMagicLink()
     const baseForMagic = (info.publicUrls && info.publicUrls.length) ? info.publicUrls[0] : info.url
     const url = `${baseForMagic}/magic/${token}`
+    // 检测 HTTP 明文场景：对外监听且未走 HTTPS → magic link token 会在网络中明文传输
+    const isPlainHttp = /^http:\/\//i.test(baseForMagic)
+    const isExposed = (info.host === '0.0.0.0' || info.host === '::')
     const msgLines = [
       '✅ 网页管理后台已就绪',
       '',
@@ -474,8 +477,12 @@ export class AICommands extends plugin {
       info.publicUrls && info.publicUrls.length > 1
         ? `其它可访问入口（如需走局域网/公网IP，请自行替换直链中的主机名）：\n${info.publicUrls.slice(1).map(u => `  - ${u}`).join('\n')}`
         : '',
-      (info.host === '0.0.0.0' || info.host === '::')
+      isExposed
         ? `⚠️ 已开启对外监听。若仍无法访问，请确认：\n   1) 云服务器/面板安全组已放行 TCP ${info.port}；\n   2) 本机防火墙（ufw/iptables/firewalld）已放行；\n   3) 访问地址要用真实公网/局域网IP，不要用 0.0.0.0。`
+        : '',
+      // — 发现C 修复：明文 HTTP + 对外暴露 → 警告 token 可被嗅探 —
+      (isPlainHttp && isExposed)
+        ? `⚠️ 安全警告：当前为 HTTP 明文且对外监听，magic link token 会在网络中明文传输，嗅探者可在 10 分钟有效期内窃取并登录。强烈建议配置 HTTPS（反向代理 + Let's Encrypt）后再对外暴露。`
         : '',
       '',
       '⚠️ 请妥善保管该链接，任何持有此链接的人均可访问后台。',

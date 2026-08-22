@@ -118,10 +118,32 @@ export function verifyCode(id, code, clientIp = 'unknown') {
   if (!idLimit.ok) return { ok: false, msg: '验证码尝试次数过多，请稍后重新生成' }
 
   const rec = codes.get(id)
-  if (!rec) return { ok: false, msg: '验证码已过期或不存在' }
-  if (rec.used) return { ok: false, msg: '验证码已使用' }
+  // — 发现D 修复：时序均衡 —
+  // 在任何快速返回前都先做一次等价的 timingSafeEqual 比较（结果不使用），
+  // 让"ID 不存在 / 已使用 / 已过期"与"验证码错误"三条路径的响应时间一致，
+  // 防止攻击者通过响应时间差异枚举有效 ID。
+  const codeBuf = Buffer.from(String(code), 'utf-8')
+  const dummyCodeBuf = Buffer.from('x'.repeat(16), 'utf-8') // 固定 16 字节假值（与真实 code 等长）
+  if (rec) {
+    // 真实路径：走正常 timingSafeEqual
+  } else {
+    // 无 rec → 仍执行一次 timingSafeEqual 均衡时间（结果必然为 false）
+    if (codeBuf.length === dummyCodeBuf.length) {
+      try { crypto.timingSafeEqual(codeBuf, dummyCodeBuf) } catch (_) {}
+    }
+    return { ok: false, msg: '验证码已过期或不存在' }
+  }
+  if (rec.used) {
+    if (codeBuf.length === dummyCodeBuf.length) {
+      try { crypto.timingSafeEqual(codeBuf, dummyCodeBuf) } catch (_) {}
+    }
+    return { ok: false, msg: '验证码已使用' }
+  }
   if (Date.now() > rec.expireAt) {
     codes.delete(id)
+    if (codeBuf.length === dummyCodeBuf.length) {
+      try { crypto.timingSafeEqual(codeBuf, dummyCodeBuf) } catch (_) {}
+    }
     return { ok: false, msg: '验证码已过期' }
   }
   // IP 绑定校验：仅当生成时已绑定真实 IP（createdIp 非 'unknown'）才强制一致。
@@ -130,12 +152,14 @@ export function verifyCode(id, code, clientIp = 'unknown') {
   // 切勿在 code 校验前用错误 code 绑定 IP：那会让攻击者通过 getPendingCodeId() 拿到 id 后
   // 抢先绑定自己的 IP，导致主人用正确 code 也被拒（IP 劫持 DoS）。
   if (rec.createdIp && rec.createdIp !== 'unknown' && rec.createdIp !== clientIp) {
+    if (codeBuf.length === dummyCodeBuf.length) {
+      try { crypto.timingSafeEqual(codeBuf, dummyCodeBuf) } catch (_) {}
+    }
     return { ok: false, msg: '验证码与当前 IP 不匹配' }
   }
   // 始终走 timing-safe 比较，不使用前置明文 !== 短路（防止时序泄漏）
   const a = Buffer.from(String(rec.code), 'utf-8')
-  const b = Buffer.from(String(code), 'utf-8')
-  const timingSafeOk = a.length === b.length && crypto.timingSafeEqual(a, b)
+  const timingSafeOk = a.length === codeBuf.length && crypto.timingSafeEqual(a, codeBuf)
   if (!timingSafeOk) {
     rec.failCount = (rec.failCount || 0) + 1
     if (rec.failCount >= 5) {
@@ -253,8 +277,9 @@ export function destroySession(token) {
 }
 
 export function getPendingCodeId() {
-  cleanup()
-  for (const [id, v] of codes) if (!v.used) return id
+  // 已废弃：泄露未使用验证码 ID 给攻击者，便于枚举有效 ID 后集中暴力破解 code。
+  // 历史上仅在诊断命令暴露，现已无任何调用方（apps/ 与 src/ 均未使用）。
+  // 保留导出签名仅为兼容旧测试，但永远返回 null，杜绝信息泄露途径。
   return null
 }
 

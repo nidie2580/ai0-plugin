@@ -744,8 +744,9 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
 
   // ---- helpers ----
   function escapeHtml(s) {
-    return String(s ?? '').replace(/[&<>"']/g, c => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    // 包含 / 转义（防 </script> 标签内嵌 JSON 场景，防御深度）
+    return String(s ?? '').replace(/[&<>"'/]/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '/': '&#x2F;'
     }[c]))
   }
   function splitCsv(v) {
