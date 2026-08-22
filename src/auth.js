@@ -124,15 +124,13 @@ export function verifyCode(id, code, clientIp = 'unknown') {
     codes.delete(id)
     return { ok: false, msg: '验证码已过期' }
   }
-  // IP 绑定校验：首次使用时绑定 IP（QQ 生成时无 Web IP，首次登录绑定后锁定）
-  if (rec.createdIp && rec.createdIp !== 'unknown') {
-    // 已绑定：校验一致
-    if (rec.createdIp !== clientIp) {
-      return { ok: false, msg: '验证码与当前 IP 不匹配' }
-    }
-  } else {
-    // 未绑定（生成时无 IP）：首次使用时绑定
-    rec.createdIp = clientIp
+  // IP 绑定校验：仅当生成时已绑定真实 IP（createdIp 非 'unknown'）才强制一致。
+  // QQ 生成场景（#ai验证码 / standalone-web）拿不到 Web clientIp，createdIp='unknown'，
+  // 此时【不绑定、不校验】——退化为纯单次使用 + rate limit + 5 次错误作废防护。
+  // 切勿在 code 校验前用错误 code 绑定 IP：那会让攻击者通过 getPendingCodeId() 拿到 id 后
+  // 抢先绑定自己的 IP，导致主人用正确 code 也被拒（IP 劫持 DoS）。
+  if (rec.createdIp && rec.createdIp !== 'unknown' && rec.createdIp !== clientIp) {
+    return { ok: false, msg: '验证码与当前 IP 不匹配' }
   }
   // 始终走 timing-safe 比较，不使用前置明文 !== 短路（防止时序泄漏）
   const a = Buffer.from(String(rec.code), 'utf-8')

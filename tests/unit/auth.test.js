@@ -89,6 +89,18 @@ describe('auth: 验证码 (terminal code)', () => {
     const r = verifyCode(pending, '000000', '127.0.0.8')
     assert.equal(typeof r.ok, 'boolean')
   })
+
+  test('错误 code 不会绑定 IP（防 IP 劫持 DoS 回归）', () => {
+    // 场景：QQ 生成验证码（无 Web IP，createdIp='unknown'）；攻击者抢先 verify 错误 code
+    // 试图绑定自己的 IP；随后主人用正确 code 在不同 IP 仍能登录。
+    const { id, code } = generateTerminalCode()
+    // 攻击者从 9.9.9.9 用错误 code 抢先尝试（模拟 getPendingCodeId 拿到 id 的攻击者）
+    const attack = verifyCode(id, 'wrongcode1234567', '9.9.9.9')
+    assert.equal(attack.ok, false)
+    // 主人从不同 IP (1.2.3.4) 用正确 code 必须仍能登录（未被攻击者 IP 绑定）
+    const owner = verifyCode(id, code, '1.2.3.4')
+    assert.equal(owner.ok, true)
+  })
 })
 
 describe('auth: magic link', () => {
