@@ -4,6 +4,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { isAllowedOutboundUrl, safeFetchWithRedirects } from './security.js'
+import { safeLogger } from './globals.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -840,7 +841,7 @@ export async function getImageSegment(src) {
       const ext = m[1] ? '.' + (m[1].split('+')[0].replace('jpeg', 'jpg')) : '.img'
       const buf = Buffer.from(m[2], 'base64')
       if (buf.length > 20 * 1024 * 1024) {
-        safeLogger.warn && logger.warn(`[ai0-plugin] data:URL 图片过大(${Math.round(buf.length / 1024 / 1024)}MB)，已拒绝`)
+        safeLogger.warn(`[ai0-plugin] data:URL 图片过大(${Math.round(buf.length / 1024 / 1024)}MB)，已拒绝`)
         return null
       }
       const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
@@ -852,7 +853,7 @@ export async function getImageSegment(src) {
     if (/^https?:\/\//i.test(s)) {
       const dl = await downloadImageViaFetch(s)
       if (!dl.ok) {
-        safeLogger.warn && logger.warn(`[ai0-plugin] 默认回复图片下载失败(${s.slice(0,80)}): ${dl.error}`)
+        safeLogger.warn(`[ai0-plugin] 默认回复图片下载失败(${s.slice(0,80)}): ${dl.error}`)
         return null
       }
       const urlPath = safeUrlPathname(s) || ''
@@ -870,10 +871,10 @@ export async function getImageSegment(src) {
       }
     } catch (_) {}
 
-    safeLogger.warn && logger.warn(`[ai0-plugin] 无法识别的图片来源，已跳过: ${s.slice(0, 80)}`)
+    safeLogger.warn(`[ai0-plugin] 无法识别的图片来源，已跳过: ${s.slice(0, 80)}`)
     return null
   } catch (err) {
-    safeLogger.warn && logger.warn(`[ai0-plugin] getImageSegment 异常: ${err.message}`)
+    safeLogger.warn(`[ai0-plugin] getImageSegment 异常: ${err.message}`)
     return null
   }
 }
@@ -961,7 +962,8 @@ async function readBody(resp, maxBytes) {
  * API Base URL 归一化：去 query/hash、裁剪误写的端点路径、自动补 /v1
  * llm.js 和 imageGen.js 共用此函数，避免重复实现
  */
-export function normalizeApiBase(rawBase) {
+export function normalizeApiBase(rawBase, _provider) {
+  // _provider 预留给未来使用（不同 provider 的 URL 规范化策略可能不同），当前未使用
   if (!rawBase || typeof rawBase !== 'string') return ''
   let base = rawBase.trim()
   if (!base) return ''

@@ -488,7 +488,7 @@ export async function handleChat(e) {
       replyText = ''  // 被新请求取代时静默吞掉，不回用户发错误文本
     } else {
       safeLogger.error(`[ai0-plugin] LLM 调用失败: ${err.message}`)
-      replyText = `(调用失败：${err.message?.replace(/sk-[A-Za-z0-9]+/g, 'sk-***') || '未知错误'})`
+      replyText = '(调用失败，请联系管理员)'
     }
   } finally {
     clearTimeout(timeoutTimer)

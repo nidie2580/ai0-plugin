@@ -110,6 +110,25 @@ groupOps:
   allowTitle: true
   # 默认禁言时长（秒），不指定时使用
   defaultMuteDuration: 600
+  # —— AI 群操作开关（可独立禁用高危操作）——
+  # 允许全体禁言（mute_all）
+  allowMuteAll: true
+  # 允许定时禁言（timed_mute）
+  allowMuteTimed: true
+  # 允许修改群名
+  allowGroupName: true
+  # 允许修改群公告
+  allowNotice: true
+  # 允许修改头衔展示模式
+  allowTitleDisplay: true
+  # 允许群搜索
+  allowSearch: true
+  # 允许拉黑
+  allowBlacklist: true
+  # 允许自定义头衔
+  allowCustomTitle: true
+  # 允许等级头衔
+  allowLevelTitle: true
 
 # 图片生成设置
 imageGen:
@@ -339,6 +358,18 @@ export function saveConfig(config) {
       if (target && typeof target === 'object') {
         delete target[parts[parts.length - 1]]
       }
+    }
+    // 深度合并：保留磁盘上存在但前端未传的字段，防止字段丢失
+    if (fs.existsSync(USER_CONFIG)) {
+      try {
+        const diskRaw = fs.readFileSync(USER_CONFIG, 'utf-8')
+        const diskConfig = YAML.parse(diskRaw) || {}
+        for (const k of Object.keys(diskConfig)) {
+          if (!(k in cleaned)) {
+            cleaned[k] = diskConfig[k]
+          }
+        }
+      } catch (_) {}
     }
     const content = YAML.stringify(cleaned)
     atomicWriteYaml(USER_CONFIG, content)

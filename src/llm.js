@@ -335,13 +335,7 @@ export async function chatCompletions(messages, {
     else if (status === 404) {
       extra = looksModelError
         ? '（模型名错误或该账户未开通此模型权限，不是接口路径问题）'
-        : '（接口路径不存在：请确认 apiBase 是否正确。推荐格式：'
-      extra += looksModelError ? '' : [
-            '  Kimi: https://api.moonshot.cn/v1',
-            '  DeepSeek: https://api.deepseek.com/v1',
-            '  通用规则：若服务商要求带 /v1，请把 /v1 放到 apiBase 末尾，不要在 apiBase 里写 /chat/completions）'
-          ].join('\n')
-      extra += `\n  当前实际请求 URL: ${url}`
+        : '（接口路径不存在：请确认 apiBase 是否正确）'
     } else if (status === 429) extra = '（请求过于频繁 / 速率限制 / 余额不足）'
     else if (status >= 500) extra = '（服务商服务端错误，稍后再试或查看服务状态页）'
 

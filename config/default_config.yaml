@@ -66,6 +66,25 @@ groupOps:
   allowTitle: true
   # 默认禁言时长（秒），不指定时使用
   defaultMuteDuration: 600
+  # —— AI 群操作开关（可独立禁用高危操作）——
+  # 允许全体禁言（mute_all）
+  allowMuteAll: true
+  # 允许定时禁言（timed_mute）
+  allowMuteTimed: true
+  # 允许修改群名
+  allowGroupName: true
+  # 允许修改群公告
+  allowNotice: true
+  # 允许修改头衔展示模式
+  allowTitleDisplay: true
+  # 允许群搜索
+  allowSearch: true
+  # 允许拉黑
+  allowBlacklist: true
+  # 允许自定义头衔
+  allowCustomTitle: true
+  # 允许等级头衔
+  allowLevelTitle: true
 
 # 图片生成设置
 imageGen:

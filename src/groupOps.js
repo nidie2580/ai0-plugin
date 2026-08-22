@@ -996,7 +996,6 @@ async function executeSetGroupName(groupId, name) {
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setGroupName === 'function') await group.setGroupName(name)
   else if (typeof group.setName === 'function') await group.setName(name)
-  else if (typeof group.setGroupName === 'function') await group.setGroupName(name)
   else throw new Error('当前适配器不支持修改群名')
 }
 

@@ -13,8 +13,11 @@ import { safeLogger } from './globals.js'
 const dailyUsage = new Map() // key: `YYYY-MM-DD:userId` → { count, tokens }
 
 function todayKey(userId) {
-  const d = new Date().toISOString().slice(0, 10)
-  return `${d}:${userId}`
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}:${userId}`
 }
 
 /** 检查用户配额，返回 { ok, reason? } */
@@ -57,7 +60,8 @@ export function recordUsage(userId) {
 
 // 每天凌晨清理昨日记录
 setInterval(() => {
-  const today = new Date().toISOString().slice(0, 10)
+  const now = new Date()
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
   for (const [k] of dailyUsage) {
     if (!k.startsWith(today + ':')) dailyUsage.delete(k)
   }

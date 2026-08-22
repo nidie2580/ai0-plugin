@@ -186,18 +186,26 @@ export function createApp() {
     let ip = socketIp
     if (canTrustXff) {
       const pickFromHeaders = [
-        'cf-connecting-ip',       // Cloudflare
-        'x-forwarded-for',        // 标准
-        'x-real-ip',              // Nginx
+        'cf-connecting-ip',       // Cloudflare (单值)
+        'x-real-ip',              // Nginx (单值)
         'x-client-ip',
         'forwarded-for',
-        'x-cluster-client-ip'
+        'x-cluster-client-ip',
+        'x-forwarded-for'         // 标准（多值，从右往左取第一个非可信代理）
       ]
       for (const h of pickFromHeaders) {
         const v = req.headers?.[h]
         if (typeof v === 'string' && v.trim()) {
-          const first = v.split(',')[0].trim()
-          if (first) { ip = first; break }
+          if (h === 'x-forwarded-for') {
+            // XFF: 从右往左取第一个非可信代理 IP（最靠近客户端的真实 IP）
+            const ips = v.split(',').map(s => s.trim()).filter(Boolean)
+            for (let i = ips.length - 1; i >= 0; i--) {
+              if (!isTrustedProxy(ips[i])) { ip = ips[i]; break }
+            }
+          } else {
+            ip = v.trim()
+          }
+          if (ip) break
         }
       }
     }
@@ -525,7 +533,7 @@ export function createApp() {
       }
       res.json({ ok: true })
     } catch (e) {
-      safeLogger.error && logger.error(`[ai0-plugin] 会话删除失败: ${e.message}`)
+      safeLogger.error(`[ai0-plugin] 会话删除失败: ${e.message}`)
       res.json({ ok: false, msg: '操作失败，请稍后重试' })
     }
   })
@@ -578,13 +586,13 @@ export function createApp() {
             error: info.error || null
           }
         } catch (e) {
-          safeLogger.error && logger.error(`[ai0-plugin] 模型探测失败(${key}): ${e.message}`)
+          safeLogger.error(`[ai0-plugin] 模型探测失败(${key}): ${e.message}`)
           return { key, ok: false, models: [], latencyMs: Date.now() - t0, error: '探测失败' }
         }
       }))
       res.json({ ok: true, results })
     } catch (e) {
-      safeLogger.error && logger.error(`[ai0-plugin] 批量探测失败: ${e.message}`)
+      safeLogger.error(`[ai0-plugin] 批量探测失败: ${e.message}`)
       res.json({ ok: false, msg: '批量探测失败，请稍后重试' })
     }
   })
@@ -678,7 +686,7 @@ export function createApp() {
       const result = await imageGen.generateImage(prompt)
       res.json(result)
     } catch (err) {
-      safeLogger.error && logger.error(`[ai0-plugin] 图片生成失败: ${err.message}`)
+      safeLogger.error(`[ai0-plugin] 图片生成失败: ${err.message}`)
       res.json({ ok: false, error: '图片生成失败，请稍后重试' })
     }
   })
@@ -686,7 +694,7 @@ export function createApp() {
   // —— Express 全局错误处理中间件 ——
   app.use((err, req, res, _next) => {
     const msg = err?.message || String(err)
-    safeLogger.error && logger.error(`[ai0-plugin] Web 服务异常: ${msg}`)
+    safeLogger.error(`[ai0-plugin] Web 服务异常: ${msg}`)
     res.status(500).json({ ok: false, msg: '服务器内部错误' })
   })
 

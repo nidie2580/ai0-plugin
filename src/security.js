@@ -80,6 +80,15 @@ function isPrivateIpv6(ip) {
   if (l.startsWith('100::')) return true                           // 100::/64 黑洞地址
   if (/^2001:(0[0-1])/i.test(l)) return true                      // 2001::/23 (含 Teredo)
   if (l.startsWith('64:ff9b:')) return true                        // 64:ff9b::/96 NAT64 前缀
+  // IPv4-mapped 变体：::ffff:0:xxxx（非标准但部分实现会产生）
+  if (/^::ffff:0:/i.test(l)) return true
+  // IPv4-compatible：::xxxx:xxxx（后 32 位为 IPv4）
+  let mc = l.match(/^::([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+  if (mc) {
+    const ipv4 = v6TailToIpv4([parseInt(mc[1], 16), parseInt(mc[2], 16)])
+    if (ipv4) return isPrivateIpv4(ipv4)
+    return true
+  }
   return false
 }
 
@@ -155,9 +164,18 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
     if (resp.status >= 300 && resp.status < 400) {
       const loc = resp.headers?.location
       if (!loc) return { ok: false, error: `HTTP ${resp.status}` }
-      const next = new URL(loc, current).toString()
+      const nextUrl = new URL(loc, current)
+      const next = nextUrl.toString()
       redirects += 1
       if (redirects > maxRedirects) return { ok: false, error: '重定向次数过多' }
+      // 跨主机重定向时剥离认证头，防止凭证泄露
+      const origHostname = new URL(current).hostname
+      if (nextUrl.hostname !== origHostname) {
+        if (opts && opts.headers) {
+          delete opts.headers.authorization
+          delete opts.headers.cookie
+        }
+      }
       const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
       if (!chk2.ok) return { ok: false, error: chk2.reason || '拒绝重定向目标' }
       current = next

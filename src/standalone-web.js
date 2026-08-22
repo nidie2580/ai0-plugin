@@ -33,7 +33,7 @@ async function main() {
   console.log('首次登录需使用「终端验证码」：')
   auth.generateTerminalCode()
   console.log('')
-  console.log('提示：复制上述 6 位验证码，在网页「终端验证码登录」处填入即可。')
+  console.log('提示：复制上述 ID + Code，在网页「终端验证码登录」处填入即可。')
   console.log('==========================================\n')
 }
 

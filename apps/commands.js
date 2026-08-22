@@ -3,6 +3,7 @@ import * as helper from '../src/helper.js'
 import * as chatSvc from '../src/chatService.js'
 import * as ws from '../src/webServer.js'
 import * as auth from '../src/auth.js'
+import * as groupOps from '../src/groupOps.js'
 import * as llm from '../src/llm.js'
 import { safeLogger } from '../src/globals.js'
 
@@ -95,6 +96,42 @@ export class AICommands extends plugin {
         {
           reg: '^#(ai)?(切换模型|切模型|换模型)(\\s+\\S+(\\s+\\S+)?)?$',
           fnc: 'switchModel',
+          permission: 'master'
+        },
+        // —— 群管理硬编码指令（双线道：AI 意图 + 显式命令）——
+        {
+          reg: '^#ai改群名\\s+(.+)$',
+          fnc: 'renameGroup',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai(全体禁言|全员禁言)(\\s+(开|关|启用|禁用|1|0))?$',
+          fnc: 'muteAll',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai定时禁言\\s+(\\d+)\\s+(分钟|小时|秒)?$',
+          fnc: 'timedMute',
+          permission: 'master'
+        },
+        {
+          reg: '^ai头衔展示\\s+(开|关|启用|禁用|1|0)$',
+          fnc: 'toggleTitleDisplay',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai改公告\\s+(.+)$',
+          fnc: 'setNotice',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai群搜索\\s+(.+)$',
+          fnc: 'groupSearch',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai拉黑\\s+(\\d{5,12})$',
+          fnc: 'blacklist',
           permission: 'master'
         }
       ]
@@ -1230,5 +1267,90 @@ export class AICommands extends plugin {
     }
     lines.push(``, `💡 上下文不会自动重置，需要新会话可发送 "#ai新会话"。`)
     return e.reply(lines.join('\n'))
+  }
+
+  // —— 群管理硬编码指令实现（P3-U: 双线道）——
+
+  async renameGroup() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const newName = e.raw_message?.replace(/^#ai改群名\s*/, '').trim() || ''
+    if (!newName) return e.reply('请提供新群名，如: #ai改群名 新群名')
+    const gid = e.group_id
+    if (!gid) return e.reply('请在群聊中使用此命令')
+    const ok = await groupOps.parseAndExecuteActions(`[action:set_group_name:${escape(newName)}]`, gid, e)
+    return e.reply(ok ? `已修改群名为: ${newName}` : '修改群名失败')
+  }
+
+  async muteAll() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const gid = e.group_id
+    if (!gid) return e.reply('请在群聊中使用此命令')
+    const arg = e.raw_message?.replace(/^#ai(全体|全员)禁言\s*/, '').trim()
+    const on = !arg || ['开', '启用', '1'].includes(arg)
+    const ok = await groupOps.parseAndExecuteActions(`[action:mute_all:${on ? 1 : 0}]`, gid, e)
+    return e.reply(ok ? `${on ? '已开启' : '已关闭'}全体禁言` : '操作失败')
+  }
+
+  async timedMute() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const gid = e.group_id
+    if (!gid) return e.reply('请在群聊中使用此命令')
+    const match = e.raw_message?.match(/^#ai定时禁言\s+(\d+)\s*(分钟|小时|秒)?/)
+    if (!match) return e.reply('用法: #ai定时禁言 <数字> [分钟|小时|秒]')
+    let dur = parseInt(match[1], 10)
+    const unit = match[2] || '分钟'
+    if (unit === '小时') dur *= 3600
+    else if (unit === '秒') dur *= 1
+    else dur *= 60
+    if (dur > 30 * 86400) return e.reply('禁言时长不能超过 30 天')
+    const ok = await groupOps.parseAndExecuteActions(`[action:mute_all:1]`, gid, e)
+    return e.reply(ok ? `已开启全体禁言（${dur}秒后自动解除需配合群管理）` : '操作失败')
+  }
+
+  async toggleTitleDisplay() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const gid = e.group_id
+    if (!gid) return e.reply('请在群聊中使用此命令')
+    const arg = e.raw_message?.replace(/^ai头衔展示\s*/, '').trim()
+    const on = ['开', '启用', '1'].includes(arg)
+    const ok = await groupOps.parseAndExecuteActions(`[action:title_display:${on ? 1 : 0}]`, gid, e)
+    return e.reply(ok ? `${on ? '已开启' : '已关闭'}头衔展示` : '操作失败')
+  }
+
+  async setNotice() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const notice = e.raw_message?.replace(/^#ai改公告\s*/, '').trim() || ''
+    if (!notice) return e.reply('请提供公告内容，如: #ai改公告 新公告内容')
+    const gid = e.group_id
+    if (!gid) return e.reply('请在群聊中使用此命令')
+    const ok = await groupOps.parseAndExecuteActions(`[action:set_notice:${escape(notice)}]`, gid, e)
+    return e.reply(ok ? '公告已更新' : '修改公告失败')
+  }
+
+  async groupSearch() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const query = e.raw_message?.replace(/^#ai群搜索\s*/, '').trim() || ''
+    if (!query) return e.reply('请提供搜索关键词，如: #ai群搜索 关键词')
+    const gid = e.group_id
+    if (!gid) return e.reply('请在群聊中使用此命令')
+    const ok = await groupOps.parseAndExecuteActions(`[action:group_search:${escape(query)}]`, gid, e)
+    return e.reply(ok ? '搜索已执行' : '搜索失败')
+  }
+
+  async blacklist() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const match = e.raw_message?.match(/^#ai拉黑\s+(\d{5,12})/)
+    if (!match) return e.reply('请提供有效的 QQ 号，如: #ai拉黑 123456789')
+    const gid = e.group_id
+    if (!gid) return e.reply('请在群聊中使用此命令')
+    const ok = await groupOps.parseAndExecuteActions(`[action:blacklist:${match[1]}]`, gid, e)
+    return e.reply(ok ? `已拉黑 QQ: ${match[1]}` : '操作失败')
   }
 }
