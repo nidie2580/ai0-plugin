@@ -404,6 +404,10 @@ export function createApp() {
     if (!config || typeof config !== 'object') {
       return res.json({ ok: false, msg: '配置格式错误' })
     }
+    // 拒绝空数组（防止空数组损坏配置）
+    if (Array.isArray(config)) {
+      return res.json({ ok: false, msg: '配置格式错误：不接受数组' })
+    }
 
     // — P0-2: 白名单校验顶层字段 —
     const ALLOWED_TOP_KEYS = new Set([
@@ -471,7 +475,8 @@ export function createApp() {
       for (const k of Object.keys(cleaned.model)) {
         const newVal = cleaned.model[k]?.apiKey
         const oldVal = old.model[k]?.apiKey
-        if (typeof newVal === 'string' && newVal.includes('****') && typeof oldVal === 'string') {
+        // 精确比对：仅当值完全匹配占位符时还原（防止误还原包含 **** 的真实 Key）
+        if (typeof newVal === 'string' && newVal === API_KEY_PLACEHOLDER && typeof oldVal === 'string') {
           cleaned.model[k].apiKey = oldVal
         }
       }
@@ -643,9 +648,9 @@ export function createApp() {
       return res.json({ ok: false, msg: '配置格式错误' })
     }
     const full = cfg.loadConfig()
-    // 脱敏 apiKey 还原
+    // 脱敏 apiKey 还原（精确比对占位符）
     const oldKey = full.imageGen?.apiKey
-    if (typeof ic.apiKey === 'string' && ic.apiKey.includes('****') && typeof oldKey === 'string') {
+    if (typeof ic.apiKey === 'string' && ic.apiKey === API_KEY_PLACEHOLDER && typeof oldKey === 'string') {
       ic.apiKey = oldKey
     }
     full.imageGen = {
@@ -676,6 +681,13 @@ export function createApp() {
       safeLogger.error && logger.error(`[ai0-plugin] 图片生成失败: ${err.message}`)
       res.json({ ok: false, error: '图片生成失败，请稍后重试' })
     }
+  })
+
+  // —— Express 全局错误处理中间件 ——
+  app.use((err, req, res, _next) => {
+    const msg = err?.message || String(err)
+    safeLogger.error && logger.error(`[ai0-plugin] Web 服务异常: ${msg}`)
+    res.status(500).json({ ok: false, msg: '服务器内部错误' })
   })
 
   return app
@@ -720,6 +732,9 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
         lines.push(`    · 公网暴露强烈建议套反代（Nginx/Caddy）+ HTTPS，并在插件配置 web.trustProxy=true 以读取真实 IP；`)
         lines.push(`    · 主人专属免登录链接（有效期10分钟）仅发私聊，请勿转发到公开群/频道；`)
         lines.push(`    · 默认验证码仅终端可查看，但已开启速率限制（每IP 60秒最多10次）+ 单ID错误5次即作废。`)
+        if (!cfg.get('web.trustProxy', false)) {
+          lines.push(`  ⚠️ Magic Link 绑定 IP 功能：未开启 trustProxy 时，所有请求 IP 相同，链接可被转发使用。建议配置 web.trustProxy=true`)
+        }
       }
       const msg = lines.join('\n')
       if (typeof logger !== 'undefined') logger.info(msg)
