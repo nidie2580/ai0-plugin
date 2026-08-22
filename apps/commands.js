@@ -127,6 +127,8 @@ export class AICommands extends plugin {
       }, 1200)
       return true
     } catch (err) {
+      // SVG 渲染/发送失败 → 降级到纯文字版，但仍向运维 warn 一次便于发现
+      safeLogger.warn(`[ai0-plugin] help SVG 降级为文字版: ${err?.message || err}\n  stack=${err?.stack || '(no stack)'}`)
       const lines = [
         '🤖 AI0-Plugin 帮助菜单（图片生成失败，回退文字版）',
         '',
@@ -1048,6 +1050,7 @@ export class AICommands extends plugin {
         return true
       } catch (err) {
         // 图片生成失败时退化为文字版（单平台最多显示 15 条）
+        safeLogger.warn(`[ai0-plugin] switchModel SVG 降级为文字版: ${err?.message || err}\n  stack=${err?.stack || '(no stack)'}`)
         const lines = ['🔁 多平台模型切换助手（图片生成失败，退化为文字版）']
         lines.push(`  当前页：${currentPage}/${totalPages} · 默认：${defaultKey} · ${currentDefaultModel || '(未设置)'}`)
         lines.push('')
