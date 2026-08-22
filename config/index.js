@@ -14,8 +14,8 @@ const DATA_DIR = path.join(PLUGIN_ROOT, 'data')
 const DEFAULT_CONFIG = path.join(CONFIG_DIR, 'default_config.yaml')
 const USER_CONFIG = path.join(CONFIG_DIR, 'config.yaml')
 
-if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true })
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o600 })
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o600 })
 
 const defaultConfigContent = `# AI0-Plugin 配置文件
 
@@ -214,7 +214,7 @@ let lastParseError = null   // 最近一次 YAML 解析失败信息（给 #ai诊
 // 以原子方式保存到 config.yaml（与 llm.saveHistory 相同策略：先 tmp→rename，成功后写 .bak）
 function atomicWriteYaml(filePath, content) {
   const dir = path.dirname(filePath)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o600 })
   const tmp = filePath + `.tmp.${crypto.randomBytes(16).toString('hex')}`
   const bak = filePath + '.bak'
   fs.writeFileSync(tmp, content, { encoding: 'utf-8', mode: 0o600 })
