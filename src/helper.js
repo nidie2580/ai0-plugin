@@ -34,7 +34,10 @@ function readFrameworkMasters() {
   const masters = new Set()
   try {
     // 兼容标准 Yunzai (global.Config) 和 XRK-Yunzai (globalThis.Config / global.cfg)
-    const g = (typeof globalThis !== 'undefined' && globalThis.Config) || (typeof global !== 'undefined' && global.Config) || null
+    const g = (typeof globalThis !== 'undefined' && globalThis.Config)
+      || (typeof global !== 'undefined' && global.Config)
+      || (typeof global !== 'undefined' && global.cfg)
+      || null
     if (g) {
       for (const k of ['master', 'masters', 'masterQQ', 'owner']) {
         const v = g[k]

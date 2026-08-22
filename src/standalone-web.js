@@ -31,7 +31,9 @@ async function main() {
   }
   console.log('')
   console.log('首次登录需使用「终端验证码」：')
-  auth.generateTerminalCode()
+  // 独立启动场景拿不到 Web clientIp，显式传 'unknown'：
+  //  verifyCode 内部退化为单次使用 + rate limit + 5 次错误作废防护（不强制 IP 一致，避免 IP 劫持 DoS）。
+  auth.generateTerminalCode('unknown')
   console.log('')
   console.log('提示：复制上述 ID + Code，在网页「终端验证码登录」处填入即可。')
   console.log('==========================================\n')

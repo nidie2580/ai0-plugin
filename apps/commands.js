@@ -581,7 +581,10 @@ export class AICommands extends plugin {
     } catch (e) {
       // 继续即可
     }
-    const { id, code } = auth.generateTerminalCode()
+    // QQ 触发场景拿不到 Web clientIp，显式传 'unknown'：
+    //  ① 明确语义（避免误以为未传参是疏漏）；
+    //  ② verifyCode 内部对 createdIp='unknown' 退化为单次使用 + rate limit + 5 次错误作废防护（不强制 IP 一致，避免 IP 劫持 DoS）。
+    const { id, code } = auth.generateTerminalCode('unknown')
     const info = ws.getServerInfo()
     const lines = [
       '🔐 网页管理登录验证码（5分钟有效）：',
