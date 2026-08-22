@@ -186,11 +186,23 @@ export class AICommands extends plugin {
     const config = cfg.loadConfig()
     const def = config.model?.default || '未设置'
     const m = config.model?.[def] || {}
+    const userId = helper.getUserId(this.e)
+    const isMaster = helper.isMaster(userId, this.e)
+    // apiBase 脱敏：非主人仅显示域名部分
+    let apiBaseDisplay = m.apiBase || '(未设置)'
+    if (m.apiBase && !isMaster) {
+      try {
+        const u = new URL(m.apiBase)
+        apiBaseDisplay = `${u.protocol}//${u.hostname}${u.pathname !== '/' ? u.pathname : ''}`
+      } catch (_) {
+        apiBaseDisplay = '(已设置)'
+      }
+    }
     const lines = [
       `当前默认模型配置：${def}`,
       `  名称：${m.name || '(无)'}`,
       `  模型ID：${m.model || '(未设置)'}`,
-      `  API地址：${m.apiBase || '(未设置)'}`,
+      `  API地址：${apiBaseDisplay}`,
       `  API Key：${m.apiKey ? '已设置' : '(未设置)'}`,
       `  温度：${m.temperature ?? 0.8}`,
       `  MaxTokens：${m.maxTokens ?? 2000}`
