@@ -159,7 +159,9 @@ export function isAtBot(e) {
   const selfId = String(e.self_id)
   if (typeof e.message === 'string') return false
   for (const seg of e.message) {
-    if (seg.type === 'at' && String(seg.qq) === selfId) return true
+    if (seg.type !== 'at') continue
+    const qq = String(seg.qq ?? seg.data?.qq ?? seg.user_id ?? seg.data?.user_id ?? '')
+    if (qq && qq === selfId) return true
   }
   return false
 }
