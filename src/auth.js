@@ -82,11 +82,89 @@ function evictOverCapacity(map, max) {
 // tokens (session token) 和 MAGIC_LINKS 写入磁盘；codes / rateLimit 是短生命周期，
 // 重启自然重置不会泄露也不会影响安全。load 在启动时执行一次；save 在每次 cleanup
 // 周期结束后异步刷盘，以及进程退出前尽力刷一次。
+//
+// — P3-3: 明文存储 → AES-256-GCM 加密存储 —
+// 即便 sessions.json 权限已设为 0o600，若该分区被备份/挂到镜像盘，或被另一个
+// 0o600 的目录做 tar 泄露，明文 csrf / session 仍可被复用。因此：
+//   - 首次启动时在 DATA_DIR 下生成 sessions.key（256-bit，0o600）
+//   - payload JSON → AES-256-GCM(iv+tag+ciphertext) → base64 串写回 sessions.json
+//   - 字段 {v:1, blob}，便于未来换算法或加版本号
+// 若密钥丢失或损坏：等价于"所有 session 失效"，用户重新登录即可（不丢历史）。
+const KEY_FILE = path.join(DATA_DIR, 'sessions.key')
+const CRYPT_V = 1
+const CIPHER = 'aes-256-gcm'
+
+function loadSessionKey() {
+  try {
+    if (fs.existsSync(KEY_FILE)) {
+      const raw = fs.readFileSync(KEY_FILE)
+      if (raw.length === 32) return raw
+    }
+    const k = crypto.randomBytes(32)
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 })
+    // 先写 .tmp 再 rename，文件权限设 0o600，避免密钥被同机其他可读账号看到
+    const tmp = KEY_FILE + '.tmp'
+    fs.writeFileSync(tmp, k, { mode: 0o600 })
+    fs.renameSync(tmp, KEY_FILE)
+    try { fs.chmodSync(KEY_FILE, 0o600) } catch (_) {}
+    return k
+  } catch (_) {
+    return null
+  }
+}
+let SESSION_KEY = null
+function getSessionKey() {
+  if (SESSION_KEY === null) SESSION_KEY = loadSessionKey()
+  return SESSION_KEY
+}
+function encryptJson(obj) {
+  const key = getSessionKey()
+  if (!key) return null
+  const plain = Buffer.from(JSON.stringify(obj), 'utf-8')
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv(CIPHER, key, iv)
+  const c1 = cipher.update(plain)
+  const c2 = cipher.final()
+  const tag = cipher.getAuthTag()
+  const blob = Buffer.concat([iv, tag, c1, c2]).toString('base64')
+  return { v: CRYPT_V, blob }
+}
+function decryptJson(enc) {
+  if (!enc || typeof enc !== 'object') return null
+  if (enc.v !== CRYPT_V || typeof enc.blob !== 'string') return null
+  const key = getSessionKey()
+  if (!key) return null
+  try {
+    const raw = Buffer.from(enc.blob, 'base64')
+    if (raw.length < 12 + 16) return null
+    const iv = raw.subarray(0, 12)
+    const tag = raw.subarray(12, 28)
+    const ct = raw.subarray(28)
+    const decipher = crypto.createDecipheriv(CIPHER, key, iv)
+    decipher.setAuthTag(tag)
+    const p1 = decipher.update(ct)
+    const p2 = decipher.final()
+    return JSON.parse(Buffer.concat([p1, p2]).toString('utf-8'))
+  } catch (_) {
+    return null
+  }
+}
+
 function loadSessions() {
   try {
     if (!fs.existsSync(SESSION_FILE)) return
+    // 优先尝试新版本加密存储；失败回退到旧版明文 JSON（兼容前一次推送产生的 sessions.json）
+    let parsed = null
     const raw = fs.readFileSync(SESSION_FILE, 'utf-8')
-    const parsed = JSON.parse(raw)
+    try {
+      const enc = JSON.parse(raw)
+      if (enc && typeof enc === 'object' && enc.v === CRYPT_V && typeof enc.blob === 'string') {
+        parsed = decryptJson(enc)
+      } else {
+        parsed = enc  // 旧版明文
+      }
+    } catch (_) { parsed = null }
+    if (!parsed || typeof parsed !== 'object') return
     const now = Date.now()
     // 7 天绝对上限，与 verifySession 保持一致，避免加载远古 session
     const ABSOLUTE_MAX_MS = 7 * 24 * 60 * 60 * 1000
@@ -124,9 +202,11 @@ function saveSessions() {
       tokens: Array.from(tokens.entries()),
       magicLinks: Array.from(MAGIC_LINKS.entries()),
     }
+    // 若密钥生成失败，退化为明文 JSON 也不阻塞服务（权限 0o600 仍在）
+    const out = encryptJson(payload) || payload
     // 临时文件 + rename，保证原子写（断电/崩溃不会留下半写的 JSON）
     const tmp = SESSION_FILE + '.tmp'
-    fs.writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 })
+    fs.writeFileSync(tmp, JSON.stringify(out), { mode: 0o600 })
     fs.renameSync(tmp, SESSION_FILE)
   } catch (_) { /* 持久化失败不影响前台服务；下次重试 */ }
 }

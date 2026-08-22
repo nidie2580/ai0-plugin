@@ -7,6 +7,8 @@ data/history/*
 data/tmp-stickers/
 data/sessions.json
 data/sessions.json.tmp
+data/sessions.key
+data/sessions.key.tmp
 *.log
 .env
 .env.local

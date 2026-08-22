@@ -211,12 +211,20 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
 export async function safeAxiosRequest(method, url, data = null, opts = {}, maxRedirects = 3) {
   let current = url
   let redirects = 0
+  // — P2-1 修复：(1) 不直接 mutate 调用方 opts / opts.headers（消除副作用污染） —
+  //          (2) 跨主机重定向时剥离 Authorization / Cookie 头（防止凭证外泄）
+  // 每次迭代都使用独立的 workingOpts：首次迭代时浅克隆输入 opts.headers，后续迭代
+  // 在 workingOpts 上就地修改，不会影响调用方传进来的对象。
+  let workingOpts = opts && typeof opts === 'object'
+    ? { ...opts, headers: opts.headers ? { ...opts.headers } : undefined }
+    : {}
   while (true) {
     const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
     if (!check.ok) throw new Error(check.reason || '拒绝访问该 URL')
     try {
       // DNS Rebinding 防护：使用已解析的 IP 直接连接，避免二次 DNS 解析
       let connectUrl = current
+      const reqOpts = { ...workingOpts }
       if (check.resolvedIp) {
         try {
           const u = new URL(current)
@@ -225,25 +233,34 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
             const origHostname = u.hostname
             u.hostname = check.resolvedIp
             connectUrl = u.toString()
-            // 设置 Host 头为原始域名 + servername 用于 TLS SNI
-            opts = Object.assign({}, opts)
-            opts.headers = Object.assign({}, opts.headers)
+            // 确保不影响 workingOpts 引用：每次迭代为 reqOpts 开独立的 headers
+            reqOpts.headers = { ...(reqOpts.headers || {}) }
             const origUrl = new URL(current)
-            opts.headers['Host'] = origUrl.hostname + (origUrl.port ? `:${origUrl.port}` : '')
-            opts.servername = origHostname
+            reqOpts.headers['Host'] = origUrl.hostname + (origUrl.port ? `:${origUrl.port}` : '')
+            reqOpts.servername = origHostname
           }
         } catch (_) {}
       }
-      const conf = Object.assign({}, opts, { method, url: connectUrl, data, maxRedirects: 0, validateStatus: () => true, proxy: false })
+      const conf = Object.assign({}, reqOpts, { method, url: connectUrl, data, maxRedirects: 0, validateStatus: () => true, proxy: false })
       const resp = await axios.request(conf)
       if (resp.status >= 300 && resp.status < 400) {
         const loc = resp.headers?.location
         if (!loc) throw new Error(`HTTP ${resp.status}`)
-        const next = new URL(loc, current).toString()
+        const nextUrl = new URL(loc, current)
+        const next = nextUrl.toString()
         redirects += 1
         if (redirects > maxRedirects) throw new Error('重定向次数过多')
         const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
         if (!chk2.ok) throw new Error(chk2.reason || '拒绝重定向目标')
+        // — P2-1(2): 跨主机重定向剥离认证头 —
+        const origUrl = new URL(current)
+        if (nextUrl.hostname !== origUrl.hostname) {
+          if (!workingOpts.headers) workingOpts.headers = {}
+          delete workingOpts.headers.authorization
+          delete workingOpts.headers.Authorization
+          delete workingOpts.headers.cookie
+          delete workingOpts.headers.Cookie
+        }
         current = next
         continue
       }

@@ -117,6 +117,15 @@ export function isEnabled() {
 export async function generateImage(prompt, opts = {}) {
   const ic = getImageGenConfig()
   if (!ic.enabled) return { ok: false, error: '图片生成功能未启用' }
+  // P3-7: 提示词长度防御（与 chatService.parseAndExecuteImageAction 和 /api/test-image 一致）
+  //       作为"入口兜底"：即便上层漏了长度限制也不会把超大字符串传外网 API。
+  const MAX_PROMPT = 4000
+  if (typeof prompt !== 'string') return { ok: false, error: '提示词格式错误' }
+  const trimmedPrompt = prompt.trim()
+  if (!trimmedPrompt) return { ok: false, error: '提示词为空' }
+  if (trimmedPrompt.length > MAX_PROMPT) {
+    return { ok: false, error: `提示词过长（${trimmedPrompt.length} 字符，最多 ${MAX_PROMPT}）` }
+  }
   // —— P3: apiBase / apiKey / model 输入净化（trim 空白，否则会被当成有效值） ——
   const apiBase = String(ic.apiBase || '').trim()
   const apiKey = String(ic.apiKey || '').trim()
@@ -145,7 +154,7 @@ export async function generateImage(prompt, opts = {}) {
 
   const body = {
     model,
-    prompt,
+    prompt: trimmedPrompt,
     n,
     size,
     response_format: 'url'

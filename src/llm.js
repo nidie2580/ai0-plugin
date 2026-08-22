@@ -44,9 +44,15 @@ function historyFile(userId, sessionId) {
   if (!/^\d{1,20}$/.test(safeUserId)) {
     throw new Error('invalid userId format')
   }
+  // P3-1: sessionId 严格校验（与 webServer.isValidSessionId 保持一致：标准 UUID 36 字符）
+  //       拒绝任何包含 `..`、`/`、`\`、`\0` 或空白的 sessionId，防止路径穿越/覆盖 .bak
+  const safeSessionId = String(sessionId)
+  if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(safeSessionId)) {
+    throw new Error('invalid sessionId format')
+  }
   const dir = path.join(HISTORY_DIR, safeUserId)
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
-  return path.join(dir, `${sessionId}.json`)
+  return path.join(dir, `${safeSessionId}.json`)
 }
 
 /** 安全读：读不到/损坏时尝试 .bak 恢复；再不行返回空数组 */

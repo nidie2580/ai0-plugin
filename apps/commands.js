@@ -1060,12 +1060,18 @@ export class AICommands extends plugin {
         pageNav = 'prev'
       } else if (/^下一页$/i.test(a) || /^next$/i.test(a)) {
         pageNav = 'next'
-      } else if (/^第\s*(\d+)\s*页$/.test(a)) {
-        pageNav = parseInt(RegExp.$1, 10)
-      } else if (/^(\d+)\/(\d+)$/.test(a)) {
-        pageNav = parseInt(RegExp.$1, 10)
       } else {
-        targetModel = a
+        const mPage = /^第\s*(\d+)\s*页$/.exec(a)
+        if (mPage) {
+          pageNav = parseInt(mPage[1], 10)
+        } else {
+          const mFrac = /^(\d+)\/(\d+)$/.exec(a)
+          if (mFrac) {
+            pageNav = parseInt(mFrac[1], 10)
+          } else {
+            targetModel = a
+          }
+        }
       }
     }
 

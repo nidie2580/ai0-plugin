@@ -574,12 +574,24 @@ async function parseAndExecuteImageAction(replyText, userId) {
   const m = replyText.match(re)
   if (!m) return null
 
-  const prompt = m[1].trim()
+  // P3-7: 图片提示词长度限制（与 /api/test-image 的 4000 字符保持一致）
+  // 过长 prompt 可能被当作 LLM 输出的"指令注入"，还会把大段上下文塞到生图 API
+  // 消耗大量 token 并触发计费异常，同时可能被 SSRF payload 嵌入。
+  const PROMPT_MAX_LEN = 4000
+  const raw = m[1].trim()
+  const prompt = raw.length > PROMPT_MAX_LEN ? raw.slice(0, PROMPT_MAX_LEN) : raw
   const full = m[0]
   const cleanText = replyText.replace(full, '').trim()
 
   if (!prompt) {
     return { cleanText, ok: false, error: '图片提示词为空' }
+  }
+  if (raw.length > PROMPT_MAX_LEN) {
+    return {
+      cleanText,
+      ok: false,
+      error: `图片提示词过长（${raw.length} 字符，最多 ${PROMPT_MAX_LEN}），已拒绝生图。`
+    }
   }
 
   safeLogger.info(`[ai0-plugin] 解析到图片生成指令，提示词：${prompt.slice(0, 100)}`)

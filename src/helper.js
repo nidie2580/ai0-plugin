@@ -8,8 +8,36 @@ import { safeLogger } from './globals.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-const TMP_DIR = path.join(__dirname, '..', 'data', 'tmp-stickers')
+const PLUGIN_ROOT = path.resolve(__dirname, '..')
+const DATA_DIR = path.join(PLUGIN_ROOT, 'data')
+const WEB_DIR = path.join(PLUGIN_ROOT, 'web')
+const TMP_DIR = path.join(DATA_DIR, 'tmp-stickers')
+// 允许本地图片路径访问的根目录白名单：
+//   DATA_DIR：会话历史/临时文件/加密会话
+//   WEB_DIR：  前端静态资源（网页内嵌图片/Logo 之类）
+//   TMP_DIR：  临时图片（getImageSegment 写的主路径）
+// 其他任何路径（/etc/passwd、~/.ssh/id_rsa 等）都一律拒绝。
+const ALLOWED_IMAGE_ROOTS = [DATA_DIR, WEB_DIR, TMP_DIR]
 try { if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 }) } catch (_) {}
+// 判断绝对路径是否落在任一允许的根目录下，防范路径穿越（`..` / 符号链接跟随用 realpath 二次校验）
+function isPathWithinAllowedRoots(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false
+  try {
+    const abs = path.isAbsolute(filePath) ? path.normalize(filePath) : path.resolve(PLUGIN_ROOT, filePath)
+    // realpathSync.native 会跟随符号链接，防止软链接指向 /etc/passwd 这种绕过
+    let real
+    try { real = fs.realpathSync.native(abs) } catch (_) { real = abs }
+    for (const root of ALLOWED_IMAGE_ROOTS) {
+      const realRoot = path.resolve(root)
+      if (real === realRoot) return true
+      const sep = real.endsWith(path.sep) ? '' : path.sep
+      if (real.startsWith(realRoot + sep)) return true
+    }
+    return false
+  } catch (_) {
+    return false
+  }
+}
 
 // 临时文件清理：只保留近 1 小时内的，避免长期运行堆积
 let _cleanupRan = 0
@@ -867,8 +895,13 @@ export async function getImageSegment(src) {
       return safeSegmentImage(tmp)
     }
 
-    // 4) 本地文件路径 → 直接用（先判断存在）
+    // 4) 本地文件路径 → 仅允许落在 DATA_DIR / WEB_DIR / TMP_DIR 内（P3-6）
+    //    realpath 跟随符号链接后再比对根目录，防止把指向 /etc/passwd 的 symlink 当成"允许的"图片读回来
     try {
+      if (!isPathWithinAllowedRoots(s)) {
+        safeLogger.warn(`[ai0-plugin] 本地图片路径超出允许根目录，已跳过: ${s.slice(0, 120)}`)
+        return null
+      }
       if (fs.existsSync(s) && fs.statSync(s).isFile()) {
         return safeSegmentImage(s)
       }

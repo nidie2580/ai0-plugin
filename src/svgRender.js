@@ -12,6 +12,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -90,10 +91,14 @@ function wrap(width, bodyHeight, bodyContent, subtitle, pageInfo) {
 }
 
 // ======== 工具：落盘到本地并返回绝对路径 ========
-let tmpCounter = 0
+// P3-4: 用 crypto 随机串代替递增计数器。Date.now() 自身是"每毫秒变化"，但同一毫秒
+// 内并发 + 计数器可以被推测，导致攻击者预测临时文件名，进而通过先创建硬链接或 race
+// 读取另一个用户生成的 SVG。改为 crypto.randomBytes(10) 共 20 个 hex 字符，
+// 2^80 搜索空间，预测不可行；Date.now() 只保留做 LRU 清理/排查问题用。
 function writeSvg(svgText, prefix) {
   const ts = Date.now().toString(36)
-  const id = `${prefix}-${ts}-${(++tmpCounter).toString(36)}.svg`
+  const rand = crypto.randomBytes(10).toString('hex')
+  const id = `${prefix}-${ts}-${rand}.svg`
   const filePath = path.join(TMP_DIR, id)
   fs.writeFileSync(filePath, svgText, 'utf-8')
   // 异步清理：5 分钟后删除临时文件（确保发送链路已完成）

@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import net from 'node:net'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
@@ -10,6 +11,7 @@ import * as auth from './auth.js'
 import * as llm from './llm.js'
 import * as imageGen from './imageGen.js'
 import * as helper from './helper.js'
+import { isAllowedOutboundUrl } from './security.js'
 import { safeLogger } from './globals.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -135,8 +137,17 @@ function requireAuth(req, res, next) {
 function safeCompare(a, b) {
   const x = Buffer.from(String(a || ''), 'utf-8')
   const y = Buffer.from(String(b || ''), 'utf-8')
-  if (x.length !== y.length) return false
-  return crypto.timingSafeEqual(x, y)
+  // P3-2: 长度不匹配时，不能提前 return——直接返回会泄露"长度不同"的时序信号。
+  // 策略：把较短的 Buffer 用 zero-fill 对齐到较长 Buffer 的长度，再做一次
+  // timingSafeEqual，再把 length 不匹配的情况强制 return false。攻击者无法通过
+  // 耗时分辨"长度不符 → false" 与"长度相符但内容不符 → false"。
+  const maxLen = Math.max(x.length, y.length, 1)
+  const xp = Buffer.alloc(maxLen, 0)
+  const yp = Buffer.alloc(maxLen, 0)
+  x.copy(xp)
+  y.copy(yp)
+  const contentEq = crypto.timingSafeEqual(xp, yp)
+  return x.length === y.length && contentEq
 }
 
 function requireCsrf(req, res, next) {
@@ -255,11 +266,12 @@ export function createApp() {
   // 判断 socket 对端 IP 是否为可信代理（本机回环 或 配置的 trustedProxies 网段）
   function isTrustedProxy(socketIp) {
     if (!socketIp || socketIp === 'unknown') return false
-    const ip = socketIp.startsWith('::ffff:') ? socketIp.slice(7) : socketIp
+    const raw = socketIp.startsWith('::ffff:') ? socketIp.slice(7) : socketIp
     const trusted = cfg.get('web.trustedProxies', [])
     const list = Array.isArray(trusted) ? trusted : [trusted]
     // 回环总是可信（反代与插件同机部署的常见情形）
-    if (ip === '127.0.0.1' || ip === '::1') return true
+    if (raw === '127.0.0.1' || raw === '::1') return true
+    // 规范化 IP：net.isIP 能正确判断 IPv4/IPv6；strip IPv4-mapped IPv6 后再比较
     for (const entry of list) {
       if (!entry || typeof entry !== 'string') continue
       const e = entry.trim()
@@ -267,10 +279,22 @@ export function createApp() {
       if (e.includes('/')) {
         const [base, prefixRaw] = e.split('/')
         const prefix = Number(prefixRaw)
-        if (!base || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) continue
-        if (isIpv4InCidr(ip, base, prefix)) return true
-      } else if (e === ip) {
-        return true
+        if (!base || !Number.isInteger(prefix) || prefix < 0) continue
+        // IPv4 CIDR（prefix 0-32）/ IPv6 CIDR（prefix 0-128）均兼容，超界跳过
+        const baseFamily = net.isIP(base)
+        const rawFamily = net.isIP(raw)
+        if (!baseFamily || !rawFamily) continue
+        if (baseFamily === 4 && rawFamily === 4 && prefix >= 0 && prefix <= 32) {
+          if (isIpv4InCidr(raw, base, prefix)) return true
+        } else if (baseFamily === 6 && rawFamily === 6 && prefix >= 0 && prefix <= 128) {
+          if (isIpv6InCidr(raw, base, prefix)) return true
+        } else if (baseFamily === 4 && rawFamily === 4) {
+          // prefix 范围异常（>32）直接跳过
+        }
+      } else {
+        // 单 IP：IPv4-mapped 同值等价（::ffff:10.0.0.1 ≡ 10.0.0.1）
+        const cmp = e.startsWith('::ffff:') ? e.slice(7) : e
+        if (cmp === raw) return true
       }
     }
     return false
@@ -286,8 +310,64 @@ export function createApp() {
     const baseInt = toInt(base)
     if (ipInt === null || baseInt === null) return false
     if (prefix === 0) return true
+    if (prefix >= 32) return ipInt === baseInt
     const mask = (0xffffffff << (32 - prefix)) >>> 0
     return (ipInt & mask) === (baseInt & mask)
+  }
+
+  function isIpv6InCidr(ip, base, prefix) {
+    // Node.js 没有 BigInt << 128 内建运算，手写 16 字节数组按位与。
+    // ipv4-mapped IPv6 永远不会走到这里（外层已按 family 分流）。
+    const toBytes = (s) => {
+      try {
+        const norm = net.isIPv6(s) ? s : null
+        if (!norm) return null
+        // 用 URL 的 hostname 解析太复杂，直接走 net 规范化 + 手动补零
+        // 更稳妥：通过 Buffer.from 解析十六进制表示
+        const expanded = expandIpv6(s)
+        if (!expanded) return null
+        const bytes = new Uint8Array(16)
+        for (let i = 0; i < 8; i++) {
+          const h = expanded[i]
+          bytes[i * 2] = (h >> 8) & 0xff
+          bytes[i * 2 + 1] = h & 0xff
+        }
+        return bytes
+      } catch (_) { return null }
+    }
+    const a = toBytes(ip)
+    const b = toBytes(base)
+    if (!a || !b) return false
+    if (prefix === 0) return true
+    let remaining = prefix
+    for (let i = 0; i < 16; i++) {
+      const bits = Math.min(8, remaining)
+      const mask = (0xff << (8 - bits)) & 0xff
+      if ((a[i] & mask) !== (b[i] & mask)) return false
+      remaining -= bits
+      if (remaining <= 0) break
+    }
+    return true
+  }
+  // 将 IPv6 缩写展开为 8 个 16-bit 整数数组；失败返回 null
+  function expandIpv6(s) {
+    if (typeof s !== 'string') return null
+    // %zone_id（如 fe80::1%eth0）：按 RFC 去掉 scope，不影响网段比较
+    const str = s.includes('%') ? s.slice(0, s.indexOf('%')) : s
+    const [head, tail] = str.split('::')
+    const left = head ? head.split(':').filter(Boolean) : []
+    const right = tail !== undefined ? tail.split(':').filter(Boolean) : []
+    const missing = 8 - left.length - right.length
+    if (missing < 0) return null
+    const groups = [...left, ...Array(missing).fill('0'), ...right]
+    if (groups.length !== 8) return null
+    const out = new Array(8)
+    for (let i = 0; i < 8; i++) {
+      const g = groups[i]
+      if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null
+      out[i] = parseInt(g, 16)
+    }
+    return out
   }
   // 每请求挂一个 req.clientIp
   app.use((req, res, next) => {
@@ -715,7 +795,7 @@ export function createApp() {
     res.json({ ok: true, config: safe })
   })
 
-  app.post('/api/image-config', requireAuth, requireCsrf, (req, res) => {
+  app.post('/api/image-config', requireAuth, requireCsrf, async (req, res) => {
     const { config: ic } = req.body || {}
     if (!ic || typeof ic !== 'object') {
       return res.json({ ok: false, msg: '配置格式错误' })
@@ -726,13 +806,38 @@ export function createApp() {
     if (typeof ic.apiKey === 'string' && ic.apiKey === API_KEY_PLACEHOLDER && typeof oldKey === 'string') {
       ic.apiKey = oldKey
     }
+    // — P2-3: apiBase 输入净化 + URL 格式校验 + SSRF 校验（同 /api/config 的 model 级别）
+    const apiBase = String(ic.apiBase || '').trim()
+    if (apiBase) {
+      let normalized
+      try {
+        // 必须是合法 http(s) URL；非 http(s)、URL 解析失败都直接拒绝
+        const u = new URL(helper.normalizeApiBase(apiBase) + '/')
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('只允许 http(s) 协议')
+        normalized = helper.normalizeApiBase(apiBase)
+      } catch (_) {
+        return res.json({ ok: false, msg: 'apiBase 格式错误：请填入合法的 http(s) URL（如 https://api.moonshot.cn/v1）' })
+      }
+      const chk = await isAllowedOutboundUrl(normalized).catch(() => null)
+      if (!chk || !chk.ok) {
+        return res.json({ ok: false, msg: 'apiBase 未通过安全校验（禁止访问私有/回环/链路本地地址）' })
+      }
+      ic.apiBase = normalized
+    }
+    const apiKey = String(ic.apiKey || '').trim()
+    const model = String(ic.model || '').trim()
+    // 启用时 apiBase、apiKey、model 都不能为空
+    const enabled = ic.enabled === true || ic.enabled === 'true'
+    if (enabled && (!apiBase || !apiKey || !model)) {
+      return res.json({ ok: false, msg: '启用图片生成时，apiBase、apiKey、model 三项不能为空' })
+    }
     full.imageGen = {
-      enabled: ic.enabled === true || ic.enabled === 'true',
-      apiBase: ic.apiBase || '',
-      apiKey: ic.apiKey || '',
-      model: ic.model || 'dall-e-3',
-      defaultSize: ic.defaultSize || '1024x1024',
-      quality: ic.quality || 'standard',
+      enabled,
+      apiBase,
+      apiKey,
+      model: model || 'dall-e-3',
+      defaultSize: String(ic.defaultSize || '').trim() || '1024x1024',
+      quality: String(ic.quality || '').trim() || 'standard',
       timeout: parseInt(ic.timeout, 10) || 120000
     }
     const ok = cfg.saveConfig(full)
