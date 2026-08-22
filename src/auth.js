@@ -124,9 +124,15 @@ export function verifyCode(id, code, clientIp = 'unknown') {
     codes.delete(id)
     return { ok: false, msg: '验证码已过期' }
   }
-  // IP 绑定校验：验证码创建时绑定的 IP 必须与验证时一致
-  if (rec.createdIp && rec.createdIp !== 'unknown' && rec.createdIp !== clientIp) {
-    return { ok: false, msg: '验证码与当前 IP 不匹配' }
+  // IP 绑定校验：首次使用时绑定 IP（QQ 生成时无 Web IP，首次登录绑定后锁定）
+  if (rec.createdIp && rec.createdIp !== 'unknown') {
+    // 已绑定：校验一致
+    if (rec.createdIp !== clientIp) {
+      return { ok: false, msg: '验证码与当前 IP 不匹配' }
+    }
+  } else {
+    // 未绑定（生成时无 IP）：首次使用时绑定
+    rec.createdIp = clientIp
   }
   // 始终走 timing-safe 比较，不使用前置明文 !== 短路（防止时序泄漏）
   const a = Buffer.from(String(rec.code), 'utf-8')
