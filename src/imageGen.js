@@ -170,7 +170,9 @@ export async function generateImage(prompt, opts = {}) {
   }
   const quality = rawQuality
   const n = 1
-  const timeout = opts.timeout || ic.timeout || 120000
+  // 防御式读取：timeout 必须为正有限数，否则兜底 120000，避免负数/NaN 传给上游导致异常
+  const rawTimeout = Number(opts.timeout ?? ic.timeout ?? 120000)
+  const timeout = Number.isFinite(rawTimeout) && rawTimeout > 0 ? Math.floor(rawTimeout) : 120000
 
   const body = {
     model,

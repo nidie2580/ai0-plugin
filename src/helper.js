@@ -861,8 +861,12 @@ export async function getImageSegment(src) {
   cleanupTmpDir()
 
   try {
-    // 1) Buffer → 写临时文件
+    // 1) Buffer → 写临时文件（防御：超大 Buffer 拒绝落盘，防止临时目录内存/磁盘被撑爆）
     if (Buffer.isBuffer(src)) {
+      if (src.length > 20 * 1024 * 1024) {
+        safeLogger.warn(`[ai0-plugin] Buffer 图片过大(${Math.round(src.length / 1024 / 1024)}MB)，已拒绝`)
+        return null
+      }
       const ext = guessExtFromBuffer(src) || '.img'
       const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
       fs.writeFileSync(tmp, src)
@@ -958,7 +962,7 @@ function guessExtFromBuffer(buf) {
 }
 
 async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {
-  const result = await safeFetchWithRedirects(url, { signal: AbortSignal.timeout(30000) })
+  const result = await safeFetchWithRedirects(url, { signal: AbortSignal.timeout(30000), maxBytes })
   if (!result.ok) return { ok: false, error: result.error }
   // axios 响应：resp.data 已经是 Buffer/ArrayBuffer
   const resp = result.response

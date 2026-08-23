@@ -420,12 +420,15 @@ export async function chatCompletions(messages, {
 
   const model = String(m.model || 'gpt-3.5-turbo').trim() || 'gpt-3.5-turbo'
   // 支持上下文压缩场景覆盖 max_tokens / temperature
+  // 防御式读取：配置值非数值/NaN/越界时兜底默认值，避免把 NaN/非法值发给上游 API
+  const rawMaxTokens = Number(m.maxTokens)
   const effMaxTokens = Number.isFinite(overrideMaxTokens) && overrideMaxTokens > 0
-    ? Math.min(overrideMaxTokens, Number(m.maxTokens) || 32768)
-    : (m.maxTokens ?? 2000)
+    ? Math.min(overrideMaxTokens, (Number.isFinite(rawMaxTokens) && rawMaxTokens > 0) ? Math.floor(rawMaxTokens) : 32768)
+    : ((Number.isFinite(rawMaxTokens) && rawMaxTokens > 0) ? Math.floor(rawMaxTokens) : 2000)
+  const rawTemp = Number(m.temperature)
   const effTemp = Number.isFinite(temperature)
     ? Math.max(0, Math.min(2, temperature))
-    : (m.temperature ?? 0.8)
+    : (Number.isFinite(rawTemp) ? Math.max(0, Math.min(2, rawTemp)) : 0.8)
   const body = {
     model,
     messages,
@@ -433,9 +436,8 @@ export async function chatCompletions(messages, {
     max_tokens: effMaxTokens
   }
 
-  if (typeof logger !== 'undefined') {
-    safeLogger.info(`[ai0-plugin] LLM 请求：base(原始)=${sanitizeLog(rawBase)}  base(归一化)=${sanitizeLog(normalizedBase)}  url=${sanitizeLog(url)}  model=${sanitizeLog(model)}  apiKey=${redactKey(m.apiKey)}`)
-  }
+  // safeLogger 自带 console 降级，无需判全局 logger（原 typeof logger 守卫在无全局 logger 时会静默跳过日志）
+  safeLogger.info(`[ai0-plugin] LLM 请求：base(原始)=${sanitizeLog(rawBase)}  base(归一化)=${sanitizeLog(normalizedBase)}  url=${sanitizeLog(url)}  model=${sanitizeLog(model)}  apiKey=${redactKey(m.apiKey)}`)
 
   let resp
   try {

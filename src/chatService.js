@@ -416,11 +416,9 @@ export async function handleChat(e) {
   const modelNameCfg = modelCfg?.[defaultKey]?.name || modelCfg?.[defaultKey]?.model || 'AI'
 
   let history = llm.loadHistory(userId, sessionId)
-  // P3-6：sysPrompt === ''（用户显式清空）时，也"不要"在开头补默认 sys 行。
-  //       只有非空 system.prompt 才作为"用户配置的主系统提示"注入。
-  if (sysPrompt && (!history.length || history[0].role !== 'system')) {
-    history = [{ role: 'system', content: sysPrompt }, ...history]
-  }
+  // 不再在此手动 prepend sysPrompt：
+  // 下方 injectContextIntoHistory 会把 finalSysPrompt 合并进消息头的 first system 消息，
+  // 若这里再 prepend 一次会导致 sysPrompt 在最终 system 消息里出现两次（浪费 token、干扰权重）。
 
   // 群聊：无条件注入身份信息（回答"我是群主吗 / 你是管理员吗"这类问题用，不依赖 groupOps 开关）
   let identityContext = null
@@ -507,7 +505,9 @@ export async function handleChat(e) {
     inflightChat.delete(inflightKey)
   }
   const ac = new AbortController()
+  let timedOut = false
   const timeoutTimer = setTimeout(() => {
+    timedOut = true
     try { ac.abort('hard-timeout') } catch (_) {}
   }, hardTimeout)
   inflightChat.set(inflightKey, { controller: ac, at: Date.now() })
@@ -517,8 +517,14 @@ export async function handleChat(e) {
     replyText = res.text
     modelName = res.modelName
   } catch (err) {
-    if (err?.name === 'CanceledError' || /cancel|abort/i.test(err?.message || err?.code || '')) {
-      replyText = ''  // 被新请求取代时静默吞掉，不回用户发错误文本
+    // 区分"硬超时"与"被新请求取代/取消"，避免用宽泛正则把真实错误当取消静默吞掉
+    if (err?.name === 'CanceledError') {
+      if (timedOut) {
+        safeLogger.warn(`[ai0-plugin] 模型生成超时(${hardTimeout}ms)，已中止`)
+        replyText = '(生成超时，请重试)'
+      } else {
+        replyText = ''  // 被新请求取代时静默吞掉
+      }
     } else {
       safeLogger.error(`[ai0-plugin] LLM 调用失败: ${err.message}`)
       replyText = '(调用失败，请联系管理员)'

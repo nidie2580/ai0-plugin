@@ -164,7 +164,11 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
     if (!check.ok) return { ok: false, error: check.reason || '拒绝访问该 URL' }
     // DNS Rebinding 防护：使用已解析 IP 直连，Host 头保留原始域名，servername 用于 TLS SNI
     let connectUrl = current
-    let axiosOpts = { ...workingOpts, maxRedirects: 0, validateStatus: () => true, proxy: false, responseType: 'arraybuffer' }
+    // 响应大小上限：调用方可传 opts.maxBytes，默认 20MB；axios 据此在接收阶段拦截超大响应，
+    // 避免整包缓冲后才检查导致 OOM（arraybuffer 会先把全量载入内存）
+    const maxBytes = (Number.isFinite(opts?.maxBytes) && opts.maxBytes > 0) ? opts.maxBytes : 20 * 1024 * 1024
+    const cap = maxBytes + 4096
+    let axiosOpts = { ...workingOpts, maxRedirects: 0, validateStatus: () => true, proxy: false, responseType: 'arraybuffer', maxContentLength: cap, maxBodyLength: cap }
     if (check.resolvedIp) {
       try {
         const u = new URL(current)

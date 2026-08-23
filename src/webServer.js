@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import net from 'node:net'
@@ -73,47 +74,55 @@ export function getServerInfo() {
   }
 }
 
-function listSessions(limit = 100) {
+async function listSessions(limit = 100) {
   const historyDir = path.join(PLUGIN_ROOT, 'data', 'history')
-  const out = []
-  if (!fs.existsSync(historyDir)) return out
-  let count = 0
-  for (const user of fs.readdirSync(historyDir)) {
-    if (count >= limit) break
-    const ud = path.join(historyDir, user)
-    const st = fs.statSync(ud)
-    if (!st.isDirectory()) continue
-    const files = fs.readdirSync(ud).filter(f => f.endsWith('.json'))
-    const sessions = []
-    for (const f of files) {
-      const fp = path.join(ud, f)
-      const s = fs.statSync(fp)
-      let msgCount = 0
-      let preview = ''
-      try {
-        const arr = JSON.parse(fs.readFileSync(fp, 'utf-8'))
-        msgCount = Array.isArray(arr) ? arr.length : 0
-        const last = Array.isArray(arr) ? arr[arr.length - 1] : null
-        if (last) preview = (last.content || '').slice(0, 60)
-      } catch {}
-      sessions.push({
-        id: f.replace(/\.json$/, ''),
-        size: s.size,
-        mtime: s.mtimeMs,
-        msgCount,
-        preview
-      })
-    }
-    sessions.sort((a, b) => b.mtime - a.mtime)
-    out.push({
-      userId: user,
-      sessions,
-      totalMessages: sessions.reduce((a, s) => a + s.msgCount, 0)
-    })
-    count++
+  // 异步分页：并行扫描各用户目录，先按活跃度排序再截取前 limit，
+  // 避免阻塞事件循环，也避免只取到 readdir 序的"前 100 个"而漏掉最活跃用户。
+  let entries
+  try {
+    entries = await fsp.readdir(historyDir, { withFileTypes: true })
+  } catch {
+    return []
   }
-  out.sort((a, b) => b.totalMessages - a.totalMessages)
-  return out
+  const userRecords = await Promise.all(
+    entries
+      .filter(e => e.isDirectory() && isValidUserId(e.name))
+      .map(async (e) => buildUserSessionRecord(path.join(historyDir, e.name), e.name))
+  )
+  const valid = userRecords.filter(Boolean)
+  valid.sort((a, b) => b.totalMessages - a.totalMessages)
+  return valid.slice(0, limit)
+}
+
+async function buildUserSessionRecord(ud, userId) {
+  let files
+  try {
+    files = (await fsp.readdir(ud)).filter(f => f.endsWith('.json'))
+  } catch {
+    return null
+  }
+  const sessions = await Promise.all(files.map(async (f) => {
+    const fp = path.join(ud, f)
+    let size = 0, mtime = 0, msgCount = 0, preview = ''
+    try {
+      const s = await fsp.stat(fp)
+      size = s.size; mtime = s.mtimeMs
+    } catch {}
+    try {
+      const raw = await fsp.readFile(fp, 'utf-8')
+      const arr = JSON.parse(raw)
+      msgCount = Array.isArray(arr) ? arr.length : 0
+      const last = Array.isArray(arr) ? arr[arr.length - 1] : null
+      if (last) preview = (last.content || '').slice(0, 60)
+    } catch {}
+    return { id: f.replace(/\.json$/, ''), size, mtime, msgCount, preview }
+  }))
+  sessions.sort((a, b) => b.mtime - a.mtime)
+  return {
+    userId,
+    sessions,
+    totalMessages: sessions.reduce((a, s) => a + s.msgCount, 0)
+  }
 }
 
 // 会话接口路径参数校验：防止路径遍历（../）读取/删除插件目录外的任意文件。
@@ -685,8 +694,8 @@ export function createApp() {
     res.json({ ok, msg: ok ? `已保存${skipped}` : '保存失败，查看日志' })
   })
 
-  app.get('/api/sessions', requireAuth, (req, res) => {
-    res.json({ ok: true, data: listSessions() })
+  app.get('/api/sessions', requireAuth, async (req, res) => {
+    res.json({ ok: true, data: await listSessions() })
   })
 
   app.delete('/api/sessions/:userId/:sessionId?', requireAuth, requireCsrf, (req, res) => {

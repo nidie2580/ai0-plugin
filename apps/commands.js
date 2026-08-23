@@ -622,6 +622,10 @@ export class AICommands extends plugin {
     if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const userId = helper.getUserId(e)
+    // 纵深防御：除框架 permission:'master' 外，方法内二次校验，防框架被绕过时泄露 apiBase/主人列表等敏感信息
+    if (!helper.isMaster(userId, e)) {
+      return e.reply('❌ 诊断命令仅主人可用')
+    }
     const groupId = helper.getGroupId(e)
     // 诊断命令包含敏感信息（主人列表、apiBase等），仅允许私聊执行
     if (groupId) {
@@ -754,6 +758,10 @@ export class AICommands extends plugin {
     if (!e.group_id) return e.reply('⚠️ 此命令仅在群聊中可用。')
     const groupId = e.group_id
     const userId = helper.getUserId(e)
+    // 纵深防御：群诊断会输出成员/群信息详情，方法内二次校验主人
+    if (!helper.isMaster(userId, e)) {
+      return e.reply('❌ 群诊断命令仅主人可用')
+    }
     const bot = global.Bot || global.bot
 
     const lines = ['🩺 AI0-Plugin 群诊断报告', '']
@@ -931,6 +939,12 @@ export class AICommands extends plugin {
     const text = helper.getMessageText(e)
     const m = (text || '').match(/^#ai(测试模型|模型测试|测模型)\s*(\S+)?\s*$/)
     const modelKey = (m && m[2]) ? m[2] : null
+
+    // 纵深防御：模型测试会输出 apiBase/models URL 等敏感配置，方法内二次校验主人
+    const userId = helper.getUserId(e)
+    if (!helper.isMaster(userId, e)) {
+      return e.reply('❌ 模型测试命令仅主人可用')
+    }
 
     // 测试模型包含 apiBase 等配置信息，仅允许私聊执行
     const groupId = helper.getGroupId(e)
