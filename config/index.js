@@ -364,11 +364,17 @@ export function saveConfig(config) {
       }
     }
     // 深度合并：保留磁盘上存在但前端未传的字段，防止字段丢失
+    // 安全：跳过 __proto__/constructor/prototype 等危险键，防止原型污染
+    const isDangerKey = (k) => k === '__proto__' || k === 'constructor' || k === 'prototype'
+    for (const k of Object.keys(cleaned)) {
+      if (isDangerKey(k)) delete cleaned[k]
+    }
     if (fs.existsSync(USER_CONFIG)) {
       try {
         const diskRaw = fs.readFileSync(USER_CONFIG, 'utf-8')
         const diskConfig = YAML.parse(diskRaw) || {}
         for (const k of Object.keys(diskConfig)) {
+          if (isDangerKey(k)) continue
           if (!(k in cleaned)) {
             cleaned[k] = diskConfig[k]
           }

@@ -67,7 +67,7 @@ function wrap(width, bodyHeight, bodyContent, subtitle, pageInfo) {
   const ver = 'v1.0'
   const pi = pageInfo || ''
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}" font-family='"PingFang SC","Microsoft YaHei","Helvetica Neue",Arial,sans-serif'>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}" font-family='PingFang SC,Microsoft YaHei,Helvetica Neue,Arial,sans-serif'>
   <rect x="0" y="0" width="${width}" height="${totalHeight}" fill="url(#bg)"/>
   ${defs()}
   <!-- Header -->

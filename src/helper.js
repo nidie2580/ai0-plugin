@@ -646,7 +646,15 @@ export function splitUnicodeSafe(text, targetChunk = 3000, options = {}) {
 
     // 硬上限兜底：自然断点再想找也不能超过 maxChunk
     if (end > i + maxChunk) end = safeEnd(i + maxChunk)
-    if (end <= i) end = safeEnd(i + 1)   // 极端情况至少前进 1 字符，防止死循环
+    if (end <= i) {
+      // 极端情况至少前进 1 个码点，防止死循环；若落到低代理则补齐一对，保证不切开代理对
+      end = i + 1
+      if (end < len) {
+        const c = text.charCodeAt(end)
+        if (c >= 0xDC00 && c <= 0xDFFF) end++
+      }
+      if (end > len) end = len
+    }
 
     out.push(text.slice(i, end))
     i = end

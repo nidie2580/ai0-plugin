@@ -523,6 +523,11 @@ export function createApp() {
         }
       }
     }
+    // 图片生成 apiKey 同样脱敏（与 GET /api/image-config 一致，避免明文泄露）
+    if (safe.imageGen && safe.imageGen.apiKey) {
+      const k = safe.imageGen.apiKey
+      safe.imageGen.apiKey = (!/^\s*$/.test(k) && !/^\*+$/.test(k)) ? API_KEY_PLACEHOLDER : k
+    }
     res.json({ ok: true, config: safe })
   })
 

@@ -83,6 +83,7 @@ function isPrivateIpv6(ip) {
   if (l.startsWith('100::')) return true                           // 100::/64 黑洞地址
   if (/^2001:(0[0-1])/i.test(l)) return true                      // 2001::/23 (含 Teredo)
   if (l.startsWith('64:ff9b:')) return true                        // 64:ff9b::/96 NAT64 前缀
+  if (l.startsWith('2002:')) return true                            // 2002::/16 6to4（内嵌 IPv4，可映射私有网段，一律拒绝）
   // IPv4-mapped 变体：::ffff:0:xxxx（非标准但部分实现会产生）
   if (/^::ffff:0:/i.test(l)) return true
   // IPv4-compatible：::xxxx:xxxx（后 32 位为 IPv4）
@@ -120,6 +121,11 @@ export async function isAllowedOutboundUrl(u) {
   }
   const rawHost = parsed.hostname
   const hostname = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost
+
+  // 协议白名单：仅允许 http/https，拒绝 ftp://、gopher:// 等非 HTTP 协议
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, reason: '仅允许 http/https 协议' }
+  }
 
   const v = net.isIP(hostname)
   if (v === 4 || v === 6) {
@@ -184,12 +190,14 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
       const next = nextUrl.toString()
       redirects += 1
       if (redirects > maxRedirects) return { ok: false, error: '重定向次数过多' }
-      // 跨主机重定向时剥离认证头，防止凭证泄露
+      // 跨主机重定向时剥离认证头，防止凭证泄露（与 safeAxiosRequest 一致，覆盖大小写变体）
       const origHostname = new URL(current).hostname
       if (nextUrl.hostname !== origHostname) {
         if (workingOpts.headers) {
           delete workingOpts.headers.authorization
+          delete workingOpts.headers.Authorization
           delete workingOpts.headers.cookie
+          delete workingOpts.headers.Cookie
         }
       }
       const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))

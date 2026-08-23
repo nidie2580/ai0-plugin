@@ -41,9 +41,13 @@ export const safeLogger = createLoggerProxy()
 export const safeSegment = createSegmentProxy()
 
 /**
- * 日志净化：剥离 \r \n 控制字符，防止外部数据在日志中注入伪造行 / 通过 \r 覆盖前条。
+ * 日志净化：剥离 \r \n 以及其它 C0 控制字符/ANSI 转义/Unicode 换行类，
+ * 防止外部数据在日志中注入伪造行、通过 \r 覆盖前条或通过 ANSI 序列伪造终端内容。
  * 用于任何拼入 safeLogger 的外部输入（API 错误消息、响应体预览等）。
  */
 export function sanitizeLog(s) {
-  return String(s ?? '').replace(/[\r\n\u2028\u2029]/g, ' ')
+  return String(s ?? '')
+    .replace(/[\x00-\x1F\x7F\u0085\u2028\u2029]/g, ' ')
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/gi, '')  // 剥离 ANSI/VT100 转义序列
+    .trim()
 }

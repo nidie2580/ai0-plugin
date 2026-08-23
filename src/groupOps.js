@@ -942,8 +942,8 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: true, msg: `已为 ${targetUid} 设置头衔：${titleText.slice(0, 18)}` })
 
       } else if (type === 'set_group_name') {
-        // 无目标操作：取 args[0] 作为群名（不是 args.slice(1)）
-        const groupName = String(args[0] || '').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        // 无目标操作：取 args 全文作为群名（join ':' 避免内容含冒号被截断）
+        const groupName = String(args.join(':') || '').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
         if (!groupName) {
           results.push({ type, ok: false, msg: '未指定群名' }); continue
         }
@@ -981,8 +981,8 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         results.push({ type, ok: true, msg: enable ? '已开启头衔展示' : '已关闭头衔展示' })
 
       } else if (type === 'set_notice') {
-        // 无目标操作：取 args[0] 作为公告内容（不是 args.slice(1)）
-        const noticeContent = String(args[0] || '').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+        // 无目标操作：取 args 全文作为公告内容（join ':' 避免内容含冒号被截断）
+        const noticeContent = String(args.join(':') || '').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
         if (!noticeContent) {
           results.push({ type, ok: false, msg: '未指定公告内容' }); continue
         }
