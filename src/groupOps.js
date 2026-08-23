@@ -744,9 +744,10 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
   if (!matches.length) return { cleanText: replyText, results }
 
   // 移除操作指令，得到干净文本
+  // C1: 使用 replaceAll 防止 AI 回复含两处相同 [action:...] 时只替换第一处，导致指令透出到回复
   let cleanText = replyText
   for (const match of matches) {
-    cleanText = cleanText.replace(match.full, '').trim()
+    cleanText = cleanText.replaceAll(match.full, '').trim()
   }
 
   const masters = helper.listMasters()
@@ -915,6 +916,10 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
         const noticeContent = String(args[0] || '').trim().replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
         if (!noticeContent) {
           results.push({ type, ok: false, msg: '未指定公告内容' }); continue
+        }
+        // C3: 公告长度限制（群名限 30、头衔限 18，公告也应有限制）
+        if (noticeContent.length > 200) {
+          results.push({ type, ok: false, msg: '公告内容不能超过 200 字符' }); continue
         }
         await executeSetNotice(groupId, noticeContent)
         safeLogger.info(`[ai0-plugin] 群操作: set_notice 群${groupId} 请求者${requesterUid}`)

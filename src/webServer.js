@@ -526,7 +526,7 @@ export function createApp() {
     res.json({ ok: true, config: safe })
   })
 
-  app.post('/api/config', requireAuth, requireCsrf, (req, res) => {
+  app.post('/api/config', requireAuth, requireCsrf, async (req, res) => {
     const { config } = req.body || {}
     if (!config || typeof config !== 'object') {
       return res.json({ ok: false, msg: '配置格式错误' })
@@ -585,6 +585,29 @@ export function createApp() {
             return res.json({ ok: false, msg: `模型 "${key}" 含有不允许的字段: ${bad.join(', ')}` })
           }
         }
+      }
+    }
+
+    // A2: SSRF 校验 — 所有 model 子段的 apiBase 必须通过 isAllowedOutboundUrl
+    //     与 /api/image-config 保持一致，防止通过 web 后台写入内网/回环 apiBase 导致 apiKey 泄漏
+    if (config.model && typeof config.model === 'object') {
+      for (const [key, val] of Object.entries(config.model)) {
+        if (key === 'default' || !val || typeof val !== 'object') continue
+        const apiBase = String(val.apiBase || '').trim()
+        if (!apiBase) continue
+        let normalized
+        try {
+          normalized = helper.normalizeApiBase(apiBase)
+          const u = new URL(normalized + '/')
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('协议错误')
+        } catch (_) {
+          return res.json({ ok: false, msg: `模型 "${key}" 的 apiBase 格式错误：请填入合法的 http(s) URL` })
+        }
+        const chk = await isAllowedOutboundUrl(normalized).catch(() => null)
+        if (!chk || !chk.ok) {
+          return res.json({ ok: false, msg: `模型 "${key}" 的 apiBase 未通过安全校验：${chk?.reason || '禁止访问私有/回环/链路本地地址'}` })
+        }
+        val.apiBase = normalized
       }
     }
 

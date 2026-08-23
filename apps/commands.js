@@ -6,6 +6,7 @@ import * as auth from '../src/auth.js'
 import * as groupOps from '../src/groupOps.js'
 import * as llm from '../src/llm.js'
 import { safeLogger } from '../src/globals.js'
+import { isAllowedOutboundUrl } from '../src/security.js'
 
 let svgR = null
 try { svgR = await import('../src/svgRender.js') } catch (_) {}
@@ -338,8 +339,14 @@ export class AICommands extends plugin {
     if (!['http:', 'https:'].includes(parsed.protocol)) {
       return this.e.reply('❌ 仅支持 http:// 和 https:// 协议')
     }
+    // A1: SSRF 校验 — 与 /api/image-config 保持一致，防止主人误配内网/回环地址导致 apiKey 泄漏
+    const normalized = helper.normalizeApiBase(text)
+    const chk = await isAllowedOutboundUrl(normalized).catch(() => null)
+    if (!chk || !chk.ok) {
+      return this.e.reply(`❌ apiBase 未通过安全校验（禁止访问私有/回环/链路本地地址）：${chk?.reason || '未知原因'}`)
+    }
     // 过滤控制字符
-    const safe = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').slice(0, 512)
+    const safe = normalized.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').slice(0, 512)
     const config = cfg.loadConfig()
     const def = config.model?.default || 'openai-compatible'
     if (!config.model) config.model = {}
@@ -1081,22 +1088,35 @@ export class AICommands extends plugin {
     }
 
     // 并发探测所有 provider 的可用模型
-    await e.reply(`🔍 正在探测 ${providerKeys.length} 个 API 平台的可用模型列表（GET /models）...`)
-    const providerModels = {}
-    await Promise.all(providerKeys.map(async (key) => {
-      try {
-        const info = await llm.listAvailableModels({ modelKey: key })
-        providerModels[key] = {
-          ok: !!info.ok,
-          models: Array.isArray(info.models) ? info.models : [],
-          url: info.url || '',
-          status: info.status,
-          error: info.error
+    // D2: /models 探测结果加 5 分钟缓存，避免每次切换都全平台并发请求
+    const MODELS_CACHE_KEY = '__ai0_models_cache'
+    const MODELS_CACHE_TTL = 5 * 60 * 1000
+    if (!globalThis[MODELS_CACHE_KEY]) globalThis[MODELS_CACHE_KEY] = { data: null, expireAt: 0 }
+    const modelsCache = globalThis[MODELS_CACHE_KEY]
+    const nowMs = Date.now()
+    let providerModels
+    if (modelsCache.data && nowMs < modelsCache.expireAt) {
+      providerModels = modelsCache.data
+    } else {
+      await e.reply(`🔍 正在探测 ${providerKeys.length} 个 API 平台的可用模型列表（GET /models）...`)
+      providerModels = {}
+      await Promise.all(providerKeys.map(async (key) => {
+        try {
+          const info = await llm.listAvailableModels({ modelKey: key })
+          providerModels[key] = {
+            ok: !!info.ok,
+            models: Array.isArray(info.models) ? info.models : [],
+            url: info.url || '',
+            status: info.status,
+            error: info.error
+          }
+        } catch (err) {
+          providerModels[key] = { ok: false, models: [], error: err.message || String(err) }
         }
-      } catch (err) {
-        providerModels[key] = { ok: false, models: [], error: err.message || String(err) }
-      }
-    }))
+      }))
+      modelsCache.data = providerModels
+      modelsCache.expireAt = nowMs + MODELS_CACHE_TTL
+    }
 
     const currentDefaultModel = modelCfg[defaultKey]?.model || ''
 
@@ -1118,9 +1138,16 @@ export class AICommands extends plugin {
     }))
 
     // 读取用户上次查看页码（每个用户独立保存，临时 Map，重启失效）
+    // D1: 加容量上限 + FIFO 淘汰，防止长期运行 Map 无限增长
     const PAGE_SESSION_KEY = '__switch_model_page'
+    const PAGE_STORE_MAX = 200
     if (!globalThis[PAGE_SESSION_KEY]) globalThis[PAGE_SESSION_KEY] = new Map()
     const pageStore = globalThis[PAGE_SESSION_KEY]
+    if (pageStore.size >= PAGE_STORE_MAX && !pageStore.has(userId)) {
+      // FIFO 淘汰最早插入的 key
+      const oldest = pageStore.keys().next().value
+      pageStore.delete(oldest)
+    }
     const totalPages = svgR?.countPages?.(providerData) ?? 1
     let currentPage = 1
     try {
@@ -1295,7 +1322,10 @@ export class AICommands extends plugin {
     if (!config2.model[finalKey]) config2.model[finalKey] = {}
     const before = String(config2.model[finalKey].model || '')
     const oldDefault = config2.model.default || defaultKey
-    config2.model[finalKey].model = finalModel
+    // C2: 模型名写入前过滤控制字符 + 长度限制（对齐 setModel 命令的 safe 逻辑）
+    const safeModel = String(finalModel).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').slice(0, 128)
+    if (!safeModel) return e.reply('❌ 模型ID 包含非法字符，无法保存')
+    config2.model[finalKey].model = safeModel
     // 切换到非默认平台时，自动把 default 指向新平台（让用户立即用上新模型）
     if (finalKey !== oldDefault) {
       config2.model.default = finalKey
@@ -1307,14 +1337,14 @@ export class AICommands extends plugin {
       `✅ 模型切换完成`,
       `  平台：${finalKey}${finalKey !== oldDefault ? `（默认平台已由 ${oldDefault} 切到 ${finalKey}）` : ''}`,
       `  原模型：${before || '(未设置)'}`,
-      `  新模型：${finalModel}`,
+      `  新模型：${safeModel}`,
       ``
     ]
     const list = providerModels[finalKey]?.models || []
-    if (list.length && list.includes(finalModel)) {
+    if (list.length && list.includes(safeModel)) {
       lines.push(`✔ 新模型在平台 ${finalKey} 的可用列表内，可直接使用。`)
     } else {
-      lines.push(`⚠ 新模型"${finalModel}"未出现在平台 ${finalKey} 的 /models 返回列表中（可能是本账号未开通 / 服务商返回列表不全）。`)
+      lines.push(`⚠ 新模型"${safeModel}"未出现在平台 ${finalKey} 的 /models 返回列表中（可能是本账号未开通 / 服务商返回列表不全）。`)
       lines.push(`  若调用失败，可发送 "#ai测试模型 ${finalKey}" 或 "#切换模型"（无参数）查看本账号实际可用模型。`)
     }
     lines.push(``, `💡 上下文不会自动重置，需要新会话可发送 "#ai新会话"。`)
