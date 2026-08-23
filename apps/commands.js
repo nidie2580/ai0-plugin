@@ -141,7 +141,7 @@ export class AICommands extends plugin {
           permission: 'master'
         },
         {
-          reg: '^#ai头衔展示\\s+(开|关|启用|禁用|1|0)$',
+          reg: '^#ai头衔展示(\\s+(开|关|启用|禁用|1|0))?$',
           fnc: 'toggleTitleDisplay',
           permission: 'master'
         },
@@ -151,8 +151,8 @@ export class AICommands extends plugin {
           permission: 'master'
         },
         {
-          // #ai群搜索 开|关 —— 群搜索方式管理（开关语义）
-          reg: '^#ai群搜索\\s+(开|关|启用|禁用|1|0)$',
+          // #ai群搜索 [开|关] —— 群搜索方式管理（开关语义）；无参=提示用法
+          reg: '^#ai群搜索(\\s+(开|关|启用|禁用|1|0))?$',
           fnc: 'groupSearch',
           permission: 'master'
         },
@@ -1373,7 +1373,8 @@ export class AICommands extends plugin {
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
     const arg = e.raw_message?.replace(/^#ai(全体|全员)禁言\s*/, '').trim()
-    const on = !arg || ['开', '启用', '1'].includes(arg)
+    if (!arg) return e.reply('用法: #ai全体禁言 开|关\n示例: #ai全体禁言 开')
+    const on = ['开', '启用', '1'].includes(arg)
     const r = await groupOps.parseAndExecuteActions(`[action:mute_all:${on ? 1 : 0}]`, gid, e)
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`操作失败：${r.results[0].msg}`)
@@ -1409,6 +1410,7 @@ export class AICommands extends plugin {
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
     const arg = e.raw_message?.replace(/^#ai头衔展示\s*/, '').trim()
+    if (!arg) return e.reply('用法: #ai头衔展示 开|关\n示例: #ai头衔展示 开')
     const on = ['开', '启用', '1'].includes(arg)
     const r = await groupOps.parseAndExecuteActions(`[action:title_display:${on ? 1 : 0}]`, gid, e)
     const ok = allActionsOk(r)
@@ -1435,7 +1437,8 @@ export class AICommands extends plugin {
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
     // 群搜索是"搜索方式开关"（开/关），不是"搜索关键词"
-    const arg = e.raw_message?.replace(/^#ai群搜索\s*/, '').trim() || ''
+    const arg = e.raw_message?.replace(/^#ai群搜索\s*/, '').trim()
+    if (!arg) return e.reply('用法: #ai群搜索 开|关\n示例: #ai群搜索 开')
     const on = ['开', '启用', '1'].includes(arg)
     const r = await groupOps.parseAndExecuteActions(`[action:group_search:${on ? 1 : 0}]`, gid, e)
     const ok = allActionsOk(r)

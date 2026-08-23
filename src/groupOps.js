@@ -36,36 +36,55 @@ function evictMapOverCapacity(map, max) {
   }
 }
 
+// 全量清理节流：避免每次限流检查都 O(n) 遍历整个 Map
+let lastGlobalRateCleanup = 0
+const GLOBAL_RATE_CLEANUP_INTERVAL = 5 * 60 * 1000 // 至多 5 分钟做一次全量清理
+
 /**
  * 检查用户自定义头衔请求是否超过限流
  * @param {string} userId - 用户ID
  * @returns {{ok: boolean, reason?: string}}
  */
 function checkCustomTitleRateLimit(userId) {
-  // 内存保护：每次检查前尝试清理过期 + 容量上限
   const now = Date.now()
-  for (const [uid, timestamps] of customTitleRateLimit) {
-    const remaining = timestamps.filter(ts => now - ts < CUSTOM_TITLE_RATE_LIMIT_WINDOW)
-    if (remaining.length === 0) customTitleRateLimit.delete(uid)
-    else if (remaining.length !== timestamps.length) customTitleRateLimit.set(uid, remaining)
+
+  // 惰性清理：仅清理当前用户的过期记录（O(1)），避免每次检查遍历整个 Map
+  const userRequests = (customTitleRateLimit.get(userId) || [])
+    .filter(ts => now - ts < CUSTOM_TITLE_RATE_LIMIT_WINDOW)
+
+  // 定期抽样全量清理：分摊 O(n) 成本，按时间节流而非每次触发
+  if (now - lastGlobalRateCleanup > GLOBAL_RATE_CLEANUP_INTERVAL) {
+    lastGlobalRateCleanup = now
+    for (const [uid, timestamps] of customTitleRateLimit) {
+      const remaining = timestamps.filter(ts => now - ts < CUSTOM_TITLE_RATE_LIMIT_WINDOW)
+      if (remaining.length === 0) customTitleRateLimit.delete(uid)
+      else if (remaining.length !== timestamps.length) customTitleRateLimit.set(uid, remaining)
+    }
+    evictMapOverCapacity(customTitleRateLimit, MAX_CUSTOM_TITLE_RATE_ENTRIES)
   }
-  evictMapOverCapacity(customTitleRateLimit, MAX_CUSTOM_TITLE_RATE_ENTRIES)
 
-  const userRequests = customTitleRateLimit.get(userId) || []
-
-  // 清理过期的请求记录
-  const validRequests = userRequests.filter(ts => now - ts < CUSTOM_TITLE_RATE_LIMIT_WINDOW)
-  customTitleRateLimit.set(userId, validRequests)
-
-  if (validRequests.length >= CUSTOM_TITLE_RATE_LIMIT_MAX) {
+  if (userRequests.length >= CUSTOM_TITLE_RATE_LIMIT_MAX) {
+    // 保留清理后的记录，便于后续过期判断
+    customTitleRateLimit.set(userId, userRequests)
     return { ok: false, reason: '次数有点多，不要恶搞哦，15分钟后再试' }
   }
 
   // 记录本次请求
-  validRequests.push(now)
-  customTitleRateLimit.set(userId, validRequests)
+  userRequests.push(now)
+  customTitleRateLimit.set(userId, userRequests)
 
   return { ok: true }
+}
+
+/** 统一群对象解析：三路兜底（pickGroup / getGroup / Group.pick）
+ *  查询层与执行层共用，避免执行层只走单路 pickGroup 导致部分适配器取不到群对象。
+ * @param {string|number} groupId
+ * @returns {object|null}
+ */
+function resolveGroup(groupId) {
+  const bot = global.Bot || global.bot
+  if (!bot || !groupId) return null
+  return bot.pickGroup?.(groupId) || bot.getGroup?.(groupId) || bot.Group?.pick?.(groupId) || null
 }
 
 /** 获取群成员信息（role: owner/admin/member）
@@ -76,7 +95,7 @@ async function getMemberInfo(groupId, userId) {
   try {
     const bot = global.Bot || global.bot
     if (!bot) return null
-    const group = bot.pickGroup?.(groupId) || bot.getGroup?.(groupId) || bot.Group?.pick?.(groupId)
+    const group = resolveGroup(groupId)
     if (!group) return null
 
     // 1) 标准方法
@@ -166,7 +185,7 @@ async function getBotRole(groupId) {
     const bot = global.Bot || global.bot
     const selfId = String(bot?.uin || bot?.self_id || '')
     if (!selfId) return null
-    const group = bot.pickGroup?.(groupId) || bot.getGroup?.(groupId) || bot.Group?.pick?.(groupId)
+    const group = resolveGroup(groupId)
     if (!group) return null
 
     // 0 成本布尔兜底：XRK适配器在 group.is_owner（true/false）上直接给出"机器人是否群主"
@@ -197,7 +216,7 @@ async function getGroupInfo(groupId) {
   try {
     const bot = global.Bot || global.bot
     if (!bot) return null
-    const group = bot.pickGroup?.(groupId) || bot.getGroup?.(groupId) || bot.Group?.pick?.(groupId)
+    const group = resolveGroup(groupId)
     if (!group) return null
 
     let info = null
@@ -288,6 +307,56 @@ async function getGroupInfo(groupId) {
   return null
 }
 
+// ——————————————————————————————————————————————
+// 群信息读取缓存：buildGroupContext / buildIdentityContext 每条群消息会并行触发
+// 3~4 次 API（getBotRole / getMemberInfo×2 / getGroupInfo），无缓存会造成 API 放大。
+// 此处仅对"只读上下文构建"加 45s TTL 缓存；执行层仍走未缓存原函数，保证权限判断实时。
+// ——————————————————————————————————————————————
+const groupApiCache = new Map()        // key -> { value, expireAt }
+const GROUP_API_CACHE_TTL = 45 * 1000  // 45s：兼顾角色变更时效与降频
+const MAX_GROUP_API_CACHE_ENTRIES = 1000
+
+function cacheRead(key) {
+  const e = groupApiCache.get(key)
+  if (!e) return undefined
+  if (Date.now() >= e.expireAt) { groupApiCache.delete(key); return undefined }
+  return e.value
+}
+function cacheWrite(key, value) {
+  if (groupApiCache.size >= MAX_GROUP_API_CACHE_ENTRIES && !groupApiCache.has(key)) {
+    evictMapOverCapacity(groupApiCache, MAX_GROUP_API_CACHE_ENTRIES)
+  }
+  groupApiCache.set(key, { value, expireAt: Date.now() + GROUP_API_CACHE_TTL })
+}
+
+async function getBotRoleCached(groupId) {
+  if (!groupId) return null
+  const key = `r:${groupId}`
+  const hit = cacheRead(key)
+  if (hit !== undefined) return hit
+  const v = await getBotRole(groupId)
+  cacheWrite(key, v)
+  return v
+}
+async function getMemberInfoCached(groupId, userId) {
+  if (!groupId || !userId) return null
+  const key = `m:${groupId}:${userId}`
+  const hit = cacheRead(key)
+  if (hit !== undefined) return hit
+  const v = await getMemberInfo(groupId, userId)
+  cacheWrite(key, v)
+  return v
+}
+async function getGroupInfoCached(groupId) {
+  if (!groupId) return null
+  const key = `g:${groupId}`
+  const hit = cacheRead(key)
+  if (hit !== undefined) return hit
+  const v = await getGroupInfo(groupId)
+  cacheWrite(key, v)
+  return v
+}
+
 /** 角色 → 中文标签 */
 function roleToLabel(role, unknownAsMember = false) {
   if (role === 'owner') return '群主'
@@ -326,9 +395,9 @@ export async function buildIdentityContext(e) {
 
   const botSelf = getBotSelf()
   const [botRoleRaw, requesterInfo, groupInfo] = await Promise.all([
-    getBotRole(groupId),
-    userId ? getMemberInfo(groupId, userId) : null,
-    getGroupInfo(groupId)
+    getBotRoleCached(groupId),
+    userId ? getMemberInfoCached(groupId, userId) : null,
+    getGroupInfoCached(groupId)
   ])
 
   // 发送者角色：0成本优先从事件对象 e.sender.role / permission / group_role 取
@@ -444,10 +513,10 @@ export async function buildGroupContext(e) {
 
   // 并行获取角色信息
   const [botRoleRaw, requesterInfo, targetInfo, groupInfoRaw] = await Promise.all([
-    getBotRole(groupId),
-    userId ? getMemberInfo(groupId, userId) : null,
-    targetUid ? getMemberInfo(groupId, targetUid) : null,
-    getGroupInfo(groupId)
+    getBotRoleCached(groupId),
+    userId ? getMemberInfoCached(groupId, userId) : null,
+    targetUid ? getMemberInfoCached(groupId, targetUid) : null,
+    getGroupInfoCached(groupId)
   ])
   const botRole = botRoleRaw || 'unknown'  // owner/admin/member/unknown
   const requesterRole = _roleOf(requesterInfo) || 'unknown'
@@ -991,8 +1060,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
 
 /** 底层执行函数 */
 async function executeMute(groupId, userId, seconds) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   // 统一 30 天封顶（与 timed_mute 一致）
   const MAX_MUTE_SECONDS = 30 * 24 * 60 * 60
@@ -1003,8 +1071,7 @@ async function executeMute(groupId, userId, seconds) {
 }
 
 async function executeKick(groupId, userId) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.kickMember === 'function') await group.kickMember(userId, false)
   else if (typeof group.kick === 'function') await group.kick(userId, false)
@@ -1012,16 +1079,14 @@ async function executeKick(groupId, userId) {
 }
 
 async function executeSetAdmin(groupId, userId, isAdmin) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setAdmin === 'function') await group.setAdmin(userId, isAdmin)
   else throw new Error('当前适配器不支持设置管理员')
 }
 
 async function executeSetTitle(groupId, userId, title) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setTitle === 'function') await group.setTitle(userId, title)
   else throw new Error('当前适配器不支持设置头衔')
@@ -1029,8 +1094,7 @@ async function executeSetTitle(groupId, userId, title) {
 
 /** 更改群名 */
 async function executeSetGroupName(groupId, name) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setGroupName === 'function') await group.setGroupName(name)
   else if (typeof group.setName === 'function') await group.setName(name)
@@ -1039,8 +1103,7 @@ async function executeSetGroupName(groupId, name) {
 
 /** 全体禁言（开启/关闭） */
 async function executeMuteAll(groupId, enable) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.muteAll === 'function') await group.muteAll(enable)
   else if (typeof group.setMuteAll === 'function') await group.setMuteAll(enable)
@@ -1050,8 +1113,7 @@ async function executeMuteAll(groupId, enable) {
 
 /** 头衔展示管理（开启/关闭） */
 async function executeTitleDisplay(groupId, enable) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setTitleDisplay === 'function') await group.setTitleDisplay(enable)
   else if (typeof group.setAllowTitle === 'function') await group.setAllowTitle(enable)
@@ -1061,8 +1123,7 @@ async function executeTitleDisplay(groupId, enable) {
 
 /** 更改群公告 */
 async function executeSetNotice(groupId, content) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setNotice === 'function') await group.setNotice(content)
   else if (typeof group.setGroupNotice === 'function') await group.setGroupNotice(content)
@@ -1072,8 +1133,7 @@ async function executeSetNotice(groupId, content) {
 
 /** 群搜索方式管理（开启/关闭） */
 async function executeGroupSearch(groupId, enable) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setSearch === 'function') await group.setSearch(enable)
   else if (typeof group.setGroupSearch === 'function') await group.setGroupSearch(enable)
@@ -1083,8 +1143,7 @@ async function executeGroupSearch(groupId, enable) {
 
 /** 黑名单管理（添加/移除） */
 async function executeBlacklist(groupId, userId, action) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (action === 'add') {
     if (typeof group.setBlacklist === 'function') await group.setBlacklist(userId)
@@ -1103,8 +1162,7 @@ async function executeBlacklist(groupId, userId, action) {
 
 /** 自定义头衔（用户只能给自己设置） */
 async function executeCustomTitle(groupId, userId, title) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   if (typeof group.setTitle === 'function') await group.setTitle(userId, title)
   else if (typeof group.setMemberTitle === 'function') await group.setMemberTitle(userId, title)
@@ -1114,8 +1172,7 @@ async function executeCustomTitle(groupId, userId, title) {
 
 /** 等级头衔（根据等级自定义） */
 async function executeLevelTitle(groupId, userId, level, title) {
-  const bot = global.Bot || global.bot
-  const group = bot?.pickGroup?.(groupId)
+  const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
   // 尝试多种适配器方法
   if (typeof group.setLevelTitle === 'function') await group.setLevelTitle(userId, level, title)
