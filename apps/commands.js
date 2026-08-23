@@ -25,6 +25,7 @@ try { svgR = await import('../src/svgRender.js') } catch (_) {}
  */
 function escapeColons(s) {
   return String(s ?? '')
+    .replace(/[\n\r]/g, ' ')           // N3: 先过滤换行/回车，防止注入 action 分隔符
     .replace(/[\[\]:]/g, '')     // 去掉标签分隔符
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')  // 去掉控制字符
     .trim()

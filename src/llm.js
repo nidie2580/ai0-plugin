@@ -111,8 +111,9 @@ export function saveHistory(userId, sessionId, messages) {
       const MAX_HISTORY_BYTES = 512 * 1024
       let trimmedData = data
       if (Buffer.byteLength(data, 'utf-8') > MAX_HISTORY_BYTES) {
-        // 保留最后 contextSize*2 条消息
-        const ctxSize = cfg.get('chat.contextSize', 10)
+        // 保留最后 contextSize*2 条消息（防御式读取：配置缺失/非法时兜底 10，避免 NaN slice）
+        const rawCtx = cfg.get('chat.contextSize', 10)
+        const ctxSize = Number.isFinite(Number(rawCtx)) ? Math.max(1, Math.floor(Number(rawCtx))) : 10
         const keep = latest.slice(-(ctxSize * 2 + 2))
         trimmedData = JSON.stringify(keep, null, 2)
         safeLogger.warn(`[ai0-plugin] 会话历史超过 512KB，已截断至 ${keep.length} 条消息`)
@@ -202,9 +203,11 @@ async function summarizeWithModel(messagesToCompress, opts = {}) {
   ].join('\n')
   const turns = Array.isArray(messagesToCompress) ? messagesToCompress : []
   // B2: user 消息内容包 <untrusted_content> 标签隔离
+  // N1: 转义用户内容中的 < >，防止伪造 </untrusted_content> 提前闭合标签造成注入越界
   const wrappedTurns = turns.map(m => {
     if (m.role === 'user' && typeof m.content === 'string') {
-      return { role: 'user', content: `<untrusted_content>\n${m.content}\n</untrusted_content>` }
+      const safeContent = m.content.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      return { role: 'user', content: `<untrusted_content>\n${safeContent}\n</untrusted_content>` }
     }
     return m
   })
@@ -335,6 +338,11 @@ export async function listAvailableModels({ modelKey = null } = {}) {
   const apiBase = String(m.apiBase || '').trim()
   if (!apiKey || !apiBase) return { ok: false, models: [], error: '未配置 apiBase 或 apiKey' }
   const base = normalizeApiBase(apiBase)
+  // N4: SSRF 校验，禁止探测私有/回环/链路本地地址
+  const chk = await isAllowedOutboundUrl(base).catch(() => null)
+  if (!chk || !chk.ok) {
+    return { ok: false, models: [], error: `apiBase 未通过安全校验（${chk?.reason || '禁止访问私有/回环/链路本地地址'}）` }
+  }
   const modelsUrl = `${base}/models`
   try {
     const resp = await safeAxiosRequest('get', modelsUrl, null, {
