@@ -176,6 +176,108 @@ export function cleanupOldSessions(userId, maxSessions, timeoutMs) {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/*                    上下文压缩（用户提示的自动压缩功能）                      */
+/* -------------------------------------------------------------------------- */
+// 触发阈值：当"非 system 消息"超过 contextSize 的 2.5 倍（默认 contextSize=10 → ≥25 轮开始压缩）
+// 压缩方式：调用模型用"独立的 system 提示 + 上下文"总结成一段压缩摘要，
+// 压缩摘要以 `【上下文压缩包】…` 形式注入历史最前，作为后续对话的"往事记忆"。
+// 为节省 token，只对"中间一段"压缩，保留 head=系统提示块 + tail=最近 contextSize/2 条不变。
+const COMPRESS_TRIGGER_MULT = 2.5
+const COMPRESS_KEEP_TAIL_RATIO = 0.5     // 保留尾部（最近）对话比例
+const COMPRESS_MAX_SUMMARY_LEN = 4000    // 单条压缩摘要长度上限（防模型输出过长回环）
+
+// 上下文压缩专用的极简 LLM 调用（不进历史、不走 saveHistory、不带群/引用上下文）。
+// 失败时返回 null，由上层 fallback 为"纯裁剪"，保证永不阻塞对话主流程。
+async function summarizeWithModel(messagesToCompress, opts = {}) {
+  const sys = [
+    '你是一个严格的对话摘要助手。请阅读下列对话，生成【上下文压缩包】：',
+    '1) 用分点列出：a) 参与对话的人/身份简述  b) 关键事实/约定/决定  c) 未完成的待办事项  d) 用户偏好（语气、风格、是否禁用生图等）',
+    '2) 绝对不要编造信息，不要写"用户问了XX"这种流水账，只保留后续对话还需要用到的事实。',
+    '3) 输出控制在 800 字以内；与对话主题无关的闲聊一律省略。',
+    '4) 第一行必须以 "【上下文压缩包】" 开头，后续用纯中文分点。',
+  ].join('\n')
+  const turns = Array.isArray(messagesToCompress) ? messagesToCompress : []
+  const payload = [{ role: 'system', content: sys }, ...turns].slice(0, 80)   // 上限：防止压 100 条仍然超 128k 上下文
+  try {
+    const res = await chatCompletions(payload, {
+      ...opts,
+      // 摘要一般短小；超过 8192 强制截断避免超长回复
+      overrideMaxTokens: 1024,
+      temperature: 0.15,
+      __skipHistory: true,
+    })
+    if (!res || !res.text) return null
+    let summary = String(res.text).trim()
+    if (!summary) return null
+    if (!summary.startsWith('【上下文压缩包】')) summary = '【上下文压缩包】\n' + summary
+    if (summary.length > COMPRESS_MAX_SUMMARY_LEN) summary = summary.slice(0, COMPRESS_MAX_SUMMARY_LEN) + '\n…（压缩包已截断）'
+    return summary
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 上下文压缩（LLM摘要）失败，回退纯裁剪: ${sanitizeLog(err?.message || err)}`)
+    return null
+  }
+}
+
+/**
+ * 在"发给模型之前"检查消息数是否超阈值，需要压缩时执行：
+ *   history 结构约定：
+ *     head: 若干连续的 role === 'system' 消息（配置提示词/群操作/图片上下文）→ 全程保留
+ *     body: 之后的 user/assistant 对话轮 → 超过阈值才参与压缩
+ *   返回值：{ history, compressed: bool }
+ *   - 如果无需压缩或压缩失败但 fallback 裁剪成功，返回裁剪后的 history；
+ *   - compressed=true 表示已写入一条新的压缩摘要 system 消息并替换了中间对话。
+ */
+export async function compressHistoryIfNeeded(history, { contextSize = 10, extra = {} } = {}) {
+  if (!Array.isArray(history)) return { history: [], compressed: false }
+  // 1. 拆出 system head 和对话正文
+  let idx = 0
+  while (idx < history.length && history[idx]?.role === 'system') idx++
+  const sysHead = history.slice(0, idx)
+  const dialog = history.slice(idx)
+  const threshold = Math.max(8, Math.round(contextSize * COMPRESS_TRIGGER_MULT))
+  if (dialog.length < threshold) return { history, compressed: false }
+
+  // 2. 决定保留尾部最近多少条 + 需要压缩的中间段
+  const tailKeep = Math.max(4, Math.round(contextSize * COMPRESS_KEEP_TAIL_RATIO))
+  let compressEnd = dialog.length - tailKeep
+  // 若起点处有压缩包，则把旧压缩包也纳入本轮重新压缩（避免多个压缩包叠成噪声）
+  let compressStart = 0
+  while (compressStart < compressEnd &&
+         dialog[compressStart]?.role === 'system' &&
+         /^【上下文压缩包】/.test(String(dialog[compressStart]?.content || ''))) {
+    compressStart++
+  }
+  const toCompress = dialog.slice(compressStart, compressEnd)
+  // 少于 4 条无需压缩（纯裁剪就够了）
+  if (toCompress.length < 4) {
+    const trimmed = [...sysHead, ...dialog.slice(-Math.max(contextSize, 6))]
+    return { history: trimmed, compressed: false }
+  }
+
+  // 3. 尝试 LLM 压缩；失败时退回纯裁剪（至少不把超长上下文继续喂给模型）
+  let compressed = false
+  let summaryText = null
+  try {
+    summaryText = await summarizeWithModel(toCompress, extra)
+  } catch (_) { summaryText = null }
+  if (summaryText) {
+    const summaryMsg = { role: 'system', content: summaryText }
+    const newDialog = [
+      ...dialog.slice(0, compressStart),  // 保留"之前的压缩包"也可以，不过上面 while 已经跳过
+      summaryMsg,
+      ...dialog.slice(compressEnd),
+    ]
+    safeLogger.info(`[ai0-plugin] 上下文压缩完成：压缩 ${toCompress.length} 条 → 1 条压缩包（当前对话窗口 ${sysHead.length + newDialog.length} 条）`)
+    compressed = true
+    return { history: [...sysHead, ...newDialog], compressed }
+  }
+  // 降级：裁剪至最近 contextSize 条
+  safeLogger.warn(`[ai0-plugin] 上下文压缩降级：裁剪 ${dialog.length} → ${contextSize} 条`)
+  const fallback = [...sysHead, ...dialog.slice(-contextSize)]
+  return { history: fallback, compressed: false }
+}
+
 // ====== 通用 URL / 请求规范化（normalizeApiBase 已提取到 helper.js） ======
 
 export function buildEndpoint(base, pathSegment = '/chat/completions') {
@@ -272,7 +374,9 @@ export async function probeModelConnection({ modelKey = null } = {}) {
 
 export async function chatCompletions(messages, {
   modelKey = null,
-  signal = null
+  signal = null,
+  overrideMaxTokens = null,
+  temperature = null,
 } = {}) {
   const config = cfg.loadConfig()
   const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
@@ -297,11 +401,18 @@ export async function chatCompletions(messages, {
   }
 
   const model = String(m.model || 'gpt-3.5-turbo').trim() || 'gpt-3.5-turbo'
+  // 支持上下文压缩场景覆盖 max_tokens / temperature
+  const effMaxTokens = Number.isFinite(overrideMaxTokens) && overrideMaxTokens > 0
+    ? Math.min(overrideMaxTokens, Number(m.maxTokens) || 32768)
+    : (m.maxTokens ?? 2000)
+  const effTemp = Number.isFinite(temperature)
+    ? Math.max(0, Math.min(2, temperature))
+    : (m.temperature ?? 0.8)
   const body = {
     model,
     messages,
-    temperature: m.temperature ?? 0.8,
-    max_tokens: m.maxTokens ?? 2000
+    temperature: effTemp,
+    max_tokens: effMaxTokens
   }
 
   if (typeof logger !== 'undefined') {

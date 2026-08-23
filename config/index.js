@@ -217,12 +217,14 @@ web:
 `
 
 if (!fs.existsSync(DEFAULT_CONFIG)) {
-  fs.writeFileSync(DEFAULT_CONFIG, defaultConfigContent, 'utf-8')
+  fs.writeFileSync(DEFAULT_CONFIG, defaultConfigContent, { encoding: 'utf-8', mode: 0o600 })
+  try { fs.chmodSync(DEFAULT_CONFIG, 0o600) } catch (_) {}
 }
 // config.yaml 是用户本地配置：首次不存在才初始化一份默认值，后续绝不写入仓库，避免 git pull/强制覆盖 把用户配置洗掉
 if (!fs.existsSync(USER_CONFIG)) {
   try {
-    fs.writeFileSync(USER_CONFIG, defaultConfigContent, 'utf-8')
+    fs.writeFileSync(USER_CONFIG, defaultConfigContent, { encoding: 'utf-8', mode: 0o600 })
+    try { fs.chmodSync(USER_CONFIG, 0o600) } catch (_) {}
   } catch (err) {
     console.error('[ai0-plugin] 初始化 config.yaml 失败：', err.message)
   }

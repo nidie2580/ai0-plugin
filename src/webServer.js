@@ -229,7 +229,9 @@ export function createApp() {
   // 绕过代理直连端口时可伪造 XFF 头绕过 IP 绑定/限速。可信来源 = 回环地址 + web.trustedProxies
   // 配置的代理网段（支持 CIDR / 单 IP）。默认只信任本机（127.0.0.1 / ::1），即反代部署在同一台机器。
   function getClientIp(req) {
-    const trustProxy = cfg.get('web.trustProxy', false)
+    // P3-1: trustProxy 强制严格布尔。防止 YAML/前端传入字符串 "false"（truthy）
+    //       导致直连时仍采信 XFF 头，绕过 IP 限速 / 绑定。
+    const trustProxy = cfg.get('web.trustProxy', false) === true
     const socketIp = req.socket?.remoteAddress || req.ip || 'unknown'
     const canTrustXff = trustProxy && isTrustedProxy(socketIp)
     let ip = socketIp
@@ -594,7 +596,9 @@ export function createApp() {
       }
       // — P0(三轮严审) + P0 补强: web.host 白名单 + 通配时强制 trustProxy —
       if (w.host != null) {
-        const trustProxy = cfg.get('web.trustProxy', false)
+        // P3-1: trustProxy 强制严格布尔 === true。防止 YAML/前端传入字符串 "false"（truthy）
+        //       在 host=0.0.0.0 / :: 时被误判为"信任代理"，放行未配置 trustProxy 的部署。
+        const trustProxy = cfg.get('web.trustProxy', false) === true
         const r = validateWebHost(w.host, trustProxy)
         if (!r.ok) return res.json(r)
       }
@@ -910,7 +914,7 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
         lines.push(`    · 公网暴露强烈建议套反代（Nginx/Caddy）+ HTTPS，并在插件配置 web.trustProxy=true 以读取真实 IP；`)
         lines.push(`    · 主人专属免登录链接（有效期10分钟）仅发私聊，请勿转发到公开群/频道；`)
         lines.push(`    · 默认验证码仅终端可查看，但已开启速率限制（每IP 60秒最多10次）+ 单ID错误5次即作废。`)
-        if (!cfg.get('web.trustProxy', false)) {
+        if (cfg.get('web.trustProxy', false) !== true) {
           lines.push(`  ⚠️ Magic Link 绑定 IP 功能：未开启 trustProxy 时，所有请求 IP 相同，链接可被转发使用。建议配置 web.trustProxy=true`)
         }
       }

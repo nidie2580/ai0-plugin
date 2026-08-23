@@ -12,6 +12,15 @@ const inflightChat = new Map()   // key=`${userId}/${sessionId}` → { controlle
 // 防内存泄漏：Map 总容量上限；超出时随机丢弃最旧条目
 const MAX_INFLIGHT = 500
 const MAX_USER_SESSION_MAP = 2000
+// system.prompt 在 config.yaml 中完全未定义时退回的默认提示词（与 config/default_config.yaml 一致）。
+// 仅用于：旧配置 / 配置损坏 / 第一次运行还没生成 config.yaml 的兜底。
+const DEFAULT_SYSTEM_PROMPT = [
+  '你是一个友善、乐于助人的AI助手，正在通过QQ机器人与用户交流。',
+  '请用简洁、自然的中文回答用户的问题。',
+  '- 如果涉及违规/违法/敏感内容，请直接拒绝回答。',
+  '- 保持礼貌，适度使用颜文字和emoji。',
+  '- 不要主动透露你是基于什么模型运行的。',
+].join('\n')
 function pruneMapToSize(map, max) {
   if (map.size <= max) return
   // Map.keys() 返回按插入顺序，直接删最早的一批
@@ -382,7 +391,13 @@ export async function handleChat(e) {
   }
 
   const contextSize = cfg.get('chat.contextSize', 10)
-  const sysPrompt = cfg.get('system.prompt', '')
+  // P3-6: 区分 system.prompt === undefined（不存在此项 → 用 DEFAULT）
+  //       与 system.prompt === ''（用户显式写 prompt: | 空串 → 真的不要系统提示）。
+  //       之前 `cfg.get(..., defaultVal)` 把空串当作 falsy 退回默认值，导致用户关不掉系统提示。
+  const rawCfg = cfg.loadConfig()
+  const sysPrompt = (rawCfg.system && rawCfg.system.prompt !== undefined)
+    ? String(rawCfg.system.prompt)
+    : (DEFAULT_SYSTEM_PROMPT)
   const sessionId = getCurrentSession(userId)
 
   const maxSessions = cfg.get('chat.maxSessionsPerUser', 3)
@@ -401,6 +416,8 @@ export async function handleChat(e) {
   const modelNameCfg = modelCfg?.[defaultKey]?.name || modelCfg?.[defaultKey]?.model || 'AI'
 
   let history = llm.loadHistory(userId, sessionId)
+  // P3-6：sysPrompt === ''（用户显式清空）时，也"不要"在开头补默认 sys 行。
+  //       只有非空 system.prompt 才作为"用户配置的主系统提示"注入。
   if (sysPrompt && (!history.length || history[0].role !== 'system')) {
     history = [{ role: 'system', content: sysPrompt }, ...history]
   }
@@ -456,6 +473,22 @@ export async function handleChat(e) {
     }
     const rest = history.slice(idx)
     history = [...sys, ...rest.slice(-(contextSize * 2 + 2))]
+  }
+
+  // —— 上下文自动压缩（用户人工需求：上下文过多时启动压缩） ——
+  //   1) 对"非 system 的对话轮"计数，超过 contextSize * 2.5 倍时开始压缩；
+  //   2) compressHistoryIfNeeded 内部会调用模型生成"【上下文压缩包】"system 消息，
+  //      替换掉中间一整段旧对话；失败则降级为纯裁剪；
+  //   3) 只要结构变化（compressed=true 或压缩失败被裁剪过），立刻把压缩后的
+  //      history 写回会话历史文件，下次发送就从"更短"的基线起步，避免每次都重新裁。
+  try {
+    const comp = await llm.compressHistoryIfNeeded(history, { contextSize })
+    history = comp.history
+    if (comp.compressed) {
+      llm.saveHistory(userId, sessionId, history)
+    }
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 上下文压缩前置检查异常（忽略，继续正常发送）: ${err?.message || err}`)
   }
 
   let replyText = ''

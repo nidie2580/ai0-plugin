@@ -195,6 +195,7 @@ function loadSessions() {
 function await_import_global_error_only() { return { safeLogger: (...a) => console.error(...a), sanitizeLog: x => String(x ?? '') } }
 
 let saveTimer = null
+let lastSaveSucceeded = true
 function saveSessions() {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 })
@@ -202,13 +203,33 @@ function saveSessions() {
       tokens: Array.from(tokens.entries()),
       magicLinks: Array.from(MAGIC_LINKS.entries()),
     }
-    // 若密钥生成失败，退化为明文 JSON 也不阻塞服务（权限 0o600 仍在）
-    const out = encryptJson(payload) || payload
+    // P2-2: 密钥无法加载/加密失败时 **绝不** 退化为明文，防止 API Key/会话在用户不知情下泄漏。
+    // 仅记录 ERROR；用户看到登录"突然失效"或 #ai诊断 时能发现 sessions.key 权限/损坏问题。
+    const out = encryptJson(payload)
+    if (!out) {
+      const msg = '[ai0-plugin] 会话加密失败（sessions.key 权限/磁盘异常？），已拒绝明文落盘。请修复 data/sessions.key 后重启。'
+      try {
+        const { safeLogger } = await_import_global_error_only()
+        safeLogger.error?.(msg)
+      } catch (_) { console.error(msg) }
+      // 仅在第一次失败时报警；后续持续失败也不刷屏（保留一个 flag 便于 #ai诊断 暴露）
+      if (lastSaveSucceeded) { lastSaveSucceeded = false; try { process.emitWarning?.(msg) } catch (_) {} }
+      return false
+    }
+    lastSaveSucceeded = true
     // 临时文件 + rename，保证原子写（断电/崩溃不会留下半写的 JSON）
     const tmp = SESSION_FILE + '.tmp'
     fs.writeFileSync(tmp, JSON.stringify(out), { mode: 0o600 })
     fs.renameSync(tmp, SESSION_FILE)
-  } catch (_) { /* 持久化失败不影响前台服务；下次重试 */ }
+    return true
+  } catch (err) {
+    const msg = `[ai0-plugin] 会话持久化写入失败: ${String(err?.message || err)}`
+    try {
+      const { safeLogger } = await_import_global_error_only()
+      safeLogger.error?.(msg)
+    } catch (_) { console.error(msg) }
+    return false
+  }
 }
 
 // 启动时加载（在 cleanup timer 前执行，首次 cleanup 会立刻剔除过期/超限）

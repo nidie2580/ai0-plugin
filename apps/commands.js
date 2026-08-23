@@ -355,9 +355,14 @@ export class AICommands extends plugin {
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
     }
-    const match = helper.getMessageText(this.e).match(/^#ai添加主人\s+(\d+)/)
+    const text = helper.getMessageText(this.e)
+    const match = text.match(/^#ai添加主人\s+(\d+)/)
     if (!match) return this.e.reply('用法：#ai添加主人 <QQ号>')
+    // P3-2: QQ 号格式校验（5-20 位纯数字），防止 push "abc"、空串、超长数字等脏数据
     const newMaster = match[1]
+    if (!/^\d{5,20}$/.test(newMaster)) {
+      return this.e.reply(`❌ QQ号格式不合法：应为 5-20 位纯数字（收到 ${newMaster.length} 位）`)
+    }
     const config = cfg.loadConfig()
     if (!config.permissions) config.permissions = {}
     if (!Array.isArray(config.permissions.masters)) config.permissions.masters = []

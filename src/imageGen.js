@@ -147,8 +147,28 @@ export async function generateImage(prompt, opts = {}) {
     return { ok: false, error: check.reason || 'apiBase URL 未通过安全校验（禁止访问私有/回环/链路本地地址）' }
   }
   const model = opts.model || modelBase || 'dall-e-3'
-  const size = opts.size || ic.defaultSize || '1024x1024'
-  const quality = opts.quality || ic.quality || 'standard'
+  // P3-7: size / quality 白名单校验。防止注入"9999x9999"、"hdXSS"等异常值被外部厂商拒绝浪费请求。
+  //       主流 DALL·E 兼容厂商的通用合法尺寸：256/512/1024 正方形、以及 1792x1024 / 1024x1792；
+  //       白名单中额外加入一些常见宽高比，兼容国内厂商（含方、横、竖版）。
+  const rawSize = String(opts.size || ic.defaultSize || '1024x1024').toLowerCase().trim()
+  const ALLOWED_SIZES = new Set([
+    '256x256', '512x512', '768x768',
+    '1024x1024', '1152x896', '896x1152',
+    '1344x768', '768x1344', '1365x1024', '1024x1365',
+    '1536x1024', '1024x1536',
+    '1792x1024', '1024x1792',
+    '2048x2048',
+  ])
+  if (!ALLOWED_SIZES.has(rawSize)) {
+    return { ok: false, error: `非法图片尺寸：${rawSize}（允许的值：${Array.from(ALLOWED_SIZES).join(', ')}）` }
+  }
+  const size = rawSize
+  const rawQuality = String(opts.quality || ic.quality || 'standard').toLowerCase().trim()
+  const ALLOWED_QUALITY = new Set(['standard', 'hd'])
+  if (!ALLOWED_QUALITY.has(rawQuality)) {
+    return { ok: false, error: `非法 quality：${rawQuality}（仅允许 standard / hd）` }
+  }
+  const quality = rawQuality
   const n = 1
   const timeout = opts.timeout || ic.timeout || 120000
 
