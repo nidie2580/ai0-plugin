@@ -1125,9 +1125,12 @@ async function executeTitleDisplay(groupId, enable) {
 async function executeSetNotice(groupId, content) {
   const group = resolveGroup(groupId)
   if (!group) throw new Error('无法获取群信息')
-  if (typeof group.setNotice === 'function') await group.setNotice(content)
-  else if (typeof group.setGroupNotice === 'function') await group.setGroupNotice(content)
-  else if (typeof group.setAnnouncement === 'function') await group.setAnnouncement(content)
+  // C3: 钳制公告长度上限（QQ 平台本身也有长度限制，超长会整段被拒，截断更可控）
+  const MAX_NOTICE_LEN = 1000
+  const notice = String(content ?? '').slice(0, MAX_NOTICE_LEN)
+  if (typeof group.setNotice === 'function') await group.setNotice(notice)
+  else if (typeof group.setGroupNotice === 'function') await group.setGroupNotice(notice)
+  else if (typeof group.setAnnouncement === 'function') await group.setAnnouncement(notice)
   else throw new Error('当前适配器不支持修改群公告')
 }
 

@@ -956,8 +956,7 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
         }
       }
       const msg = lines.join('\n')
-      if (typeof logger !== 'undefined') logger.info(msg)
-      else console.log(msg)
+      safeLogger.info(msg)
       resolve({ ok: true, ...info, already: false })
     }
 
@@ -977,8 +976,7 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
           // EADDRINUSE → 允许时自动尝试下一个端口
           if (String(code) === 'EADDRINUSE' && allowScan && p < scanEndPort) {
             const warn = `[ai0-plugin] 端口 ${p} 已占用，自动尝试下一个端口...`
-            if (typeof logger !== 'undefined') logger.warn(warn)
-            else console.warn(warn)
+            safeLogger.warn(warn)
             try { serverInstance.removeAllListeners(); serverInstance.close?.() } catch (_) {}
             serverInstance = null
             p += 1
