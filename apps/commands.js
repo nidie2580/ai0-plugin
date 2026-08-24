@@ -7,6 +7,7 @@ import * as groupOps from '../src/groupOps.js'
 import * as llm from '../src/llm.js'
 import { safeLogger } from '../src/globals.js'
 import { isAllowedOutboundUrl } from '../src/security.js'
+import * as agent from '../src/agent.js'
 
 let svgR = null
 try { svgR = await import('../src/svgRender.js') } catch (_) {}
@@ -165,6 +166,17 @@ export class AICommands extends plugin {
         {
           reg: '^#ai(解除拉黑|取消拉黑|解黑)\\s+(\\d{5,12})$',
           fnc: 'blacklistRemove',
+          permission: 'master'
+        },
+        // —— Agent 能力（AI 在受控沙箱工作区执行命令完成任务，仅主人）——
+        {
+          reg: '^#ai agent\\s+([\\s\\S]+)$',
+          fnc: 'agentTask',
+          permission: 'master'
+        },
+        {
+          reg: '^#ai(agent|任务)$',
+          fnc: 'agentHelp',
           permission: 'master'
         }
       ]
@@ -1487,5 +1499,50 @@ export class AICommands extends plugin {
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`解除拉黑失败：${r.results[0].msg}`)
     return e.reply(ok ? `已解除拉黑 QQ: ${match[2]}` : '解除拉黑失败')
+  }
+
+  async agentHelp() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    return this.e.reply(
+      '用法：#ai agent <任务描述>\n' +
+      '示例：#ai agent 在 workspace 里用 python 写一个计算斐波那契数列的脚本并运行\n' +
+      '说明：AI 会在受控沙箱工作区中执行命令完成任务（仅主人可用）。'
+    )
+  }
+
+  async agentTask() {
+    if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
+    const e = this.e
+    const userId = helper.getUserId(e)
+    if (!helper.isMaster(userId, e)) return e.reply('❌ 此命令仅主人可用（请联系机器人主人确认权限）')
+    if (cfg.get('agent.enabled', false) !== true) {
+      return e.reply('❌ Agent 功能未启用。请在 config/config.yaml 中设置 agent.enabled: true')
+    }
+    const task = helper.getMessageText(e).replace(/^#ai agent\s+/, '').trim()
+    if (!task) return e.reply('用法：#ai agent <任务描述>')
+
+    // 先回占位提示，避免长时间等待无反馈
+    await e.reply('开始执行 Agent 任务，请稍候…（可在日志中查看进度）')
+    let result
+    try {
+      result = await agent.runAgentLoop({ task })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] Agent 任务执行异常: ${err?.message || err}`)
+      return e.reply(`❌ Agent 任务执行异常：${err?.message || err}`)
+    }
+
+    const cmdLog = result.logs.length
+      ? result.logs.map(l =>
+          `${l.ok ? '✅' : '❌'} ${l.cmd}${typeof l.costMs === 'number' ? `（${l.costMs}ms）` : ''}${l.reason ? ` - ${l.reason}` : ''}`
+        ).join('\n')
+      : '（未执行任何命令）'
+    const reply = [
+      `${result.done ? '✅' : '⚠️'} Agent 任务结束（执行 ${result.rounds} 轮）：`,
+      '',
+      result.finalText,
+      '',
+      `已执行命令：\n${cmdLog}`
+    ].join('\n')
+    return e.reply(reply.slice(0, 3000))
   }
 }

@@ -812,10 +812,15 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
 
   if (!matches.length) return { cleanText: replyText, results }
 
+  // 非群操作指令：交由其它解析器处理（如 [action:image:...]、[action:agent:...]）。
+  // 必须在"移除指令"前先跳过，否则会被当成群操作吞掉并误报"目标QQ号格式无效"（BUG-1）
+  const NON_GROUP_ACTIONS = new Set(['image', 'agent'])
+
   // 移除操作指令，得到干净文本
   // C1: 使用 replaceAll 防止 AI 回复含两处相同 [action:...] 时只替换第一处，导致指令透出到回复
   let cleanText = replyText
   for (const match of matches) {
+    if (NON_GROUP_ACTIONS.has(match.type)) continue
     cleanText = cleanText.replaceAll(match.full, '').trim()
   }
 
@@ -849,6 +854,8 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
   for (const match of matches) {
     const { type, args } = match
     try {
+      // 非群操作指令跳过，不报错也不清除文本（交由其它解析器）
+      if (NON_GROUP_ACTIONS.has(type)) continue
       const isTargetless = TARGETLESS_OPS.has(type)
       // 无目标操作：targetUid 置 null，跳过目标保护检查（避免 getMemberInfo 查 '1'/'0'/'新群名' 等假值导致 fail-closed 拒绝）
       const targetUid = isTargetless ? null : args[0]

@@ -5,6 +5,7 @@ import * as helper from './helper.js'
 import * as groupOps from './groupOps.js'
 import { safeLogger } from './globals.js'
 import * as imageGen from './imageGen.js'
+import * as agent from './agent.js'
 
 const userSession = new Map()
 // 按用户+会话维度记录正在飞的请求，新请求进来时取消旧的（防"先发后到"串上下文）
@@ -469,8 +470,18 @@ export async function handleChat(e) {
     safeLogger.warn(`[ai0-plugin] 构建图片上下文失败: ${err.message}`)
   }
 
+  // 注入 Agent 能力上下文（仅主人会话且启用时；命令执行权限高，非主人一律不注入）
+  let agentContext = null
+  try {
+    if (cfg.get('agent.enabled', false) && helper.isMaster(userId, e)) {
+      agentContext = agent.buildAgentContext()
+    }
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 构建 agent 上下文失败: ${err.message}`)
+  }
+
   // 合并所有上下文到 system prompt（身份信息放最前面，让 AI 优先记住真实数据）
-  const extraContext = [identityContext, groupContext, imageContext].filter(Boolean).join('\n\n')
+  const extraContext = [identityContext, groupContext, imageContext, agentContext].filter(Boolean).join('\n\n')
   const finalSysPrompt = extraContext ? sysPrompt + '\n\n' + extraContext : sysPrompt
 
   // 注入引用消息 + 合并转发 + 发件人标签
@@ -607,6 +618,25 @@ export async function handleChat(e) {
         }
       } catch (err) {
         safeLogger.error(`[ai0-plugin] 图片生成执行异常: ${err.message}`)
+      }
+    }
+
+    // 解析 Agent 命令指令并多轮循环执行（仅主人会话且已注入 agent 上下文时）
+    if (agentContext && /\[action:agent:/i.test(replyText)) {
+      try {
+        const agentLoop = await agent.continueAgentInHistory({
+          history,
+          assistantText: historyText,
+          modelKey: defaultKey,
+          signal: ac.signal
+        })
+        historyText = agentLoop.finalText
+        replyText = agentLoop.finalText
+        if (agentLoop.logs.length) {
+          safeLogger.info(`[ai0-plugin] Agent 执行 ${agentLoop.logs.length} 条命令，完成=${agentLoop.done}`)
+        }
+      } catch (err) {
+        safeLogger.error(`[ai0-plugin] Agent 执行异常: ${err.message}`)
       }
     }
 

@@ -9,6 +9,8 @@ data/sessions.json
 data/sessions.json.tmp
 data/sessions.key
 data/sessions.key.tmp
+# Agent 沙箱运行时数据（AI 工作产物，运行时生成）
+agent/
 *.log
 .env
 .env.local

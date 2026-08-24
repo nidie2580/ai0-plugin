@@ -103,6 +103,21 @@ imageGen:
   # 生成超时（毫秒）
   timeout: 120000
 
+# Agent 能力设置（AI 在受控沙箱工作区执行命令完成任务，仅主人可触发）
+agent:
+  # 是否启用 Agent 能力
+  enabled: false
+  # 仅允许主人（permissions.masters）触发。命令执行权限较高，默认仅主人
+  masterOnly: true
+  # 单次任务最大执行轮数（AI 出命令→执行→回传 为一轮，上限 20）
+  maxRounds: 8
+  # 单条命令超时（毫秒）
+  commandTimeout: 30000
+  # 额外允许的命令（追加白名单，如：gcc、make）
+  extraAllowedCommands: []
+  # 额外禁止的命令（追加黑名单，正则表达式，如：["gcc"]）
+  extraDeniedPatterns: []
+
 # 系统提示词
 system:
   prompt: |
