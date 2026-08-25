@@ -31,15 +31,16 @@ const DEFAULT_ALLOWED = new Set([
   // 基本文件/目录/文本
   'ls', 'cat', 'head', 'tail', 'wc', 'echo', 'printf', 'pwd', 'whoami', 'date',
   'grep', 'find', 'which', 'tree', 'stat', 'file', 'du', 'df', 'sort', 'uniq',
-  'cut', 'tr', 'sed', 'awk', 'xargs', 'basename', 'dirname', 'realpath', 'readlink',
+  'cut', 'tr', 'sed', 'awk', 'basename', 'dirname', 'realpath', 'readlink',
   'diff', 'cmp',
   // 文件操作（rm 受黑名单限制：禁止 -r/-f）
   'mkdir', 'touch', 'cp', 'mv', 'rm', 'ln', 'tar', 'unzip', 'zip', 'gzip', 'gunzip', 'chmod',
   // 网络/网页访问
   'curl', 'wget',
-  // 开发工具
-  'git', 'node', 'npm', 'npx', 'python', 'python3', 'pip', 'pip3', 'yarn', 'pnpm',
-  'rg', 'fd', 'jq',
+  // 开发工具（注意：node/python/npm/npx 等解释器可执行任意代码、读写任意文件、
+  // 发起任意网络请求，会完全绕过下方白名单/黑名单/路径黑名单，故默认不开放。
+  // 如确有需要，管理员用 agent.extraAllowedCommands 显式开启并自担风险）
+  'git', 'rg', 'fd', 'jq',
   // 只读系统信息
   'ps', 'free', 'uname', 'hostname', 'uptime', 'lsblk'
 ])
@@ -74,6 +75,13 @@ const DEFAULT_DENY = [
   /\$\(/, /\$\{/, /`/,
   // TLS/证书工具（openssl 常用于窃取/私钥操作，禁止）
   /\bopenssl\b/,
+  // —— 绕过白名单的"子进程派生/破坏性"原语：允许命令会再拉起重定向到非白名单程序，或批量删除 ——
+  /(?:^|[\s;|&])find\b[^|]*\s+-(?:exec|execdir|delete|ok|okdir)\b/,  // find -exec/-delete/-ok 执行任意程序或批量删除
+  /(?:^|[\s;|&])tar\b[^|]*\s+--to-command\b/,                         // tar --to-command 执行任意程序
+  // —— 越界读取/写入系统目录（工作区 confined，显式绝对系统路径一律拒绝；避免误伤 URL 中的 /lib/ 等路径） ——
+  /(?:^|\s)\/(?:etc|root|usr|bin|sbin|lib|boot|var)\//,
+  // —— 敏感凭据文件（防读取系统/用户私钥与密钥） ——
+  /(?:\.ssh\/|\.aws\/|\.kube\/|\.m2\/settings\.xml|\/\.npmrc|\.git-credentials|id_rsa|id_ed25519|\.bash_history)/,
 ]
 
 /**
@@ -199,7 +207,7 @@ const WORKSPACE_FILES = {
 
 ## 可用命令
 - 文件与目录：ls cat head tail wc grep find sed awk sort uniq cut mkdir touch cp mv rm tar unzip zip diff file stat du
-- 开发工具：git node npm npx python3 pip3 yarn pnpm jq
+- 开发工具：git jq（node/python/npm 等解释器默认禁用，如确需由管理员在 extraAllowedCommands 开启）
 - 网络：curl wget（禁止管道到 shell 执行）
 - 其他：echo printf pwd whoami date which ps free tree rg fd
 
@@ -277,7 +285,7 @@ export function buildAgentContext() {
     '需要执行命令时，在回复中输出：[action:agent:命令]。',
     '命令执行结果会作为后续上下文返回，你可以根据结果继续操作，直到任务完成。',
     `单次任务最多执行 ${maxRounds} 轮命令，完成后输出最终成果总结。`,
-    '支持 git / curl / wget / node / npm / python3 / ls / cat / grep / find / sed / awk / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令。',
+    '支持 git / curl / wget / ls / cat / grep / find / sed / awk / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令（node/python 等解释器默认禁用）。',
     '禁止 sudo / shutdown / reboot / mkfs / mount / chown / ssh / scp / nc / chmod（除+x）/ 命令替换 / 写入系统目录等危险操作。'
   ].join('\n')
 }
@@ -383,7 +391,8 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
     const r = await runCommand(cmd)
     logs.push({ cmd, ok: r.ok, code: r.code, timedOut: r.timedOut, costMs: r.costMs, output: r.detail })
     messages.push({ role: 'assistant', content: text })
-    messages.push({ role: 'system', content: `【命令执行结果】\n${formatResult(r)}` })
+    // 命令输出来自不可信的外部环境（可能反射文件内容），以 user 身份 + untrusted 边界注入，防止其内容以 system 权重劫持后续指令
+    messages.push({ role: 'user', content: `<command_output>\n${formatResult(r)}\n</command_output>` })
   }
 
   finalText = `已达最大执行轮数（${rounds}），任务未完全完成。已执行的命令与结果见上。`
@@ -445,7 +454,8 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
     } else {
       const r = await runCommand(cmd)
       logs.push({ cmd, ok: r.ok, code: r.code, costMs: r.costMs, output: r.detail })
-      messages.push({ role: 'system', content: `【命令执行结果】\n${formatResult(r)}` })
+      // 同上：命令输出为不可信内容，以 user 身份 + untrusted 边界注入，避免其内容以 system 权重劫持后续指令
+      messages.push({ role: 'user', content: `<command_output>\n${formatResult(r)}\n</command_output>` })
     }
     executed++
     const next = await roundTrip()

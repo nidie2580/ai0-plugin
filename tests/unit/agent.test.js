@@ -24,8 +24,6 @@ describe('agent: checkCommand 白名单放行', () => {
     assert.equal(checkCommand('git status').ok, true)
     assert.equal(checkCommand('git log --oneline -5').ok, true)
     assert.equal(checkCommand('curl -s https://example.com').ok, true)
-    assert.equal(checkCommand('node -v').ok, true)
-    assert.equal(checkCommand('python3 -c "print(1)"').ok, true)
     assert.equal(checkCommand('mkdir -p src/test').ok, true)
     assert.equal(checkCommand('cat ./file.txt').ok, true)
     assert.equal(checkCommand('grep foo -r ./src').ok, true)
@@ -116,6 +114,18 @@ describe('agent: checkCommand 危险命令拒绝', () => {
     assert.equal(checkCommand('gcc --version').ok, false)
     assert.equal(checkCommand('make all').ok, false)
     assert.equal(checkCommand('nmap -sP 127.0.0.1').ok, false)
+  })
+
+  test('解释器默认拒绝（可任意代码执行，绕过黑白名单）', () => {
+    assert.equal(checkCommand('node -v').ok, false)
+    assert.equal(checkCommand('node -e "process.exit(1)"').ok, false)
+    assert.equal(checkCommand('npm install').ok, false)
+    assert.equal(checkCommand('npx cowsay hi').ok, false)
+    assert.equal(checkCommand('python3 script.py').ok, false)
+    assert.equal(checkCommand('python -c "print(1)"').ok, false)
+    assert.equal(checkCommand('pip install requests').ok, false)
+    assert.equal(checkCommand("python3 -c 'import os; os.system(id)'").ok, false)
+    assert.equal(checkCommand('find . -delete').ok, false)
   })
 
   test('交互式编辑器', () => {

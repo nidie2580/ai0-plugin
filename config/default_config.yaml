@@ -105,8 +105,9 @@ imageGen:
 
 # Agent 能力设置（AI 在受控沙箱工作区执行命令完成任务，仅主人可触发）
 agent:
-  # 是否启用 Agent 能力
-  enabled: false
+  # 是否启用 Agent 能力。默认开，主人会话可获得带 curl/wget 的网络访问能力；
+  # 非主人一律不注入上下文（masterOnly 门控），因此对非主人无暴露
+  enabled: true
   # 仅允许主人（permissions.masters）触发。命令执行权限较高，默认仅主人
   masterOnly: true
   # 单次任务最大执行轮数（AI 出命令→执行→回传 为一轮，上限 20）

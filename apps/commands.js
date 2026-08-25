@@ -1505,8 +1505,8 @@ export class AICommands extends plugin {
     if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     return this.e.reply(
       '用法：#ai agent <任务描述>\n' +
-      '示例：#ai agent 在 workspace 里用 python 写一个计算斐波那契数列的脚本并运行\n' +
-      '说明：AI 会在受控沙箱工作区中执行命令完成任务（仅主人可用）。'
+      '示例：#ai agent 用 git 在 workspace 里初始化一个仓库并提交一轮变更\n' +
+      '说明：AI 会在受控沙箱工作区中执行命令完成任务（仅主人可用，node/python 等解释器默认禁用）。'
     )
   }
 
