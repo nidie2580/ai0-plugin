@@ -166,6 +166,8 @@ agent:
   maxRounds: 8
   # 单条命令超时（毫秒）
   commandTimeout: 30000
+  # 两次 LLM 调用之间的最小间隔（毫秒）：多轮循环连续调用间隔过短会触发上游速率限制，可按需调大
+  callIntervalMs: 1000
   # 额外允许的命令（追加白名单，如：gcc、make）
   extraAllowedCommands: []
   # 额外禁止的命令（追加黑名单，正则表达式，如：["gcc"]）

@@ -573,7 +573,7 @@ export function createApp() {
 
     // — P0-2: 白名单校验顶层字段 —
     const ALLOWED_TOP_KEYS = new Set([
-      'model', 'chat', 'groupOps', 'imageGen', 'system', 'permissions', 'response', 'web'
+      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web'
     ])
     const unknownKeys = Object.keys(config).filter(k => !ALLOWED_TOP_KEYS.has(k))
     if (unknownKeys.length) {

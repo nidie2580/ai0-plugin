@@ -25,6 +25,52 @@ const DEFAULT_COMMAND_TIMEOUT = 30_000
 const MAX_CMD_LEN = 2000
 const MAX_OUTPUT_CHARS = 3000
 const DEFAULT_MAX_ROUNDS = 8
+// 两次 LLM 调用之间的最小间隔（毫秒）：多轮循环连续调用时若间隔过短会触发上游速率限制
+const DEFAULT_CALL_INTERVAL_MS = 1000
+// 调用失败后的重试退避：第2次尝试前等 1s，第3次尝试前等 2s，仍失败则返回错误
+const RETRY_DELAYS = [1000, 2000]
+// 模块级：记录上一次 LLM 调用的完成时间，用于轮间间隔控制
+let lastLlmCallTime = 0
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, Math.max(0, Number(ms) || 0)))
+}
+
+/**
+ * 带速率限制与重试的 LLM 调用：
+ *   1) 调用前保证与上一次调用的间隔 ≥ agent.callIntervalMs（防限流）
+ *   2) 失败后按 [1s, 2s] 退避最多重试 2 次，仍失败返回错误
+ * @param {object} opts 透传给 llm.chatCompletions 的选项（modelKey/signal 等）
+ * @param {Function} [callFn] 可注入的调用函数（测试用），默认走 llm.chatCompletions
+ * @returns {{ ok: true, res } | { ok: false, error: Error, aborted?: boolean }}
+ */
+export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = {}) {
+  const conf = cfg.get('agent', {}) || {}
+  const callInterval = Number(conf.callIntervalMs) || DEFAULT_CALL_INTERVAL_MS
+  // —— 轮间间隔控制：距上次调用不足 callIntervalMs 则先等待 ——
+  const wait = callInterval - (Date.now() - lastLlmCallTime)
+  if (wait > 0) await sleep(wait)
+  lastLlmCallTime = Date.now()
+
+  const chat = callFn || ((msgs, o) => llm.chatCompletions(msgs, o))
+  let lastErr = null
+  const maxAttempts = RETRY_DELAYS.length + 1
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await chat(messages, opts)
+      return { ok: true, res }
+    } catch (err) {
+      lastErr = err
+      if (opts.signal?.aborted) return { ok: false, error: err, aborted: true }
+      if (attempt <= RETRY_DELAYS.length) {
+        const delay = RETRY_DELAYS[attempt - 1]
+        safeLogger.warn(`[ai0-plugin] Agent LLM 调用失败(第${attempt}次)，${delay}ms 后重试: ${sanitizeLog(err?.message || err)}`)
+        await sleep(delay)
+      }
+    }
+  }
+  return { ok: false, error: lastErr }
+}
 
 // —— 命令白名单：AI 可执行的命令（首命令必须命中，含 cd 内建） ——
 const DEFAULT_ALLOWED = new Set([
@@ -371,14 +417,14 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
   let finalText = ''
 
   for (let i = 0; i < rounds; i++) {
-    let res
-    try {
-      res = await llm.chatCompletions(messages, { modelKey })
-    } catch (err) {
-      finalText = `Agent 执行中断：模型调用失败 ${sanitizeLog(err?.message || err)}`
-      safeLogger.error(`[ai0-plugin] agent 循环模型调用失败: ${sanitizeLog(err?.message || err)}`)
+    const call = await callLlmWithRetry({ messages, opts: { modelKey } })
+    if (!call.ok) {
+      const reason = call.aborted ? '（请求已被取消/超时）' : sanitizeLog(call.error?.message || call.error)
+      finalText = `Agent 执行中断：模型调用失败 ${reason}`
+      safeLogger.error(`[ai0-plugin] agent 循环模型调用失败: ${reason}`)
       return { done: false, finalText, rounds: i, logs }
     }
+    const res = call.res
     const text = String(res?.text || '').trim()
     if (!text) { finalText = '模型未产生输出，任务提前结束。'; return { done: false, finalText, rounds: i, logs } }
 
@@ -444,13 +490,12 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
   let executed = 0
 
   const roundTrip = async () => {
-    try {
-      const res = await llm.chatCompletions(messages, { modelKey, signal })
-      return String(res?.text || '').trim()
-    } catch (err) {
-      if (signal?.aborted) return { aborted: true, error: '' }
-      return { aborted: false, error: sanitizeLog(err?.message || err) }
+    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal } })
+    if (!call.ok) {
+      if (call.aborted || signal?.aborted) return { aborted: true, error: '' }
+      return { aborted: false, error: sanitizeLog(call.error?.message || call.error) }
     }
+    return String(call.res?.text || '').trim()
   }
 
   while (executed < cap) {
