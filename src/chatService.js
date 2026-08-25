@@ -7,6 +7,26 @@ import { safeLogger } from './globals.js'
 import * as imageGen from './imageGen.js'
 import * as agent from './agent.js'
 
+// 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
+// Web 后台保存/返回的原始模板不做替换，保证编辑框里始终看到 <master> 等标记。
+// 支持：<master> 主人 QQ（逗号分隔） <user> 当前发送者 <bot> 机器人自身 <admin> 管理员列表
+function resolvePromptVars(prompt, e) {
+  const list = (a) => (Array.isArray(a) ? a : [a]).map((x) => String(x)).filter(Boolean).join('、')
+  const masters = list(helper.listMasters()) || '未设置'
+  const admins = list(helper.listAdmins()) || masters
+  const bot = String(e?.self_id || e?.bot?.uin || e?.bot?.self_id || '')
+  const user = String(helper.getUserId(e) ?? '')
+  try {
+    return String(prompt || '')
+      .split('<master>').join(masters)
+      .split('<user>').join(user)
+      .split('<bot>').join(bot)
+      .split('<admin>').join(admins)
+  } catch (_) {
+    return String(prompt || '')
+  }
+}
+
 const userSession = new Map()
 // 按用户+会话维度记录正在飞的请求，新请求进来时取消旧的（防"先发后到"串上下文）
 const inflightChat = new Map()   // key=`${userId}/${sessionId}` → { controller, at }
@@ -481,8 +501,10 @@ export async function handleChat(e) {
   }
 
   // 合并所有上下文到 system prompt（身份信息放最前面，让 AI 优先记住真实数据）
+  // 动态变量在"发送前的最终 prompt"处替换：Web 后台保存的原始模板保持不变
+  const basePrompt = resolvePromptVars(sysPrompt, e)
   const extraContext = [identityContext, groupContext, imageContext, agentContext].filter(Boolean).join('\n\n')
-  const finalSysPrompt = extraContext ? sysPrompt + '\n\n' + extraContext : sysPrompt
+  const finalSysPrompt = (extraContext ? basePrompt + '\n\n' + extraContext : basePrompt)
 
   // 注入引用消息 + 合并转发 + 发件人标签
   history = injectContextIntoHistory({

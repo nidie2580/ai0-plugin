@@ -25,6 +25,7 @@ const DEFAULT_COMMAND_TIMEOUT = 30_000
 const MAX_CMD_LEN = 2000
 const MAX_OUTPUT_CHARS = 3000
 const DEFAULT_MAX_ROUNDS = 8
+
 // 两次 LLM 调用之间的最小间隔（毫秒）：多轮循环连续调用时若间隔过短会触发上游速率限制
 const DEFAULT_CALL_INTERVAL_MS = 1000
 // 调用失败后的重试退避：第2次尝试前等 1s，第3次尝试前等 2s，仍失败则返回错误
@@ -36,14 +37,36 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, Math.max(0, Number(ms) || 0)))
 }
 
+/** 判断某次 LLM 调用错误是否为 429 速率限制 */
+function isRateLimit(err) {
+  if (!err) return false
+  if (err.status === 429) return true
+  return /HTTP 429|too many requests|rate.?limit|请求过于频繁|速率限制/i.test(String(err?.message || ''))
+}
+
+/** 从错误中解析 retry-after 等待秒数（秒→毫秒）；解析失败返回 fallback */
+function retryAfterMs(err, fallback) {
+  try {
+    const ra = err?.retryAfter
+    if (ra != null && String(ra).trim()) {
+      const n = Number(String(ra).trim())
+      if (Number.isFinite(n) && n > 0 && n <= 60) return n * 1000
+    }
+    const m = String(err?.message || '')
+    const mm = m.match(/(?:try again (?:in|after)|retry[\s-]?after[\s:]*)\s*(\d+)\s*seconds?/i)
+    if (mm) { const n = parseInt(mm[1], 10); if (n > 0 && n <= 60) return n * 1000 }
+  } catch (_) {}
+  return fallback
+}
+
 /**
  * 带速率限制与重试的 LLM 调用：
  *   1) 调用前保证与上一次调用的间隔 ≥ agent.callIntervalMs（防限流）
- *   2) 失败后按 [1s, 2s] 退避最多重试 2 次，仍失败返回错误
+ *   2) 失败后最多重试 2 次：429 时优先用服务商 retry-after 等待，其余按 [1s, 2s] 退避；仍失败返回错误
  * @param {object} opts 透传给 llm.chatCompletions 的选项（modelKey/signal 等）
  * @param {Function} [callFn] 可注入的调用函数（测试用），默认走 llm.chatCompletions
  * @returns {{ ok: true, res } | { ok: false, error: Error, aborted?: boolean }}
- */
+*/
 export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = {}) {
   const conf = cfg.get('agent', {}) || {}
   const callInterval = Number(conf.callIntervalMs) || DEFAULT_CALL_INTERVAL_MS
@@ -63,7 +86,8 @@ export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = 
       lastErr = err
       if (opts.signal?.aborted) return { ok: false, error: err, aborted: true }
       if (attempt <= RETRY_DELAYS.length) {
-        const delay = RETRY_DELAYS[attempt - 1]
+        // 429 时优先用服务商 retry-after；否则用固定退避
+        const delay = isRateLimit(err) ? retryAfterMs(err, RETRY_DELAYS[attempt - 1]) : RETRY_DELAYS[attempt - 1]
         safeLogger.warn(`[ai0-plugin] Agent LLM 调用失败(第${attempt}次)，${delay}ms 后重试: ${sanitizeLog(err?.message || err)}`)
         await sleep(delay)
       }
@@ -125,7 +149,7 @@ const DEFAULT_DENY = [
   /(?:^|[\s;|&])find\b[^|]*\s+-(?:exec|execdir|delete|ok|okdir)\b/,  // find -exec/-delete/-ok 执行任意程序或批量删除
   /(?:^|[\s;|&])tar\b[^|]*\s+--to-command\b/,                         // tar --to-command 执行任意程序
   // —— 越界读取/写入系统目录（工作区 confined，显式绝对系统路径一律拒绝；避免误伤 URL 中的 /lib/ 等路径） ——
-  /(?:^|\s)\/(?:etc|root|usr|bin|sbin|lib|boot|var)\//,
+  /(?:^|\s)\/(?:etc|root|usr|home|bin|sbin|lib|boot|var|tmp)\//,
   // —— 敏感凭据文件（防读取系统/用户私钥与密钥） ——
   /(?:\.ssh\/|\.aws\/|\.kube\/|\.m2\/settings\.xml|\/\.npmrc|\.git-credentials|id_rsa|id_ed25519|\.bash_history)/,
 ]
@@ -419,7 +443,9 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
   for (let i = 0; i < rounds; i++) {
     const call = await callLlmWithRetry({ messages, opts: { modelKey } })
     if (!call.ok) {
-      const reason = call.aborted ? '（请求已被取消/超时）' : sanitizeLog(call.error?.message || call.error)
+      const reason = call.aborted ? '（请求已被取消/超时）'
+        : isRateLimit(call.error) ? 'API 速率限制（429），重试后仍失败，请稍后重试或降低 maxRounds'
+        : sanitizeLog(call.error?.message || call.error)
       finalText = `Agent 执行中断：模型调用失败 ${reason}`
       safeLogger.error(`[ai0-plugin] agent 循环模型调用失败: ${reason}`)
       return { done: false, finalText, rounds: i, logs }
@@ -493,7 +519,7 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
     const call = await callLlmWithRetry({ messages, opts: { modelKey, signal } })
     if (!call.ok) {
       if (call.aborted || signal?.aborted) return { aborted: true, error: '' }
-      return { aborted: false, error: sanitizeLog(call.error?.message || call.error) }
+      return { rateLimit: isRateLimit(call.error), aborted: false, error: sanitizeLog(call.error?.message || call.error) }
     }
     return String(call.res?.text || '').trim()
   }
@@ -515,7 +541,9 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
     executed++
     const next = await roundTrip()
     if (typeof next !== 'string') {
-      const reason = next.aborted ? '（请求已被取消/超时）' : next.error || '（未知错误）'
+      const reason = next.aborted ? '（请求已被取消/超时）'
+        : next.rateLimit ? 'API 速率限制（429），重试后仍失败，请稍后重试或降低 maxRounds'
+        : next.error || '（未知错误）'
       return { done: false, finalText: `Agent 执行中断：模型调用失败 ${reason}`, rounds: executed, logs }
     }
     text = next

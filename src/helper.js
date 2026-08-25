@@ -108,6 +108,34 @@ export function listMasterSources() {
   }
 }
 
+function readFrameworkAdmins() {
+  const admins = new Set()
+  try {
+    const g = (typeof globalThis !== 'undefined' && globalThis.Config)
+      || (typeof global !== 'undefined' && global.Config)
+      || (typeof global !== 'undefined' && global.cfg)
+      || null
+    if (g) {
+      for (const k of ['admin', 'admins']) {
+        const v = g[k]
+        if (!v) continue
+        ;(Array.isArray(v) ? v : [v]).forEach(x => {
+          if (x != null && x !== '') admins.add(String(x))
+        })
+      }
+    }
+  } catch (_) { /* ignore */ }
+  return [...admins]
+}
+
+// 管理员列表：框架 admin 配置为主，未配置时退化为主人列表（主人天然是管理员）
+export function listAdmins() {
+  const admins = new Set(readFrameworkAdmins())
+  for (const m of readFrameworkMasters()) admins.add(m)
+  for (const m of readPluginMasters()) admins.add(m)
+  return [...admins]
+}
+
 export function isMaster(userId, e = null) {
   if (userId == null) return false
   const uid = String(userId)

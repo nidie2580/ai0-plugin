@@ -510,7 +510,14 @@ export async function chatCompletions(messages, {
       modelHint,
       bodyPreview ? '（完整响应体见 Yunzai 日志）' : ''
     ].filter(Boolean).join('\n')
-    throw new Error(combined)
+    // 透传结构化字段，供上层（agent 循环等）做 429 自动重试 / 退避
+    const httpErr = new Error(combined)
+    httpErr.status = status
+    try {
+      const ra = resp.headers?.['retry-after']
+      if (ra != null) httpErr.retryAfter = String(ra)
+    } catch (_) {}
+    throw httpErr
   }
 
   const choice = resp.data?.choices?.[0]

@@ -541,6 +541,7 @@ export function createApp() {
   })
 
   app.post('/api/config', requireAuth, requireCsrf, async (req, res) => {
+    try {
     const { config } = req.body || {}
     if (!config || typeof config !== 'object') {
       return res.json({ ok: false, msg: '配置格式错误' })
@@ -692,6 +693,10 @@ export function createApp() {
     const ok = cfg.saveConfig(cleaned)
     const skipped = envKeys.length ? `（已跳过 ${envKeys.length} 个环境变量覆盖字段）` : ''
     res.json({ ok, msg: ok ? `已保存${skipped}` : '保存失败，查看日志' })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] /api/config 保存异常: ${err.message}`)
+      res.json({ ok: false, msg: '服务器内部错误，请稍后重试' })
+    }
   })
 
   app.get('/api/sessions', requireAuth, async (req, res) => {

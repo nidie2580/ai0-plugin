@@ -370,7 +370,7 @@ export function saveConfig(config) {
   try {
     // 过滤掉环境变量覆盖的键，防止密钥明文落盘
     const envKeys = getEnvOverriddenKeys()
-    const cleaned = JSON.parse(JSON.stringify(config))
+    const cleaned = structuredClone(config)
     for (const dotKey of envKeys) {
       const parts = dotKey.split('.')
       let target = cleaned
@@ -402,7 +402,7 @@ export function saveConfig(config) {
     const content = YAML.stringify(cleaned)
     atomicWriteYaml(USER_CONFIG, content)
     // 缓存时重新应用 env 覆盖键，防止 web 保存后 env 失效直到重启
-    const withEnv = JSON.parse(JSON.stringify(cleaned))
+    const withEnv = structuredClone(cleaned)
     applyEnvOverrides(withEnv)
     cachedConfig = withEnv
     try { lastMtime = fs.statSync(USER_CONFIG).mtimeMs } catch (_) { lastMtime = Date.now() }
