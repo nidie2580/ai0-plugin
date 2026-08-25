@@ -664,9 +664,10 @@ export function createApp() {
     }
     const ag = config.agent
     if (ag) {
-      // agent.maxRounds：网页端可配置，1~20；防止设 0/负值导致死循环或超大值导致资源耗尽
-      if (ag.maxRounds != null && (typeof ag.maxRounds !== 'number' || !Number.isInteger(ag.maxRounds) || ag.maxRounds < 1 || ag.maxRounds > 20)) {
-        return res.json({ ok: false, msg: 'agent.maxRounds 必须为 1-20 之间的整数' })
+      // agent.maxRounds：网页端可配置，>=1 的正整数；不再设 20 硬上限（如 999 也应允许），
+      // 仅拦截 0/负数/非整数与明显误填的超大值（>10000）
+      if (ag.maxRounds != null && (typeof ag.maxRounds !== 'number' || !Number.isInteger(ag.maxRounds) || ag.maxRounds < 1 || ag.maxRounds > 10000)) {
+        return res.json({ ok: false, msg: 'agent.maxRounds 必须为 1-10000 之间的整数' })
       }
     }
 

@@ -218,11 +218,11 @@ if (route === 'dashboard') {
     }
     c.system = { prompt: $('#system_prompt').value }
 
-    // Agent 配置：maxRounds 前端校验 1~20，越界拒绝保存
+    // Agent 配置：maxRounds 前端校验（≥1 正整数，无 20 硬上限），越界拒绝保存
     const maxRounds = parseInt($('#agent_maxRounds').value, 10)
-    if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 20) {
+    if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 10000) {
       saveMsg.className = 'save-msg err'
-      saveMsg.textContent = '❌ Agent 最大执行轮数必须为 1-20 之间的整数'
+      saveMsg.textContent = '❌ Agent 最大执行轮数必须为 1-10000 之间的整数'
       return
     }
     c.agent = { ...(c.agent || {}), maxRounds }

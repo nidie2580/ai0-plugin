@@ -25,10 +25,9 @@ const DEFAULT_COMMAND_TIMEOUT = 30_000
 const MAX_CMD_LEN = 2000
 const MAX_OUTPUT_CHARS = 3000
 // 单次任务最大 LLM 调用轮数默认值：5（比旧值 8 更保守，适配 RPM≤3 的低配额账号如 Kimi）
-// 网页后台可配置 agent.maxRounds（范围 1~20），此处仅作为"未配置时的兜底默认值"
+// 网页后台可配置 agent.maxRounds，代码不再做硬上限截断（彻底放开，受 API 配额与超时自然约束），
+// 仅要求 ≥1，此处作为"未配置时的兜底默认值"
 const DEFAULT_MAX_ROUNDS = 5
-// 轮数硬上限：防止配置误填超大值导致长时间占用/资源耗尽
-const MAX_ROUNDS_HARD_CAP = 20
 
 // 两次 LLM 调用之间的最小间隔（毫秒）：多轮循环连续调用时若间隔过短会触发上游速率限制
 const DEFAULT_CALL_INTERVAL_MS = 1000
@@ -363,7 +362,9 @@ export function buildAgentContext() {
   return [
     '【Agent 能力】你可以在受控沙箱工作区中执行命令来完成任务。',
     `工作目录：${WORKSPACE}（已预置 AGENTS.md / MEMORY.md / README.md）`,
-    '需要执行命令时，在回复中输出：[action:agent:命令]。',
+    '【重要】当需要执行系统命令时，你必须严格按以下格式输出，否则系统不会执行：',
+    '[action:agent:这里写具体的命令]',
+    '例如：[action:agent:ls -la]',
     '命令执行结果会作为后续上下文返回，你可以根据结果继续操作，直到任务完成。',
     `单次任务最多执行 ${maxRounds} 轮命令，完成后输出最终成果总结。`,
     '支持 git / curl / wget / ls / cat / grep / find / sed / awk / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令（node/python 等解释器默认禁用）。',
@@ -422,7 +423,8 @@ function formatResult(r) {
 export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
   initWorkspaceFiles()
   const conf = cfg.get('agent', {}) || {}
-  const rounds = Math.max(1, Math.min(Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS, MAX_ROUNDS_HARD_CAP))
+  // 严格读取配置（网页端/config.yaml 可写任意 ≥1 的值），无硬上限截断，受 API 配额与超时自然约束
+  const rounds = Math.max(1, Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS)
 
   const sys = [
     buildAgentContext(),
@@ -431,7 +433,7 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
     String(task || '').slice(0, 4000),
     '',
     '执行规则：',
-    '1. 需要执行命令时，输出一行 [action:agent:命令]；可先输出一句说明。',
+    '1. 需要执行命令时，必须严格按 [action:agent:命令] 的格式输出（如 [action:agent:ls -la]），可先输出一句说明；格式不符系统不会执行。',
     '2. 观察命令结果后继续；重复上一步已成功的命令没有意义。',
     '3. 遇报错请分析原因并修正参数/路径，不要反复重试同一失败命令。',
     '4. 不需要更多命令时，直接输出最终成果总结（纯文本）。'
@@ -509,7 +511,8 @@ export async function parseAndExecuteAgentAction(replyText) {
 export async function continueAgentInHistory({ history, assistantText, modelKey = null, signal = null, maxRounds = null } = {}) {
   initWorkspaceFiles()
   const conf = cfg.get('agent', {}) || {}
-  const cap = Math.max(1, Math.min(Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS, MAX_ROUNDS_HARD_CAP))
+  // 严格读取配置（网页端/config.yaml 可写任意 ≥1 的值），无硬上限截断，受 API 配额与超时自然约束
+  const cap = Math.max(1, Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS)
   const messages = (history || []).map(m => ({ role: m.role === 'system' ? 'system' : m.role, content: String(m.content || '') }))
   messages.push({ role: 'assistant', content: String(assistantText || '') })
   const logs = []
