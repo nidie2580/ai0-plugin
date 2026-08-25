@@ -125,6 +125,7 @@ if (route === 'dashboard') {
     $('#chat_sessionTimeout').value = resp.config.chat?.sessionTimeout ?? 1800000
 
     $('#system_prompt').value = resp.config.system?.prompt || ''
+    $('#agent_maxRounds').value = resp.config.agent?.maxRounds ?? 5
 
     $('#perm_mode').value = String(resp.config.permissions?.whitelistMode ?? false)
     $('#perm_masters').value = (resp.config.permissions?.masters || []).join(',')
@@ -216,6 +217,15 @@ if (route === 'dashboard') {
       sessionTimeout: parseInt($('#chat_sessionTimeout').value, 10) || -1
     }
     c.system = { prompt: $('#system_prompt').value }
+
+    // Agent 配置：maxRounds 前端校验 1~20，越界拒绝保存
+    const maxRounds = parseInt($('#agent_maxRounds').value, 10)
+    if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 20) {
+      saveMsg.className = 'save-msg err'
+      saveMsg.textContent = '❌ Agent 最大执行轮数必须为 1-20 之间的整数'
+      return
+    }
+    c.agent = { ...(c.agent || {}), maxRounds }
     c.permissions = {
       whitelistMode: $('#perm_mode').value === 'true',
       masters: splitCsvInt($('#perm_masters').value),

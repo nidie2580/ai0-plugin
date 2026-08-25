@@ -662,6 +662,13 @@ export function createApp() {
         return res.json({ ok: false, msg: 'imageGen.timeout 必须为 1000-600000 毫秒' })
       }
     }
+    const ag = config.agent
+    if (ag) {
+      // agent.maxRounds：网页端可配置，1~20；防止设 0/负值导致死循环或超大值导致资源耗尽
+      if (ag.maxRounds != null && (typeof ag.maxRounds !== 'number' || !Number.isInteger(ag.maxRounds) || ag.maxRounds < 1 || ag.maxRounds > 20)) {
+        return res.json({ ok: false, msg: 'agent.maxRounds 必须为 1-20 之间的整数' })
+      }
+    }
 
     // 把脱敏的 apiKey 还原：收到 **** 时，从原配置读取
     const old = cfg.loadConfig()

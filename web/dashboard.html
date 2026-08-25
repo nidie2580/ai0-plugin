@@ -55,6 +55,14 @@
       </div>
 
       <hr>
+      <h3>Agent 配置</h3>
+      <div class="grid-2">
+        <label>最大执行轮数 <input id="agent_maxRounds" type="number" min="1" max="20"/></label>
+        <label>&nbsp;</label>
+      </div>
+      <p class="hint">Agent 单次任务最大 LLM 调用轮数。低配额 API（如 RPM≤3）建议 2~3；高配额可 5~8。范围 1~20。</p>
+
+      <hr>
       <h3>系统提示词</h3>
       <textarea id="system_prompt" rows="6"></textarea>
       <div class="hint" style="font-size:12px;color:#888;margin-top:4px;line-height:1.6;">

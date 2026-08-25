@@ -24,12 +24,25 @@ const WORKSPACE = path.join(AGENT_ROOT, 'workspace')
 const DEFAULT_COMMAND_TIMEOUT = 30_000
 const MAX_CMD_LEN = 2000
 const MAX_OUTPUT_CHARS = 3000
-const DEFAULT_MAX_ROUNDS = 8
+// 单次任务最大 LLM 调用轮数默认值：5（比旧值 8 更保守，适配 RPM≤3 的低配额账号如 Kimi）
+// 网页后台可配置 agent.maxRounds（范围 1~20），此处仅作为"未配置时的兜底默认值"
+const DEFAULT_MAX_ROUNDS = 5
+// 轮数硬上限：防止配置误填超大值导致长时间占用/资源耗尽
+const MAX_ROUNDS_HARD_CAP = 20
 
 // 两次 LLM 调用之间的最小间隔（毫秒）：多轮循环连续调用时若间隔过短会触发上游速率限制
 const DEFAULT_CALL_INTERVAL_MS = 1000
-// 调用失败后的重试退避：第2次尝试前等 1s，第3次尝试前等 2s，仍失败则返回错误
-const RETRY_DELAYS = [1000, 2000]
+// —— 429 速率限制固定退避策略 ——
+// 低配额账号（如 Kimi RPM=3，即每分钟最多 3 次）在 1s 后重试会立刻再次撞上限额，
+// 因此不依赖解析 retry-after（各 provider 格式不一），统一固定等待 60 秒后再重试。
+// 等待/次数可通过 setRateLimitRetryConfig 覆盖（测试用），默认 60s / 最多重试 3 次（共 4 次尝试）。
+let RATE_LIMIT_RETRY_WAIT_MS = 60_000
+let RATE_LIMIT_MAX_RETRIES = 3
+/** 覆盖 429 退避参数（测试用）：waitMs=固定等待毫秒，maxRetries=最多重试次数 */
+export function setRateLimitRetryConfig(waitMs, maxRetries) {
+  if (Number.isFinite(waitMs) && waitMs >= 0) RATE_LIMIT_RETRY_WAIT_MS = waitMs
+  if (Number.isFinite(maxRetries) && maxRetries >= 0) RATE_LIMIT_MAX_RETRIES = maxRetries
+}
 // 模块级：记录上一次 LLM 调用的完成时间，用于轮间间隔控制
 let lastLlmCallTime = 0
 
@@ -44,25 +57,12 @@ function isRateLimit(err) {
   return /HTTP 429|too many requests|rate.?limit|请求过于频繁|速率限制/i.test(String(err?.message || ''))
 }
 
-/** 从错误中解析 retry-after 等待秒数（秒→毫秒）；解析失败返回 fallback */
-function retryAfterMs(err, fallback) {
-  try {
-    const ra = err?.retryAfter
-    if (ra != null && String(ra).trim()) {
-      const n = Number(String(ra).trim())
-      if (Number.isFinite(n) && n > 0 && n <= 60) return n * 1000
-    }
-    const m = String(err?.message || '')
-    const mm = m.match(/(?:try again (?:in|after)|retry[\s-]?after[\s:]*)\s*(\d+)\s*seconds?/i)
-    if (mm) { const n = parseInt(mm[1], 10); if (n > 0 && n <= 60) return n * 1000 }
-  } catch (_) {}
-  return fallback
-}
-
 /**
  * 带速率限制与重试的 LLM 调用：
  *   1) 调用前保证与上一次调用的间隔 ≥ agent.callIntervalMs（防限流）
- *   2) 失败后最多重试 2 次：429 时优先用服务商 retry-after 等待，其余按 [1s, 2s] 退避；仍失败返回错误
+ *   2) 429 速率限制：固定等待 RATE_LIMIT_RETRY_WAIT_MS（默认 60s）后重试，
+ *      最多重试 RATE_LIMIT_MAX_RETRIES（默认 3）次；仍失败返回错误
+ *   3) 非 429 错误：直接返回错误，不做重试（避免掩盖真实故障）
  * @param {object} opts 透传给 llm.chatCompletions 的选项（modelKey/signal 等）
  * @param {Function} [callFn] 可注入的调用函数（测试用），默认走 llm.chatCompletions
  * @returns {{ ok: true, res } | { ok: false, error: Error, aborted?: boolean }}
@@ -77,7 +77,7 @@ export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = 
 
   const chat = callFn || ((msgs, o) => llm.chatCompletions(msgs, o))
   let lastErr = null
-  const maxAttempts = RETRY_DELAYS.length + 1
+  const maxAttempts = 1 + RATE_LIMIT_MAX_RETRIES
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const res = await chat(messages, opts)
@@ -85,12 +85,13 @@ export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = 
     } catch (err) {
       lastErr = err
       if (opts.signal?.aborted) return { ok: false, error: err, aborted: true }
-      if (attempt <= RETRY_DELAYS.length) {
-        // 429 时优先用服务商 retry-after；否则用固定退避
-        const delay = isRateLimit(err) ? retryAfterMs(err, RETRY_DELAYS[attempt - 1]) : RETRY_DELAYS[attempt - 1]
-        safeLogger.warn(`[ai0-plugin] Agent LLM 调用失败(第${attempt}次)，${delay}ms 后重试: ${sanitizeLog(err?.message || err)}`)
-        await sleep(delay)
+      if (!isRateLimit(err)) {
+        // 非 429 错误：直接返回，不重试
+        return { ok: false, error: err, aborted: false }
       }
+      if (attempt >= maxAttempts) break
+      safeLogger.warn(`[ai0-plugin] Agent LLM 调用触发速率限制(第${attempt}次)，固定等待 ${RATE_LIMIT_RETRY_WAIT_MS / 1000}s 后重试: ${sanitizeLog(err?.message || err)}`)
+      await sleep(RATE_LIMIT_RETRY_WAIT_MS)
     }
   }
   return { ok: false, error: lastErr }
@@ -421,7 +422,7 @@ function formatResult(r) {
 export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
   initWorkspaceFiles()
   const conf = cfg.get('agent', {}) || {}
-  const rounds = Math.max(1, Math.min(Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS, 20))
+  const rounds = Math.max(1, Math.min(Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS, MAX_ROUNDS_HARD_CAP))
 
   const sys = [
     buildAgentContext(),
@@ -444,7 +445,7 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
     const call = await callLlmWithRetry({ messages, opts: { modelKey } })
     if (!call.ok) {
       const reason = call.aborted ? '（请求已被取消/超时）'
-        : isRateLimit(call.error) ? 'API 速率限制（429），重试后仍失败，请稍后重试或降低 maxRounds'
+        : isRateLimit(call.error) ? 'Agent 因 API 速率限制暂时无法继续，请稍后重试或降低 maxRounds 配置'
         : sanitizeLog(call.error?.message || call.error)
       finalText = `Agent 执行中断：模型调用失败 ${reason}`
       safeLogger.error(`[ai0-plugin] agent 循环模型调用失败: ${reason}`)
@@ -508,7 +509,7 @@ export async function parseAndExecuteAgentAction(replyText) {
 export async function continueAgentInHistory({ history, assistantText, modelKey = null, signal = null, maxRounds = null } = {}) {
   initWorkspaceFiles()
   const conf = cfg.get('agent', {}) || {}
-  const cap = Math.max(1, Math.min(Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS, 20))
+  const cap = Math.max(1, Math.min(Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS, MAX_ROUNDS_HARD_CAP))
   const messages = (history || []).map(m => ({ role: m.role === 'system' ? 'system' : m.role, content: String(m.content || '') }))
   messages.push({ role: 'assistant', content: String(assistantText || '') })
   const logs = []
@@ -542,7 +543,7 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
     const next = await roundTrip()
     if (typeof next !== 'string') {
       const reason = next.aborted ? '（请求已被取消/超时）'
-        : next.rateLimit ? 'API 速率限制（429），重试后仍失败，请稍后重试或降低 maxRounds'
+        : next.rateLimit ? 'Agent 因 API 速率限制暂时无法继续，请稍后重试或降低 maxRounds 配置'
         : next.error || '（未知错误）'
       return { done: false, finalText: `Agent 执行中断：模型调用失败 ${reason}`, rounds: executed, logs }
     }
