@@ -122,6 +122,10 @@ export function hasDangerousRm(cmd) {
 }
 
 // —— 引号感知的 shell 段拆分：正确处理 "a;b" 引号内容，避免误拆 ——
+// 作为段边界的操作符：| ; && 单 &（后台/顺序执行）以及换行 \n \r（shell 同样把换行当语句分隔）。
+// 解释器（node/python/npm 等）不在白名单中，若漏拆上面任一操作符，攻击者可用
+// `ls & python3 -c ...` 或 `ls\npython3 -c ...` 让非白名单首命令绕过校验执行任意代码。
+// 例外：& 前一个字符是 > 或 < 时为"复制文件描述符"重定向（2>&1、>&file、<&3），不是分隔符，需保留。
 export function splitSegments(c) {
   const segs = []
   let cur = ''
@@ -137,8 +141,14 @@ export function splitSegments(c) {
     }
     if (ch === '"' || ch === "'") { quote = ch; cur += ch; i++; continue }
     if (ch === '\\' && i + 1 < c.length) { cur += ch + c[i + 1]; i += 2; continue }
-    if (ch === '|' || ch === ';' || (ch === '&' && c[i + 1] === '&')) {
-      if (ch === '&') i++
+    if (ch === '|' || ch === ';' || ch === '&' || ch === '\n' || ch === '\r') {
+      if (ch === '&') {
+        const prevCh = cur.trimEnd().slice(-1)
+        // 重定向复制描述符形式（>&、<&）不是后台分隔符，原样保留
+        if (prevCh === '>' || prevCh === '<') { cur += ch; i++; continue }
+        // && 连写：额外消费第二个 &
+        if (c[i + 1] === '&') i++
+      }
       if (cur.trim()) segs.push(cur.trim())
       cur = ''
       i++

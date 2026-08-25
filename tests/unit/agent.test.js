@@ -13,6 +13,18 @@ describe('agent: splitSegments 引号感知拆分', () => {
     assert.deepEqual(splitSegments("echo 'a&b'"), ["echo 'a&b'"])
   })
 
+  test('单 &（后台运行）与换行也作为段边界，防止白名单绕过', () => {
+    assert.deepEqual(splitSegments('ls & echo hi'), ['ls', 'echo hi'])
+    assert.deepEqual(splitSegments('ls && echo hi'), ['ls', 'echo hi'])
+    assert.deepEqual(splitSegments('ls\nwhoami'), ['ls', 'whoami'])
+  })
+
+  test('重定向复制描述符（2>&1 / >&file / <&3）不误拆', () => {
+    assert.deepEqual(splitSegments('ls 2>&1 | head'), ['ls 2>&1', 'head'])
+    assert.deepEqual(splitSegments('echo ok >&2'), ['echo ok >&2'])
+    assert.deepEqual(splitSegments('cat <&3'), ['cat <&3'])
+  })
+
   test('转义字符不误拆', () => {
     assert.deepEqual(splitSegments('echo a\\|b'), ['echo a\\|b'])
   })
@@ -126,6 +138,13 @@ describe('agent: checkCommand 危险命令拒绝', () => {
     assert.equal(checkCommand('pip install requests').ok, false)
     assert.equal(checkCommand("python3 -c 'import os; os.system(id)'").ok, false)
     assert.equal(checkCommand('find . -delete').ok, false)
+  })
+
+  test('解释器被 & 后台符 / 换行 拼接在允许命令后时也应拒绝（防白名单绕过）', () => {
+    assert.equal(checkCommand('ls & python3 -c "import os; os.system(\'id\')"').ok, false)
+    assert.equal(checkCommand('whoami & node -e "process.exit(0)"').ok, false)
+    assert.equal(checkCommand('ls\npython3 -c "print(1)"').ok, false)
+    assert.equal(checkCommand('cat a.txt\npip install requests').ok, false)
   })
 
   test('交互式编辑器', () => {
