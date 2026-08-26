@@ -577,6 +577,7 @@ export async function replyForward(e, text) {
  * 思考型模型（DeepSeek-R1 / Qwen3 thinking 等）在 reasoning_content 返回思考内容，
  * 深度思考完毕后由调用方触发本函数，模拟一段"聊天记录"呈现给用户。
  * 私聊 / 适配器不支持合并转发时降级为带标记的普通文本。
+ * 防刷屏由上层负责：Agent 长任务在 chatService 的 onThinking 处只会收集、结束后汇总一次性发送。
  */
 export async function replyReasoningAsChat(e, reasoning, options = {}) {
   const text = String(reasoning || '').trim()
