@@ -53,6 +53,21 @@ function randomAlphanumeric(len = 16) {
   return s
 }
 
+/** 恒定长度的 HMAC 比较：使用 HMAC-SHA256 摘要替代直接 timingSafeEqual，
+ *  避免长度不匹配导致 timingSafeEqual 退化为 false（产生时序差异）。
+ *  返回 true 当且仅当两个值完全一致。
+ */
+function safeCompare(a, b) {
+  try {
+    const KEY = 'ai0-auth-compare-v1'
+    const ha = crypto.createHmac('sha256', KEY).update(String(a)).digest()
+    const hb = crypto.createHmac('sha256', KEY).update(String(b)).digest()
+    return ha.length === hb.length && crypto.timingSafeEqual(ha, hb)
+  } catch (_) {
+    return false
+  }
+}
+
 function cleanup() {
   const now = Date.now()
   for (const [k, v] of tokens) if (v.expireAt < now) tokens.delete(k)
@@ -296,32 +311,16 @@ export function verifyCode(id, code, clientIp = 'unknown') {
   if (!idLimit.ok) return { ok: false, msg: '验证码尝试次数过多，请稍后重新生成' }
 
   const rec = codes.get(id)
-  // — 发现D 修复：时序均衡 —
-  // 在任何快速返回前都先做一次等价的 timingSafeEqual 比较（结果不使用），
-  // 让"ID 不存在 / 已使用 / 已过期"与"验证码错误"三条路径的响应时间一致，
-  // 防止攻击者通过响应时间差异枚举有效 ID。
-  const codeBuf = Buffer.from(String(code), 'utf-8')
-  const dummyCodeBuf = Buffer.from('x'.repeat(16), 'utf-8') // 固定 16 字节假值（与真实 code 等长）
-  if (rec) {
-    // 真实路径：走正常 timingSafeEqual
-  } else {
-    // 无 rec → 仍执行一次 timingSafeEqual 均衡时间（结果必然为 false）
-    if (codeBuf.length === dummyCodeBuf.length) {
-      try { crypto.timingSafeEqual(codeBuf, dummyCodeBuf) } catch (_) {}
-    }
-    return { ok: false, msg: '验证码已过期或不存在' }
-  }
-  if (rec.used) {
-    if (codeBuf.length === dummyCodeBuf.length) {
-      try { crypto.timingSafeEqual(codeBuf, dummyCodeBuf) } catch (_) {}
-    }
-    return { ok: false, msg: '验证码已使用' }
-  }
+  const codeStr = String(code)
+  // 无论 rec 是否存在，都执行一次 HMAC 比较：存在时与真实 code 比较，不存在时与假值比较
+  const expectedCode = rec ? String(rec.code) : 'x'.repeat(16)
+  // 恒定长度比较：safeCompare 通过 HMAC-SHA256 摘要做 timing-safe 比较，无需长度对齐
+  const timingOk = safeCompare(codeStr, expectedCode)
+
+  if (!rec) return { ok: false, msg: '验证码已过期或不存在' }
+  if (rec.used) return { ok: false, msg: '验证码已使用' }
   if (Date.now() > rec.expireAt) {
     codes.delete(id)
-    if (codeBuf.length === dummyCodeBuf.length) {
-      try { crypto.timingSafeEqual(codeBuf, dummyCodeBuf) } catch (_) {}
-    }
     return { ok: false, msg: '验证码已过期' }
   }
   // IP 绑定校验：仅当生成时已绑定真实 IP（createdIp 非 'unknown'）才强制一致。
@@ -330,15 +329,9 @@ export function verifyCode(id, code, clientIp = 'unknown') {
   // 切勿在 code 校验前用错误 code 绑定 IP：那会让攻击者通过 getPendingCodeId() 拿到 id 后
   // 抢先绑定自己的 IP，导致主人用正确 code 也被拒（IP 劫持 DoS）。
   if (rec.createdIp && rec.createdIp !== 'unknown' && rec.createdIp !== clientIp) {
-    if (codeBuf.length === dummyCodeBuf.length) {
-      try { crypto.timingSafeEqual(codeBuf, dummyCodeBuf) } catch (_) {}
-    }
     return { ok: false, msg: '验证码与当前 IP 不匹配' }
   }
-  // 始终走 timing-safe 比较，不使用前置明文 !== 短路（防止时序泄漏）
-  const a = Buffer.from(String(rec.code), 'utf-8')
-  const timingSafeOk = a.length === codeBuf.length && crypto.timingSafeEqual(a, codeBuf)
-  if (!timingSafeOk) {
+  if (!timingOk) {
     rec.failCount = (rec.failCount || 0) + 1
     if (rec.failCount >= 5) {
       codes.delete(id)

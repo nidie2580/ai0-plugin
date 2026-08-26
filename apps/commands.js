@@ -1523,10 +1523,27 @@ export class AICommands extends plugin {
 
     // 先回占位提示，避免长时间等待无反馈
     await e.reply('开始执行 Agent 任务，请稍候…（可在日志中查看进度）')
+
+    // 外层 AbortController + 总时限（15 分钟兜底，防止 runAgentLoop 自身超时失败时死锁）
+    const outerAc = new AbortController()
+    const outerTimer = setTimeout(() => {
+      try { outerAc.abort() } catch (_) {}
+      safeLogger.warn('[ai0-plugin] Agent 任务总时限触发（15 分钟），已强制终止')
+    }, 900_000).unref?.()
+    // 将 outerAc 与 signal 关联：若外层触发 abort，传递到 agent 内部
+    const origSignal = (typeof e?.signal !== 'undefined' && e?.signal) || null
+    if (origSignal) {
+      try {
+        if (origSignal.aborted) outerAc.abort()
+        else if (origSignal.addEventListener) origSignal.addEventListener('abort', () => outerAc.abort(), { once: true })
+      } catch (_) {}
+    }
+
     let result
     try {
       result = await agent.runAgentLoop({
         task,
+        signal: outerAc.signal,
         onThinking: async (reasoning) => {
           if (cfg.get('response.showReasoning', true) !== false) {
             await helper.replyReasoningAsChat(e, reasoning)
@@ -1536,6 +1553,8 @@ export class AICommands extends plugin {
     } catch (err) {
       safeLogger.error(`[ai0-plugin] Agent 任务执行异常: ${err?.message || err}`)
       return e.reply(`❌ Agent 任务执行异常：${err?.message || err}`)
+    } finally {
+      try { clearTimeout(outerTimer) } catch (_) {}
     }
 
     const cmdLog = result.logs.length

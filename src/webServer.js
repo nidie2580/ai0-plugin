@@ -669,6 +669,10 @@ export function createApp() {
       if (ag.maxRounds != null && (typeof ag.maxRounds !== 'number' || !Number.isInteger(ag.maxRounds) || ag.maxRounds < 1 || ag.maxRounds > 10000)) {
         return res.json({ ok: false, msg: 'agent.maxRounds 必须为 1-10000 之间的整数' })
       }
+      // agent.hardTimeoutMs：Agent 任务硬超时，范围 30000~1800000ms
+      if (ag.hardTimeoutMs != null && (typeof ag.hardTimeoutMs !== 'number' || ag.hardTimeoutMs < 30000 || ag.hardTimeoutMs > 1800000)) {
+        return res.json({ ok: false, msg: 'agent.hardTimeoutMs 必须为 30000~1800000 之间的数字（毫秒）' })
+      }
     }
 
     // 把脱敏的 apiKey 还原：收到 **** 时，从原配置读取

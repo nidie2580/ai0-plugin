@@ -287,7 +287,22 @@ export function checkCommand(rawCmd, opts = {}) {
   // 2) rm 危险参数检查（token 化，引号内文本不误伤）
   if (hasDangerousRm(cmd)) return { ok: false, reason: '禁止递归/强制删除：rm -r / -f / --recursive / --force' }
 
-  // 3) 引号感知拆分，逐段校验首命令白名单
+  // 3) 参数级绕过检测（白名单命令本身可能被参数滥用）
+  // 3a) awk：阻止 system() 调用（执行任意 shell 命令）和 -f 读取外部文件
+  if (/\bawk\b/.test(cmd)) {
+    if (/\bsystem\s*\(/.test(cmd)) return { ok: false, reason: 'awk 禁止使用 system() 调用 shell 命令' }
+    if (/(?:^|[\s;|&])awk\s+-(?:f|file)\b/.test(cmd)) return { ok: false, reason: 'awk 禁止使用 -f/-file 读取外部文件' }
+  }
+  // 3b) sed：阻止 /e 标志（执行替换结果为 shell 命令）
+  if (/\bsed\b/.test(cmd)) {
+    if (/\bsed\b[^|]*\/e\b/.test(cmd)) return { ok: false, reason: 'sed 禁止使用 /e 标志执行 shell 命令' }
+  }
+  // 3c) 全局：.. 路径穿越（解析后超出 workspace 的工作目录）
+  if (/(?:^|\s)\.\.(?:\/|\\|$|\s)/.test(cmd)) return { ok: false, reason: '路径穿越：禁止访问工作区之外的目录（..）' }
+  // 3d) 全局：进程替换 <( ) 和 >( ) — 绕过白名单执行任意命令
+  if (/[<>]\(/.test(cmd)) return { ok: false, reason: '禁止进程替换 <( 和 >(' }
+
+  // 4) 引号感知拆分，逐段校验首命令白名单
   const segs = splitSegments(cmd)
   if (!segs.length) return { ok: false, reason: '无法解析命令' }
   for (const seg of segs) {
@@ -474,6 +489,7 @@ export function runCommand(cmd, opts = {}) {
 }
 
 function formatResult(r) {
+  if (r.aborted) return `(命令被中断)\n退出码=中止 耗时=${r.costMs}ms`
   const head = `退出码=${r.code} 耗时=${r.costMs}ms`
   if (!r.detail) return `${head}\n（无输出）`
   return `${head}\n${r.detail}`
@@ -485,7 +501,7 @@ function formatResult(r) {
  * @param {Function} [callFn] 可注入的 LLM 调用函数（测试用），默认走 llm.chatCompletions
  * @returns {{ done: boolean, finalText: string, rounds: number, logs: Array }}
  */
-export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinking = null, callFn = null } = {}) {
+export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = null, onThinking = null, callFn = null } = {}) {
   initWorkspaceFiles()
   const conf = cfg.get('agent', {}) || {}
   // 严格读取配置（网页端/config.yaml 可写任意 ≥1 的值），无硬上限截断，受 API 配额与超时自然约束
@@ -494,6 +510,13 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinkin
   // 硬超时（整次 Agent 任务最长期限），10 分钟兜底
   const AGENT_HARD_TIMEOUT_MS = Number(conf.hardTimeoutMs) || 600_000
   const ac = new AbortController()
+  // 若外部 signal 提前 aborted，则同步到内部 ac
+  if (signal) {
+    try {
+      if (signal.aborted) ac.abort()
+      else if (signal.addEventListener) signal.addEventListener('abort', () => { try { ac.abort() } catch (_) {} }, { once: true })
+    } catch (_) {}
+  }
   let hardTimer = null
   function resetHardTimer() {
     try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
@@ -522,8 +545,8 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinkin
   let finalText = ''
 
   for (let i = 0; i < rounds; i++) {
-    // 重置硬超时，延长任务整体窗口
-    resetHardTimer()
+    // 硬超时只在入口登记一次，不在循环内重置
+    // 整次任务的总时限由 AGENT_HARD_TIMEOUT_MS 控制
 
     const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal }, callFn })
     if (!call.ok) {
@@ -561,7 +584,7 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinkin
     }
 
     const r = await runCommand(cmd, { signal: ac.signal })
-    logs.push({ cmd, ok: r.ok, code: r.code, timedOut: r.timedOut, costMs: r.costMs, output: r.detail })
+    logs.push({ cmd, ok: r.ok, code: r.code, timedOut: r.timedOut, aborted: r.aborted, costMs: r.costMs, output: r.detail })
     messages.push({ role: 'assistant', content: text })
     // 命令输出来自不可信的外部环境（可能反射文件内容），以 user 身份 + untrusted 边界注入，防止其内容以 system 权重劫持后续指令
     messages.push({ role: 'user', content: `<command_output>\n${formatResult(r)}\n</command_output>` })
@@ -652,12 +675,12 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
       messages.push({ role: 'system', content: `命令被安全策略拒绝：${check.reason}\n请改用允许的命令继续。` })
     } else {
       const r = await runCommand(cmd, { signal: ac.signal })
-      logs.push({ cmd, ok: r.ok, code: r.code, costMs: r.costMs, output: r.detail })
+      logs.push({ cmd, ok: r.ok, code: r.code, costMs: r.costMs, output: r.detail, aborted: r.aborted })
       // 同上：命令输出为不可信内容，以 user 身份 + untrusted 边界注入，避免其内容以 system 权重劫持后续指令
       messages.push({ role: 'user', content: `<command_output>\n${formatResult(r)}\n</command_output>` })
     }
     executed++
-    resetHardTimer()
+    // 硬超时只在入口登记一次，不在循环内重置；整次任务的总时限由 AGENT_HARD_TIMEOUT_MS 控制
     const next = await roundTrip()
     if (next.error) {
       const reason = next.error.aborted ? '（请求已被取消/超时）'

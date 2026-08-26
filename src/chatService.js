@@ -665,7 +665,8 @@ export async function handleChat(e) {
         if (agentReasonings.length && cfg.get('response.showReasoning', true) !== false) {
           try {
             // 一次性汇总发送；prefix 标注这是汇总，避免与普通深度思考混淆
-            await helper.replyReasoningAsChat(e, agentReasonings.join('\n\n'), { prefix: '🔎 深度思考汇总：' })
+            const summary = agentReasonings.join('\n\n')
+            await helper.replyReasoningAsChat(e, summary.length > 20000 ? summary.slice(0, 20000) + '\n\n……（思考过程过长，已截断）' : summary, { prefix: '🔎 深度思考汇总：' })
           } catch (_) {}
         }
         agentReasonings.length = 0
@@ -698,6 +699,7 @@ export async function handleChat(e) {
         safeLogger.error(`[ai0-plugin] Agent 执行异常: ${err.message}`)
         agentReasonings.push(`（Agent 执行出错：${err.message}）`)
       } finally {
+        clearTimeout(timeoutTimer)
         await finishReasoning()
       }
     }

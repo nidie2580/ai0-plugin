@@ -104,6 +104,29 @@ function isPrivateIpv6(ip) {
 }
 
 /**
+ * DNS Rebinding 防护：DNS 解析结果 TTL 缓存（60 秒）。
+ * 同一域名在缓存有效期内返回相同 IP，防止攻击者通过快速切换 DNS 解析结果绕过
+ * isAllowedOutboundUrl 的首次校验，使后续连接指向不同 IP。
+ */
+const dnsCache = new Map()
+const DNS_CACHE_TTL = 60_000 // 60 秒
+
+function getDnsCache(hostname) {
+  const entry = dnsCache.get(hostname)
+  if (entry && Date.now() - entry.at < DNS_CACHE_TTL) return entry.addrs
+  return null
+}
+
+function setDnsCache(hostname, addrs) {
+  // 限制缓存总大小，防内存泄漏
+  if (dnsCache.size > 1000) {
+    const oldest = dnsCache.keys().next().value
+    if (oldest) dnsCache.delete(oldest)
+  }
+  dnsCache.set(hostname, { addrs, at: Date.now() })
+}
+
+/**
  * 校验出站 URL 是否允许访问（SSRF 防护）。
  * 返回 { ok: true } 或 { ok: false, reason }。
  *
@@ -133,13 +156,25 @@ export async function isAllowedOutboundUrl(u) {
     return { ok: true, resolvedIp: hostname }
   }
 
+  // DNS Rebinding 防护：优先使用 TTL 缓存
+  const cached = getDnsCache(hostname)
+  if (cached) {
+    for (const a of cached) {
+      if (isPrivateIp(a)) return { ok: false, reason: '域名解析到私有或回环地址，拒绝访问' }
+    }
+    return { ok: true, resolvedIp: cached[0] }
+  }
+
   try {
     const addrs = await dns.lookup(hostname, { all: true })
     if (!Array.isArray(addrs) || addrs.length === 0) return { ok: false, reason: '域名无法解析' }
-    for (const a of addrs) {
-      if (isPrivateIp(a.address)) return { ok: false, reason: '域名解析到私有或回环地址，拒绝访问' }
+    const ipList = addrs.map(a => a.address).filter(Boolean)
+    for (const a of ipList) {
+      if (isPrivateIp(a)) return { ok: false, reason: '域名解析到私有或回环地址，拒绝访问' }
     }
-    return { ok: true, resolvedIp: addrs[0]?.address }
+    // 缓存解析结果（即使拒绝也缓存，防止同一域名反复 DNS 查询）
+    setDnsCache(hostname, ipList)
+    return { ok: true, resolvedIp: ipList[0] }
   } catch (err) {
     return { ok: false, reason: 'DNS 解析失败或被阻止' }
   }

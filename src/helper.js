@@ -70,18 +70,39 @@ function readFrameworkMasters() {
       for (const k of ['master', 'masters', 'masterQQ', 'owner']) {
         const v = g[k]
         if (!v) continue
-        ;(Array.isArray(v) ? v : [v]).forEach(x => {
-          if (x != null && x !== '') masters.add(String(x))
-        })
+        // XRK-Yunzai 兼容：master 可能是 { botQQ: [masterQQ1, masterQQ2] } 形式的对象
+        if (typeof v === 'object' && !Array.isArray(v)) {
+          for (const val of Object.values(v)) {
+            if (Array.isArray(val)) {
+              val.forEach(x => { if (x != null && x !== '') masters.add(String(x)) })
+            } else if (val != null && val !== '') {
+              masters.add(String(val))
+            }
+          }
+        } else {
+          ;(Array.isArray(v) ? v : [v]).forEach(x => {
+            if (x != null && x !== '') masters.add(String(x))
+          })
+        }
       }
       if (g.matcher) {
         const m = g.matcher
         for (const k of ['master', 'masters', 'masterQQ', 'owner']) {
           const v = m[k]
           if (!v) continue
-          ;(Array.isArray(v) ? v : [v]).forEach(x => {
-            if (x != null && x !== '') masters.add(String(x))
-          })
+          if (typeof v === 'object' && !Array.isArray(v)) {
+            for (const val of Object.values(v)) {
+              if (Array.isArray(val)) {
+                val.forEach(x => { if (x != null && x !== '') masters.add(String(x)) })
+              } else if (val != null && val !== '') {
+                masters.add(String(val))
+              }
+            }
+          } else {
+            ;(Array.isArray(v) ? v : [v]).forEach(x => {
+              if (x != null && x !== '') masters.add(String(x))
+            })
+          }
         }
       }
     }
@@ -587,9 +608,10 @@ export async function replyReasoningAsChat(e, reasoning, options = {}) {
   if (e.group_id && typeof bot?.makeForwardMsg === 'function') {
     try {
       const chunks = splitUnicodeSafe(text, 3000, { maxChunk: 5200 })
+      const firstNickname = options.prefix || '深度思考'
       const nodes = chunks.map((chunk, idx) => ({
         user_id: e.self_id || 0,
-        nickname: idx === 0 ? '深度思考' : '深度思考（续）',
+        nickname: idx === 0 ? firstNickname : '深度思考（续）',
         message: [{ type: 'text', text: chunk }]
       }))
       const fwd = await bot.makeForwardMsg(nodes)

@@ -126,6 +126,7 @@ if (route === 'dashboard') {
 
     $('#system_prompt').value = resp.config.system?.prompt || ''
     $('#agent_maxRounds').value = resp.config.agent?.maxRounds ?? 5
+    $('#agent_hardTimeoutMs').value = resp.config.agent?.hardTimeoutMs ?? 600000
 
     $('#perm_mode').value = String(resp.config.permissions?.whitelistMode ?? false)
     $('#perm_masters').value = (resp.config.permissions?.masters || []).join(',')
@@ -226,6 +227,11 @@ if (route === 'dashboard') {
       return
     }
     c.agent = { ...(c.agent || {}), maxRounds }
+    // Agent 硬超时（ms）：30s~30min，默认 600000（10 分钟）
+    const hardTimeoutMs = parseInt($('#agent_hardTimeoutMs').value, 10)
+    if (Number.isFinite(hardTimeoutMs) && hardTimeoutMs >= 30000 && hardTimeoutMs <= 1800000) {
+      c.agent.hardTimeoutMs = hardTimeoutMs
+    }
     c.permissions = {
       whitelistMode: $('#perm_mode').value === 'true',
       masters: splitCsvInt($('#perm_masters').value),

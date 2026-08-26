@@ -58,9 +58,9 @@
       <h3>Agent 配置</h3>
       <div class="grid-2">
         <label>最大执行轮数 <input id="agent_maxRounds" type="number" min="1" max="10000"/></label>
-        <label>&nbsp;</label>
+        <label>任务硬超时(ms) <input id="agent_hardTimeoutMs" type="number" min="30000" max="1800000" step="10000"/></label>
       </div>
-      <p class="hint">Agent 单次任务最大 LLM 调用轮数（≥1，无上限截断，受 API 配额/超时自然约束）。低配额 API（如 RPM≤3）建议 2~3；高配额可 5~8。</p>
+      <p class="hint">Agent 单次任务最大 LLM 调用轮数（≥1，无上限截断，受 API 配额/超时自然约束）。低配额 API（如 RPM≤3）建议 2~3；高配额可 5~8。任务硬超时默认 600000ms（10 分钟），范围 30000~1800000ms。</p>
 
       <hr>
       <h3>系统提示词</h3>
