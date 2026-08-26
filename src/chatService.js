@@ -3,6 +3,7 @@ import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
 import * as helper from './helper.js'
 import * as groupOps from './groupOps.js'
+import * as securityLog from './securityLog.js'
 import { safeLogger } from './globals.js'
 import * as imageGen from './imageGen.js'
 import * as agent from './agent.js'
@@ -609,7 +610,7 @@ export async function handleChat(e) {
     let historyText = replyText
     if (isGroup && groupContext) {
       try {
-        const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId, e)
+        const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId, e, { userId, sessionId })
         historyText = cleanText
         replyText = cleanText
         if (results.length) {
@@ -685,6 +686,7 @@ export async function handleChat(e) {
           assistantText: historyText,
           modelKey: defaultKey,
           signal: ac.signal,
+          audit: { userId, sessionId, groupId: isGroup ? groupId : undefined },
           onThinking: async (reasoning) => {
             const t = String(reasoning || '').trim()
             if (t) agentReasonings.push(t)
@@ -697,6 +699,15 @@ export async function handleChat(e) {
         }
       } catch (err) {
         safeLogger.error(`[ai0-plugin] Agent 执行异常: ${err.message}`)
+        securityLog.recordSecurityEvent({
+          kind: 'agent_error',
+          userId,
+          sessionId,
+          groupId: isGroup ? groupId : undefined,
+          action: 'Agent 任务',
+          ok: false,
+          reason: err.message,
+        })
         agentReasonings.push(`（Agent 执行出错：${err.message}）`)
       } finally {
         clearTimeout(timeoutTimer)

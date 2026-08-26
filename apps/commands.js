@@ -1544,6 +1544,7 @@ export class AICommands extends plugin {
       result = await agent.runAgentLoop({
         task,
         signal: outerAc.signal,
+        audit: { userId, groupId: e?.group_id ? String(e.group_id) : undefined },
         onThinking: async (reasoning) => {
           if (cfg.get('response.showReasoning', true) !== false) {
             await helper.replyReasoningAsChat(e, reasoning)

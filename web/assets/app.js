@@ -307,9 +307,12 @@ if (route === 'dashboard') {
         const item = document.createElement('div')
         item.className = 'sess-item'
         const time = new Date(s.mtime).toLocaleString()
+        const badges = []
+        if (s.agentUsed) badges.push('<span class="badge badge-agent" title="该会话使用了 Agent 执行命令">🤖 Agent</span>')
+        for (const r of (s.risks || [])) badges.push(`<span class="badge badge-risk" title="该会话存在安全风险事件">⚠️ ${escapeHtml(r)}</span>`)
         item.innerHTML = `
           <div class="sess-preview">${escapeHtml(s.preview || '(空会话)')}</div>
-          <div class="sess-meta">${s.msgCount}条 · ${time}</div>
+          <div class="sess-meta">${s.msgCount}条 · ${time}${badges.length ? ' · ' + badges.join(' ') : ''}</div>
         `
         item.onclick = () => loadSessionDetail(u.userId, s.id)
         list.appendChild(item)

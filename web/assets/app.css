@@ -208,6 +208,26 @@ input:focus, select:focus, textarea:focus {
 }
 .hidden { display: none !important; }
 
+/* 会话列表安全标注徽标 */
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.badge-agent {
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+.badge-risk {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+}
+
 .view { display: none; }
 .view.active { display: block; }
 

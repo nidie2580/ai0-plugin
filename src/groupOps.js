@@ -1,5 +1,6 @@
 import * as cfg from '../config/index.js'
 import * as helper from './helper.js'
+import * as securityLog from './securityLog.js'
 import { safeLogger } from './globals.js'
 
 /**
@@ -799,8 +800,9 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
  * 从 AI 回复中解析操作指令并执行
  * 返回 { cleanText, results }
  * @param {object} e - 消息事件对象（用于执行层的请求者权限校验，防止 AI 被诱导越权执行）
+ * @param {object} [audit] - 安全审计上下文 { userId?, sessionId? }，携带则同时写入安全审计日志与会话元数据
  */
-export async function parseAndExecuteActions(replyText, groupId, e = null) {
+export async function parseAndExecuteActions(replyText, groupId, e = null, audit = null) {
   const results = []
   // 匹配 [action:type:arg1:arg2...]
   const actionRe = /\[action:(\w+):([^\]]*)\]/g
@@ -1059,6 +1061,21 @@ export async function parseAndExecuteActions(replyText, groupId, e = null) {
       }
     } catch (err) {
       results.push({ type, ok: false, msg: `执行失败：${err.message}` })
+    }
+  }
+
+  // —— 安全审计：逐条记录群操作结果（执行/被拒），写入审计日志与会话元数据 ——
+  if (results.length && audit) {
+    for (const r of results) {
+      securityLog.recordSecurityEvent({
+        kind: r.ok ? 'group_op' : 'group_op_denied',
+        userId: audit.userId,
+        sessionId: audit.sessionId,
+        groupId: String(groupId ?? ''),
+        action: `[action:${r.type}:...]`,
+        ok: r.ok === true,
+        reason: r.ok ? undefined : r.msg,
+      })
     }
   }
 

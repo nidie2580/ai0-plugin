@@ -97,7 +97,7 @@ async function listSessions(limit = 100) {
 async function buildUserSessionRecord(ud, userId) {
   let files
   try {
-    files = (await fsp.readdir(ud)).filter(f => f.endsWith('.json'))
+    files = (await fsp.readdir(ud)).filter(f => f.endsWith('.json') && !f.endsWith('.meta.json'))
   } catch {
     return null
   }
@@ -115,7 +115,17 @@ async function buildUserSessionRecord(ud, userId) {
       const last = Array.isArray(arr) ? arr[arr.length - 1] : null
       if (last) preview = (last.content || '').slice(0, 60)
     } catch {}
-    return { id: f.replace(/\.json$/, ''), size, mtime, msgCount, preview }
+    // 会话安全元数据（agentUsed / risks）：Web 会话列表标注哪些会话用过 Agent、哪些有风险
+    let agentUsed = false, risks = []
+    try {
+      const mf = path.join(ud, f.replace(/\.json$/, '.meta.json'))
+      if (fs.existsSync(mf)) {
+        const meta = JSON.parse(fs.readFileSync(mf, 'utf-8'))
+        agentUsed = meta.agentUsed === true
+        risks = Array.isArray(meta.risks) ? meta.risks : []
+      }
+    } catch {}
+    return { id: f.replace(/\.json$/, ''), size, mtime, msgCount, preview, agentUsed, risks }
   }))
   sessions.sort((a, b) => b.mtime - a.mtime)
   return {
