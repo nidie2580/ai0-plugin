@@ -550,6 +550,8 @@ export async function handleChat(e) {
   // 再做一层超时保险：AbortController 配合 axios 的 signal，同时给 model timeout 留余地
   const modelCfg2 = cfg.loadConfig().model?.[defaultKey] || {}
   const rawTimeout = Number(modelCfg2.timeout)
+  // Agent 多轮循环期间的"最终兜底"硬超时：改为 10 分钟，防止死锁的同时不至于把长思考切断
+  const AGENT_HARD_TIMEOUT_MS = 600_000
   // 深度思考模型（model.xxx.thinking=true）单次响应可能思考 1~3 分钟，硬超时需放宽，避免思考被切断
   const isThinkingModel = modelCfg2.thinking === true
   const hardTimeout = isThinkingModel
@@ -564,7 +566,7 @@ export async function handleChat(e) {
   }
   const ac = new AbortController()
   let timedOut = false
-  const timeoutTimer = setTimeout(() => {
+  let timeoutTimer = setTimeout(() => {
     timedOut = true
     try { ac.abort('hard-timeout') } catch (_) {}
   }, hardTimeout)
@@ -657,20 +659,34 @@ export async function handleChat(e) {
 
     // 解析 Agent 命令指令并多轮循环执行（仅主人会话且已注入 agent 上下文时）
     if (agentContext && /\[action:agent:/i.test(replyText)) {
+      // 累计每轮深度思考，Agent 长任务默认不逐轮发送，任务结束/出错后统一汇总一次性发送（防刷屏）
+      const agentReasonings = []
+      const finishReasoning = async () => {
+        if (agentReasonings.length && cfg.get('response.showReasoning', true) !== false) {
+          try {
+            // 一次性汇总发送；prefix 标注这是汇总，避免与普通深度思考混淆
+            await helper.replyReasoningAsChat(e, agentReasonings.join('\n\n'), { prefix: '🔎 深度思考汇总：' })
+          } catch (_) {}
+        }
+        agentReasonings.length = 0
+      }
       try {
-        // 深度思考模型思考可能长达数分钟，agent 循环不应被 chatService 的硬超时立即截止，
-        // 而是等模型继续调用（由模型 timeout + 429 退避自然约束）。故此处清除硬超时 timer，
-        // 仅保留"被新请求取代"的取消能力（inflightChat 的 abort 仍生效）。
+        // 深度思考模型思考可能长达数分钟，agent 循环不应被 chatService 的初始硬超时立即截止，
+        // 但也不能完全清空超时（否则可能死锁）。故重新登记一个放宽到 10 分钟的超时作为最终兜底；
+        // 超时或"新请求取代/新会话"时仍通过 ac.abort() 彻底终止底层 LLM 请求。
         clearTimeout(timeoutTimer)
+        timeoutTimer = setTimeout(() => {
+          timedOut = true
+          try { ac.abort('hard-timeout') } catch (_) {}
+        }, AGENT_HARD_TIMEOUT_MS)
         const agentLoop = await agent.continueAgentInHistory({
           history,
           assistantText: historyText,
           modelKey: defaultKey,
           signal: ac.signal,
           onThinking: async (reasoning) => {
-            if (cfg.get('response.showReasoning', true) !== false) {
-              await helper.replyReasoningAsChat(e, reasoning)
-            }
+            const t = String(reasoning || '').trim()
+            if (t) agentReasonings.push(t)
           }
         })
         historyText = agentLoop.finalText
@@ -680,6 +696,9 @@ export async function handleChat(e) {
         }
       } catch (err) {
         safeLogger.error(`[ai0-plugin] Agent 执行异常: ${err.message}`)
+        agentReasonings.push(`（Agent 执行出错：${err.message}）`)
+      } finally {
+        await finishReasoning()
       }
     }
 

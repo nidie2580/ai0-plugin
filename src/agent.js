@@ -31,22 +31,47 @@ const DEFAULT_MAX_ROUNDS = 5
 
 // 两次 LLM 调用之间的最小间隔（毫秒）：多轮循环连续调用时若间隔过短会触发上游速率限制
 const DEFAULT_CALL_INTERVAL_MS = 1000
-// —— 429 速率限制固定退避策略 ——
+// —— 429 速率限制退避策略（指数退避，可被信号中断） ——
 // 低配额账号（如 Kimi RPM=3，即每分钟最多 3 次）在 1s 后重试会立刻再次撞上限额，
-// 因此不依赖解析 retry-after（各 provider 格式不一），统一固定等待 60 秒后再重试。
-// 等待/次数可通过 setRateLimitRetryConfig 覆盖（测试用），默认 60s / 最多重试 3 次（共 4 次尝试）。
-let RATE_LIMIT_RETRY_WAIT_MS = 60_000
+// 因此不依赖解析 retry-after（各 provider 格式不一），而是用"指数退避"：
+//   第 1 次重试等 base，第 2 次等 base*2，第 3 次等 base*4 … 封顶 RATE_LIMIT_RETRY_CAP_MS。
+// 相比固定 60s：既满足低配额账号"须等 60s"的底线，又防止高并发多次重试时请求堆积。
+// 参数可通过 setRateLimitRetryConfig 覆盖（测试用），默认 base=30s / cap=180s / 最多重试 3 次。
+let RATE_LIMIT_RETRY_BASE_MS = 30_000
+let RATE_LIMIT_RETRY_CAP_MS = 180_000
 let RATE_LIMIT_MAX_RETRIES = 3
-/** 覆盖 429 退避参数（测试用）：waitMs=固定等待毫秒，maxRetries=最多重试次数 */
-export function setRateLimitRetryConfig(waitMs, maxRetries) {
-  if (Number.isFinite(waitMs) && waitMs >= 0) RATE_LIMIT_RETRY_WAIT_MS = waitMs
+/** 覆盖 429 退避参数（测试用）：baseMs=指数退避基值毫秒，maxRetries=最多重试次数 */
+export function setRateLimitRetryConfig(baseMs, maxRetries) {
+  if (Number.isFinite(baseMs) && baseMs >= 0) RATE_LIMIT_RETRY_BASE_MS = baseMs
   if (Number.isFinite(maxRetries) && maxRetries >= 0) RATE_LIMIT_MAX_RETRIES = maxRetries
+}
+/** 第 attempt 次重试前的等待时长（指数退避，封顶） */
+function rateLimitWaitMs(attempt) {
+  return Math.min(RATE_LIMIT_RETRY_BASE_MS * Math.pow(2, attempt - 1), RATE_LIMIT_RETRY_CAP_MS)
 }
 // 模块级：记录上一次 LLM 调用的完成时间，用于轮间间隔控制
 let lastLlmCallTime = 0
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, Math.max(0, Number(ms) || 0)))
+}
+
+/** 可被 signal 中断的等待：abort 后立即 resolve，供退避等待使用，避免硬超时后被长等待卡住 */
+function sleepInterruptible(ms, signal = null) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { cleanup(); resolve() }, Math.max(0, Number(ms) || 0))
+    const onAbort = () => { cleanup(); resolve() }
+    const cleanup = () => {
+      clearTimeout(t)
+      if (signal) {
+        try { signal.removeEventListener('abort', onAbort) } catch (_) {}
+      }
+    }
+    if (signal) {
+      if (signal.aborted) { resolve(); return }
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+  })
 }
 
 /** 判断某次 LLM 调用错误是否为 429 速率限制 */
@@ -59,8 +84,9 @@ function isRateLimit(err) {
 /**
  * 带速率限制与重试的 LLM 调用：
  *   1) 调用前保证与上一次调用的间隔 ≥ agent.callIntervalMs（防限流）
- *   2) 429 速率限制：固定等待 RATE_LIMIT_RETRY_WAIT_MS（默认 60s）后重试，
- *      最多重试 RATE_LIMIT_MAX_RETRIES（默认 3）次；仍失败返回错误
+ *   2) 429 速率限制：按指数退避等待（base 30s，逐次翻倍，封顶 180s）后重试，
+ *      最多重试 RATE_LIMIT_MAX_RETRIES（默认 3）次；仍失败返回错误。
+ *      退避等待可被 opts.signal 的 abort 中断（硬超时 / 新请求取代时立即跳出，不空等）
  *   3) 非 429 错误：直接返回错误，不做重试（避免掩盖真实故障）
  * @param {object} opts 透传给 llm.chatCompletions 的选项（modelKey/signal 等）
  * @param {Function} [callFn] 可注入的调用函数（测试用），默认走 llm.chatCompletions
@@ -69,9 +95,9 @@ function isRateLimit(err) {
 export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = {}) {
   const conf = cfg.get('agent', {}) || {}
   const callInterval = Number(conf.callIntervalMs) || DEFAULT_CALL_INTERVAL_MS
-  // —— 轮间间隔控制：距上次调用不足 callIntervalMs 则先等待 ——
+  // —— 轮间间隔控制：距上次调用不足 callIntervalMs 则先等待（可被 signal 中断） ——
   const wait = callInterval - (Date.now() - lastLlmCallTime)
-  if (wait > 0) await sleep(wait)
+  if (wait > 0) await sleepInterruptible(wait, opts.signal)
   lastLlmCallTime = Date.now()
 
   const chat = callFn || ((msgs, o) => llm.chatCompletions(msgs, o))
@@ -89,8 +115,11 @@ export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = 
         return { ok: false, error: err, aborted: false }
       }
       if (attempt >= maxAttempts) break
-      safeLogger.warn(`[ai0-plugin] Agent LLM 调用触发速率限制(第${attempt}次)，固定等待 ${RATE_LIMIT_RETRY_WAIT_MS / 1000}s 后重试: ${sanitizeLog(err?.message || err)}`)
-      await sleep(RATE_LIMIT_RETRY_WAIT_MS)
+      // 指数退避：第 attempt 次失败后等 rateLimitWaitMs(attempt)，且可被超时/新请求的 abort 中断
+      const backoff = rateLimitWaitMs(attempt)
+      safeLogger.warn(`[ai0-plugin] Agent LLM 调用触发速率限制(第${attempt}次)，指数退避等 ${backoff / 1000}s 后重试: ${sanitizeLog(err?.message || err)}`)
+      const slept = await sleepInterruptible(backoff, opts.signal)
+      if (opts.signal?.aborted) return { ok: false, error: lastErr, aborted: true }
     }
   }
   return { ok: false, error: lastErr }
