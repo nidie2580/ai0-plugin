@@ -9,7 +9,8 @@ import {
   buildEndpoint,
   saveHistory,
   loadHistory,
-  cleanupOldSessions
+  cleanupOldSessions,
+  extractReasoning
 } from '../../src/llm.js'
 
 // llm.js 引用 Yunzai 全局 logger；测试环境注入 mock
@@ -181,5 +182,34 @@ describe('llm: 会话历史持久化', () => {
       assert.equal(kept, undefined)
       assert.equal(fs.existsSync(f), false)
     } finally { cleanTestUser() }
+  })
+})
+
+describe('llm: extractReasoning 深度思考内容提取', () => {
+  test('message.reasoning_content（DeepSeek-R1 风格）', () => {
+    const choice = { message: { content: '答案', reasoning_content: '先分析问题…' } }
+    assert.equal(extractReasoning(choice), '先分析问题…')
+  })
+
+  test('message.reasoning / message.thinking 兼容', () => {
+    assert.equal(extractReasoning({ message: { reasoning: 'r1' } }), 'r1')
+    assert.equal(extractReasoning({ message: { thinking: 't1' } }), 't1')
+  })
+
+  test('流式 delta.reasoning_content 兼容', () => {
+    assert.equal(extractReasoning({ delta: { reasoning_content: 'stream' } }), 'stream')
+  })
+
+  test('缺失/空白/非字符串返回空串', () => {
+    assert.equal(extractReasoning(undefined), '')
+    assert.equal(extractReasoning({}), '')
+    assert.equal(extractReasoning({ message: {} }), '')
+    assert.equal(extractReasoning({ message: { reasoning_content: '   ' } }), '')
+    assert.equal(extractReasoning({ message: { reasoning: 123 } }), '')
+  })
+
+  test('优先级：reasoning_content > reasoning > thinking', () => {
+    const choice = { message: { reasoning_content: 'a', reasoning: 'b', thinking: 'c' } }
+    assert.equal(extractReasoning(choice), 'a')
   })
 })

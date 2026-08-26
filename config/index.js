@@ -35,6 +35,12 @@ model:
     temperature: 0.8
     maxTokens: 2000
     timeout: 60000
+    # 是否深度思考模型（如 DeepSeek-R1 / Qwen3 thinking 等）：
+    #   true 时① 思考过程会以"聊天记录"形式发送（可关 response.showReasoning）
+    #       ② 单次请求超时放宽到 thinkingTimeout（未配则用 timeout，兜底 180s），避免思考被切断
+    thinking: false
+    # 深度思考模型单次请求超时（毫秒，可选，仅在 thinking:true 时生效）
+    thinkingTimeout: 300000
 
 # 对话设置
 chat:
@@ -210,6 +216,8 @@ response:
   thinkingDelay: 500
   # 是否在回复末尾追加模型名（如"\\n\\n—— AI0模型"）。默认关闭，只输出AI纯回复
   showModelTag: false
+  # 是否把深度思考模型的思考过程以"聊天记录"（合并转发）形式发送。默认开启
+  showReasoning: true
 
 # 网页管理后台
 web:

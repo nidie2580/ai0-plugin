@@ -1,6 +1,79 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeApiBase } from '../../src/helper.js'
+import { normalizeApiBase, replyReasoningAsChat } from '../../src/helper.js'
+
+globalThis.logger = {
+  info: () => {}, warn: () => {}, error: () => {}, mark: () => {}
+}
+
+describe('helper: replyReasoningAsChat 深度思考聊天记录发送', () => {
+  test('群聊 + makeForwardMsg：以合并转发（聊天记录）发送', async () => {
+    let fwdNodes = null
+    const makeForwardMsg = async (nodes) => {
+      fwdNodes = nodes
+      return { type: 'forward', data: {} }
+    }
+    const replies = []
+    const e = {
+      group_id: 123,
+      self_id: 10000,
+      bot: { makeForwardMsg },
+      reply: async (msg) => { replies.push(msg) }
+    }
+    const out = await replyReasoningAsChat(e, '先思考 A，再思考 B')
+    assert.equal(out, true)
+    assert.ok(Array.isArray(fwdNodes) && fwdNodes.length === 1, '短思考应为单节点转发')
+    assert.equal(fwdNodes[0].nickname, '深度思考')
+    assert.match(fwdNodes[0].message[0].text, /先思考 A/)
+    assert.equal(replies.length, 1, '应回复转发消息')
+  })
+
+  test('长思考分段为多个节点', async () => {
+    let fwdNodes = null
+    const makeForwardMsg = async (nodes) => {
+      fwdNodes = nodes
+      return { type: 'forward', data: {} }
+    }
+    const e = {
+      group_id: 123,
+      self_id: 10000,
+      bot: { makeForwardMsg },
+      reply: async () => {}
+    }
+    await replyReasoningAsChat(e, '行\n'.repeat(4000))
+    assert.ok(fwdNodes.length > 1, `长文本应拆多节点，实际 ${fwdNodes?.length}`)
+  })
+
+  test('私聊（无 group_id）降级普通回复并带前缀', async () => {
+    const replies = []
+    const e = { self_id: 10000, reply: async (msg) => { replies.push(msg) } }
+    await replyReasoningAsChat(e, '思考内容')
+    assert.equal(replies.length, 1)
+    assert.match(String(replies[0]), /深度思考/)
+    assert.match(String(replies[0]), /思考内容/)
+  })
+
+  test('makeForwardMsg 抛错时降级普通回复', async () => {
+    const replies = []
+    const e = {
+      group_id: 123,
+      self_id: 10000,
+      bot: { makeForwardMsg: async () => { throw new Error('adapter fail') } },
+      reply: async (msg) => { replies.push(msg) }
+    }
+    await replyReasoningAsChat(e, '降级内容')
+    assert.equal(replies.length, 1)
+    assert.match(String(replies[0]), /降级内容/)
+  })
+
+  test('空思考内容不发送', async () => {
+    const replies = []
+    const e = { group_id: 1, reply: async (msg) => { replies.push(msg) } }
+    const out = await replyReasoningAsChat(e, '   ')
+    assert.equal(out, null)
+    assert.equal(replies.length, 0)
+  })
+})
 
 describe('helper: normalizeApiBase', () => {
   test('空值/非字符串返回空串', () => {

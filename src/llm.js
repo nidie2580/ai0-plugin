@@ -436,6 +436,13 @@ export async function chatCompletions(messages, {
     max_tokens: effMaxTokens
   }
 
+  // 深度思考模型：thinking=true 时单次响应可能思考 1~3 分钟，
+  // 按 m.thinkingTimeout（未配则用 m.timeout，再兜底 180s）放宽请求超时，避免思考被切断
+  const isThinking = m.thinking === true
+  const effTimeout = isThinking
+    ? Math.max(Number(m.thinkingTimeout) || Number(m.timeout) || 180_000, 180_000)
+    : (Number(m.timeout) || 60000)
+
   // safeLogger 自带 console 降级，无需判全局 logger（原 typeof logger 守卫在无全局 logger 时会静默跳过日志）
   safeLogger.info(`[ai0-plugin] LLM 请求：base(原始)=${sanitizeLog(rawBase)}  base(归一化)=${sanitizeLog(normalizedBase)}  url=${sanitizeLog(url)}  model=${sanitizeLog(model)}  apiKey=${redactKey(m.apiKey)}`)
 
@@ -446,7 +453,7 @@ export async function chatCompletions(messages, {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${rawKey}`
       },
-      timeout: m.timeout ?? 60000,
+      timeout: effTimeout,
       signal,
     })
   } catch (e) {
@@ -522,11 +529,32 @@ export async function chatCompletions(messages, {
   if (choice?.message?.content) text = choice.message.content
   else if (choice?.delta?.content) text = choice.delta.content
   else if (typeof resp.data?.content === 'string') text = resp.data.content
+
+  // 提取深度思考内容（DeepSeek-R1 / Qwen3 thinking 等）
+  const reasoning = extractReasoning(choice)
+
   const usage = resp.data?.usage || null
   return {
     text,
+    reasoning,
     usage,
     modelName: m.name || m.model || modelCfgKey
   }
+}
+
+/**
+ * 从响应 choice 中提取深度思考内容。
+ * 兼容字段：message.reasoning_content（DeepSeek-R1）/ message.reasoning / message.thinking
+ * 以及流式 delta.reasoning_content。仅接受字符串且非空白；上限 20000 字符防上下文爆炸。
+ */
+export function extractReasoning(choice) {
+  const msg = choice?.message
+  let raw = ''
+  if (msg?.reasoning_content && typeof msg.reasoning_content === 'string') raw = msg.reasoning_content
+  else if (msg?.reasoning && typeof msg.reasoning === 'string') raw = msg.reasoning
+  else if (msg?.thinking && typeof msg.thinking === 'string') raw = msg.thinking
+  else if (choice?.delta?.reasoning_content && typeof choice.delta.reasoning_content === 'string') raw = choice.delta.reasoning_content
+  const trimmed = String(raw || '').trim()
+  return trimmed ? trimmed.slice(0, 20_000) : ''
 }
 

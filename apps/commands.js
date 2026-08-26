@@ -1525,7 +1525,14 @@ export class AICommands extends plugin {
     await e.reply('开始执行 Agent 任务，请稍候…（可在日志中查看进度）')
     let result
     try {
-      result = await agent.runAgentLoop({ task })
+      result = await agent.runAgentLoop({
+        task,
+        onThinking: async (reasoning) => {
+          if (cfg.get('response.showReasoning', true) !== false) {
+            await helper.replyReasoningAsChat(e, reasoning)
+          }
+        }
+      })
     } catch (err) {
       safeLogger.error(`[ai0-plugin] Agent 任务执行异常: ${err?.message || err}`)
       return e.reply(`❌ Agent 任务执行异常：${err?.message || err}`)

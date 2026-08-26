@@ -590,7 +590,7 @@ export function createApp() {
     // — P0-2: 模型子键白名单 —
     if (config.model && typeof config.model === 'object') {
       const ALLOWED_MODEL_FIELDS = new Set([
-        'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout'
+        'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout', 'thinking', 'thinkingTimeout'
       ])
       for (const [key, val] of Object.entries(config.model)) {
         if (key === 'default') continue

@@ -573,6 +573,36 @@ export async function replyForward(e, text) {
 }
 
 /**
+ * 把模型的「深度思考过程」以聊天记录（合并转发）形式发送给用户。
+ * 思考型模型（DeepSeek-R1 / Qwen3 thinking 等）在 reasoning_content 返回思考内容，
+ * 深度思考完毕后由调用方触发本函数，模拟一段"聊天记录"呈现给用户。
+ * 私聊 / 适配器不支持合并转发时降级为带标记的普通文本。
+ */
+export async function replyReasoningAsChat(e, reasoning, options = {}) {
+  const text = String(reasoning || '').trim()
+  if (!text) return null
+  const bot = e.bot ?? global.Bot ?? global.bot
+  // 群聊优先用合并转发（聊天记录形态）；私聊或缺少 makeForwardMsg 则降级普通回复
+  if (e.group_id && typeof bot?.makeForwardMsg === 'function') {
+    try {
+      const chunks = splitUnicodeSafe(text, 3000, { maxChunk: 5200 })
+      const nodes = chunks.map((chunk, idx) => ({
+        user_id: e.self_id || 0,
+        nickname: idx === 0 ? '深度思考' : '深度思考（续）',
+        message: [{ type: 'text', text: chunk }]
+      }))
+      const fwd = await bot.makeForwardMsg(nodes)
+      await e.reply(fwd)
+      return true
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 深度思考转发失败，降级普通回复: ${err.message}`)
+    }
+  }
+  const prefix = options.prefix ?? '💭 深度思考：'
+  return e.reply(prefix + text.slice(0, 3000))
+}
+
+/**
  * Unicode 安全分段：
  *  - 不会截断 UTF-16 surrogate pair（避免单个 emoji 被切成两半，进而发送失败/乱码）
  *  - 优先在换行、句号、感叹号、问号、逗号、分号、反引号闭合位置切，不硬截断单词中间

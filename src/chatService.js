@@ -550,7 +550,11 @@ export async function handleChat(e) {
   // 再做一层超时保险：AbortController 配合 axios 的 signal，同时给 model timeout 留余地
   const modelCfg2 = cfg.loadConfig().model?.[defaultKey] || {}
   const rawTimeout = Number(modelCfg2.timeout)
-  const hardTimeout = Number.isFinite(rawTimeout) && rawTimeout > 500 ? Math.min(rawTimeout * 1.3 + 5000, 180_000) : 90_000
+  // 深度思考模型（model.xxx.thinking=true）单次响应可能思考 1~3 分钟，硬超时需放宽，避免思考被切断
+  const isThinkingModel = modelCfg2.thinking === true
+  const hardTimeout = isThinkingModel
+    ? Math.min((Number.isFinite(rawTimeout) && rawTimeout > 500 ? rawTimeout : 90_000) * 2 + 30_000, 600_000)
+    : (Number.isFinite(rawTimeout) && rawTimeout > 500 ? Math.min(rawTimeout * 1.3 + 5000, 180_000) : 90_000)
   pruneMapToSize(inflightChat, MAX_INFLIGHT)
   const inflightKey = `${userId}/${sessionId}`
   const prev = inflightChat.get(inflightKey)
@@ -570,6 +574,14 @@ export async function handleChat(e) {
     const res = await llm.chatCompletions(history, { signal: ac.signal })
     replyText = res.text
     modelName = res.modelName
+    // 深度思考模型：思考完毕后把思考过程以"聊天记录"（合并转发）形式发送
+    if (res?.reasoning && cfg.get('response.showReasoning', true) !== false) {
+      try {
+        await helper.replyReasoningAsChat(e, res.reasoning)
+      } catch (err) {
+        safeLogger.warn(`[ai0-plugin] 发送深度思考过程失败: ${err?.message || err}`)
+      }
+    }
   } catch (err) {
     // 区分"硬超时"与"被新请求取代/取消"，避免用宽泛正则把真实错误当取消静默吞掉
     if (err?.name === 'CanceledError') {
@@ -646,11 +658,20 @@ export async function handleChat(e) {
     // 解析 Agent 命令指令并多轮循环执行（仅主人会话且已注入 agent 上下文时）
     if (agentContext && /\[action:agent:/i.test(replyText)) {
       try {
+        // 深度思考模型思考可能长达数分钟，agent 循环不应被 chatService 的硬超时立即截止，
+        // 而是等模型继续调用（由模型 timeout + 429 退避自然约束）。故此处清除硬超时 timer，
+        // 仅保留"被新请求取代"的取消能力（inflightChat 的 abort 仍生效）。
+        clearTimeout(timeoutTimer)
         const agentLoop = await agent.continueAgentInHistory({
           history,
           assistantText: historyText,
           modelKey: defaultKey,
-          signal: ac.signal
+          signal: ac.signal,
+          onThinking: async (reasoning) => {
+            if (cfg.get('response.showReasoning', true) !== false) {
+              await helper.replyReasoningAsChat(e, reasoning)
+            }
+          }
         })
         historyText = agentLoop.finalText
         replyText = agentLoop.finalText

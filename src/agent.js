@@ -430,9 +430,11 @@ function formatResult(r) {
 
 /**
  * 多轮 Agent 自动循环：任务 → AI 出命令 → 执行 → 结果回传 → 继续，直到完成或达轮数上限。
+ * @param {Function} [onThinking] 每轮模型返回深度思考内容时回调 (reasoning: string) => Promise|void
+ * @param {Function} [callFn] 可注入的 LLM 调用函数（测试用），默认走 llm.chatCompletions
  * @returns {{ done: boolean, finalText: string, rounds: number, logs: Array }}
  */
-export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
+export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinking = null, callFn = null } = {}) {
   initWorkspaceFiles()
   const conf = cfg.get('agent', {}) || {}
   // 严格读取配置（网页端/config.yaml 可写任意 ≥1 的值），无硬上限截断，受 API 配额与超时自然约束
@@ -456,7 +458,7 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
   let finalText = ''
 
   for (let i = 0; i < rounds; i++) {
-    const call = await callLlmWithRetry({ messages, opts: { modelKey } })
+    const call = await callLlmWithRetry({ messages, opts: { modelKey }, callFn })
     if (!call.ok) {
       const reason = call.aborted ? '（请求已被取消/超时）'
         : isRateLimit(call.error) ? 'Agent 因 API 速率限制暂时无法继续，请稍后重试或降低 maxRounds 配置'
@@ -467,6 +469,10 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null } = {}) {
     }
     const res = call.res
     const text = String(res?.text || '').trim()
+    // 深度思考内容：回调发送方（如以聊天记录形式发到群/私聊），不阻断循环
+    if (res?.reasoning && typeof onThinking === 'function') {
+      try { await onThinking(String(res.reasoning).trim()) } catch (_) {}
+    }
     if (!text) { finalText = '模型未产生输出，任务提前结束。'; return { done: false, finalText, rounds: i, logs } }
 
     const match = text.match(/\[action:agent:([^\]]+)\]/)
@@ -518,9 +524,11 @@ export async function parseAndExecuteAgentAction(replyText) {
  * 在已有对话 history 上继续 Agent 多轮循环（供 chatService 普通对话集成）。
  * AI 首次输出含 [action:agent:...] 后，循环：执行命令 → 结果回传 LLM → 继续，
  * 直到 AI 不再输出 agent 指令或达轮数上限。
+ * @param {Function} [onThinking] 每轮模型返回深度思考内容时回调 (reasoning: string) => Promise|void
+ * @param {Function} [callFn] 可注入的 LLM 调用函数（测试用），默认走 llm.chatCompletions
  * @returns {{ done, finalText, rounds, logs }}
  */
-export async function continueAgentInHistory({ history, assistantText, modelKey = null, signal = null, maxRounds = null } = {}) {
+export async function continueAgentInHistory({ history, assistantText, modelKey = null, signal = null, maxRounds = null, onThinking = null, callFn = null } = {}) {
   initWorkspaceFiles()
   const conf = cfg.get('agent', {}) || {}
   // 严格读取配置（网页端/config.yaml 可写任意 ≥1 的值），无硬上限截断，受 API 配额与超时自然约束
@@ -532,12 +540,16 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
   let executed = 0
 
   const roundTrip = async () => {
-    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal } })
+    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal }, callFn })
     if (!call.ok) {
-      if (call.aborted || signal?.aborted) return { aborted: true, error: '' }
-      return { rateLimit: isRateLimit(call.error), aborted: false, error: sanitizeLog(call.error?.message || call.error) }
+      if (call.aborted || signal?.aborted) return { error: { aborted: true, message: '' } }
+      return { error: { rateLimit: isRateLimit(call.error), aborted: false, message: sanitizeLog(call.error?.message || call.error) } }
     }
-    return String(call.res?.text || '').trim()
+    // 深度思考内容：回调发送方（如以聊天记录形式发到群/私聊），不阻断循环
+    if (call.res?.reasoning && typeof onThinking === 'function') {
+      try { await onThinking(String(call.res.reasoning).trim()) } catch (_) {}
+    }
+    return { text: String(call.res?.text || '').trim(), reasoning: String(call.res?.reasoning || '').trim() }
   }
 
   while (executed < cap) {
@@ -556,13 +568,13 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
     }
     executed++
     const next = await roundTrip()
-    if (typeof next !== 'string') {
-      const reason = next.aborted ? '（请求已被取消/超时）'
-        : next.rateLimit ? 'Agent 因 API 速率限制暂时无法继续，请稍后重试或降低 maxRounds 配置'
-        : next.error || '（未知错误）'
+    if (next.error) {
+      const reason = next.error.aborted ? '（请求已被取消/超时）'
+        : next.error.rateLimit ? 'Agent 因 API 速率限制暂时无法继续，请稍后重试或降低 maxRounds 配置'
+        : next.error.message || '（未知错误）'
       return { done: false, finalText: `Agent 执行中断：模型调用失败 ${reason}`, rounds: executed, logs }
     }
-    text = next
+    text = next.text
     if (!text) return { done: false, finalText: '模型未产生输出，Agent 提前结束。', rounds: executed, logs }
   }
 
