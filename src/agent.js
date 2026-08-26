@@ -383,9 +383,21 @@ export function runCommand(cmd, opts = {}) {
     const conf = cfg.get('agent', {}) || {}
     const timeout = Number(conf.commandTimeout) || DEFAULT_COMMAND_TIMEOUT
     const cwd = opts.cwd || WORKSPACE
+    // —— realpath 锁定工作目录：防止通过符号链接 / `..` 让命令逃逸出 workspace ——
+    let realCwd = WORKSPACE
+    try {
+      const resolved = path.isAbsolute(cwd) ? cwd : path.resolve(WORKSPACE, cwd)
+      realCwd = fs.realpathSync.native(resolved)
+      const realRoot = fs.realpathSync.native(WORKSPACE)
+      if (!(realCwd === realRoot || realCwd.startsWith(realRoot + path.sep))) {
+        return resolve({ ok: false, code: -1, costMs: 0, error: `命令被安全策略拒绝：工作目录超出沙箱（${cwd}）`, detail: `工作目录 ${cwd} 解析后不在 workspace 内，拒绝执行` })
+      }
+    } catch (err) {
+      return resolve({ ok: false, code: -1, costMs: 0, error: `命令被安全策略拒绝：无法校验工作目录`, detail: sanitizeLog(err?.message || err) })
+    }
     const start = Date.now()
     exec(cmd, {
-      cwd,
+      cwd: realCwd,
       timeout,
       maxBuffer: 5 * 1024 * 1024,
       windowsHide: true,

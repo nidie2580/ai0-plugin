@@ -959,14 +959,16 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
         for (const u of info.publicUrls) lines.push(`    - ${u}`)
       }
       if (h === '0.0.0.0' || h === '::') {
-        lines.push(`  ⚠️ 已开启对外监听（0.0.0.0），请确认以下安全措施：`)
-        lines.push(`    · 云服务器安全组 / iptables/防火墙已放行 TCP ${actualPort}，但务必仅放行受信任的来源 IP；`)
-        lines.push(`    · 公网暴露强烈建议套反代（Nginx/Caddy）+ HTTPS，并在插件配置 web.trustProxy=true 以读取真实 IP；`)
-        lines.push(`    · 主人专属免登录链接（有效期10分钟）仅发私聊，请勿转发到公开群/频道；`)
-        lines.push(`    · 默认验证码仅终端可查看，但已开启速率限制（每IP 60秒最多10次）+ 单ID错误5次即作废。`)
-        if (cfg.get('web.trustProxy', false) !== true) {
-          lines.push(`  ⚠️ Magic Link 绑定 IP 功能：未开启 trustProxy 时，所有请求 IP 相同，链接可被转发使用。建议配置 web.trustProxy=true`)
-        }
+        const warnLines = []
+        warnLines.push(`[ai0-plugin] ⚠️⚠️ 网页后台正在对外监听 ${h}:${actualPort}（公网暴露风险！）⚠️⚠️`)
+        warnLines.push(`    仅当部署在可信内网/已套反向代理时才应绑定 0.0.0.0/::。正式公网部署请：`)
+        warnLines.push(`    · 优先绑定 127.0.0.1，或经 Nginx/Caddy + HTTPS 反向代理对外暴露；`)
+        warnLines.push(`    · 主机防火墙仅放行受信任来源 IP 的 TCP ${actualPort}；`)
+        warnLines.push(`    · 在插件配置 web.trustProxy=true 以读取真实 IP，并启用强密码/主人绑定。`)
+        const warnTxt = warnLines.join('\n')
+        // 双重醒目：info 日志 + 直接写 stderr（数秒内持续提示），确保控制台无法错过
+        safeLogger.warn(warnTxt)
+        try { process.stderr.write('\n' + warnTxt + '\n') } catch (_) {}
       }
       const msg = lines.join('\n')
       safeLogger.info(msg)
