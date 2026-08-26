@@ -24,7 +24,7 @@ const WORKSPACE = path.join(AGENT_ROOT, 'workspace')
 const DEFAULT_COMMAND_TIMEOUT = 30_000
 const MAX_CMD_LEN = 2000
 const MAX_OUTPUT_CHARS = 3000
-// 单次任务最大 LLM 调用轮数默认值：5（比旧值 8 更保守，适配 RPM≤3 的低配额账号如 Kimi）
+// 单次任务最大 LLM 调用轮数默认���：5（比旧值 8 更保守，适配 RPM≤3 的低配额账号如 Kimi）
 // 网页后台可配置 agent.maxRounds，代码不再做硬上限截断（彻底放开，受 API 配额与超时自然约束），
 // 仅要求 ≥1，此处作为"未配置时的兜底默认值"
 const DEFAULT_MAX_ROUNDS = 5
@@ -419,19 +419,25 @@ export function runCommand(cmd, opts = {}) {
       realCwd = fs.realpathSync.native(resolved)
       const realRoot = fs.realpathSync.native(WORKSPACE)
       if (!(realCwd === realRoot || realCwd.startsWith(realRoot + path.sep))) {
-        return resolve({ ok: false, code: -1, costMs: 0, error: `命令被安全策略拒绝：工作目录超出沙箱（${cwd}）`, detail: `工作目录 ${cwd} 解析后不在 workspace 内，拒绝执行` })
+        return resolve({ ok: false, code: -1, costMs: 0, error: `命令被安全策略拒绝：工作目录超出沙箱（${cwd}）`, detail: `工作目录 ${cwd} 解析后不在 workspace 内，拒绝` })
       }
     } catch (err) {
       return resolve({ ok: false, code: -1, costMs: 0, error: `命令被安全策略拒绝：无法校验工作目录`, detail: sanitizeLog(err?.message || err) })
     }
     const start = Date.now()
-    exec(cmd, {
+
+    // 使用 exec 返回的 child 以便在外部 signal.abort 时强制 kill
+    let abortedBySignal = false
+    const child = exec(cmd, {
       cwd: realCwd,
       timeout,
       maxBuffer: 5 * 1024 * 1024,
       windowsHide: true,
       encoding: 'utf-8'
     }, (err, stdout, stderr) => {
+      // cleanup signal listener
+      try { if (opts.signal) opts.signal.removeEventListener && opts.signal.removeEventListener('abort', onAbort) } catch (_) {}
+
       const out = String(stdout || '').trim()
       const errOut = String(stderr || '').trim()
       const errMsg = err ? String(err?.message || err) : ''
@@ -441,6 +447,7 @@ export function runCommand(cmd, opts = {}) {
         ok: !err,
         code: err?.code ?? 0,
         timedOut: !!err?.killed || /timed out/i.test(errMsg),
+        aborted: abortedBySignal,
         costMs,
         stdout: out.slice(0, MAX_OUTPUT_CHARS),
         stderr: errOut.slice(0, MAX_OUTPUT_CHARS),
@@ -448,6 +455,21 @@ export function runCommand(cmd, opts = {}) {
         detail: sanitizeLog(detail).slice(0, MAX_OUTPUT_CHARS)
       })
     })
+
+    // attach abort listener to kill child process when provided signal aborts
+    const onAbort = () => {
+      abortedBySignal = true
+      try { child.kill && child.kill('SIGKILL') } catch (_) {}
+    }
+    if (opts.signal) {
+      try {
+        if (opts.signal.aborted) {
+          onAbort()
+        } else if (opts.signal.addEventListener) {
+          opts.signal.addEventListener('abort', onAbort, { once: true })
+        }
+      } catch (_) {}
+    }
   })
 }
 
@@ -469,6 +491,19 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinkin
   // 严格读取配置（网页端/config.yaml 可写任意 ≥1 的值），无硬上限截断，受 API 配额与超时自然约束
   const rounds = Math.max(1, Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS)
 
+  // 硬超时（整次 Agent 任务最长期限），10 分钟兜底
+  const AGENT_HARD_TIMEOUT_MS = Number(conf.hardTimeoutMs) || 600_000
+  const ac = new AbortController()
+  let hardTimer = null
+  function resetHardTimer() {
+    try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
+    hardTimer = setTimeout(() => {
+      safeLogger.warn('[ai0-plugin] Agent 硬超时触发，abort')
+      try { ac.abort() } catch (_) {}
+    }, AGENT_HARD_TIMEOUT_MS)
+  }
+  resetHardTimer()
+
   const sys = [
     buildAgentContext(),
     '',
@@ -487,13 +522,17 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinkin
   let finalText = ''
 
   for (let i = 0; i < rounds; i++) {
-    const call = await callLlmWithRetry({ messages, opts: { modelKey }, callFn })
+    // 重置硬超时，延长任务整体窗口
+    resetHardTimer()
+
+    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal }, callFn })
     if (!call.ok) {
       const reason = call.aborted ? '（请求已被取消/超时）'
         : isRateLimit(call.error) ? 'Agent 因 API 速率限制暂时无法继续，请稍后重试或降低 maxRounds 配置'
         : sanitizeLog(call.error?.message || call.error)
       finalText = `Agent 执行中断：模型调用失败 ${reason}`
       safeLogger.error(`[ai0-plugin] agent 循环模型调用失败: ${reason}`)
+      try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
       return { done: false, finalText, rounds: i, logs }
     }
     const res = call.res
@@ -502,12 +541,13 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinkin
     if (res?.reasoning && typeof onThinking === 'function') {
       try { await onThinking(String(res.reasoning).trim()) } catch (_) {}
     }
-    if (!text) { finalText = '模型未产生输出，任务提前结束。'; return { done: false, finalText, rounds: i, logs } }
+    if (!text) { finalText = '模型未产生输出，任务提前结束。'; try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {} ; return { done: false, finalText, rounds: i, logs } }
 
     const match = text.match(/\[action:agent:([^\]]+)\]/)
     if (!match) {
       // 无命令 → 任务完成
       finalText = text
+      try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
       return { done: true, finalText, rounds: i + 1, logs }
     }
 
@@ -520,13 +560,14 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, onThinkin
       continue
     }
 
-    const r = await runCommand(cmd)
+    const r = await runCommand(cmd, { signal: ac.signal })
     logs.push({ cmd, ok: r.ok, code: r.code, timedOut: r.timedOut, costMs: r.costMs, output: r.detail })
     messages.push({ role: 'assistant', content: text })
     // 命令输出来自不可信的外部环境（可能反射文件内容），以 user 身份 + untrusted 边界注入，防止其内容以 system 权重劫持后续指令
     messages.push({ role: 'user', content: `<command_output>\n${formatResult(r)}\n</command_output>` })
   }
 
+  try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
   finalText = `已达最大执行轮数（${rounds}），任务未完全完成。已执行的命令与结果见上。`
   return { done: false, finalText, rounds, logs }
 }
@@ -568,15 +609,35 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
   let text = String(assistantText || '')
   let executed = 0
 
+  // 为此继续流程也设立硬超时，并且将外部 signal 与内部 ac 关联
+  const AGENT_HARD_TIMEOUT_MS = Number(conf.hardTimeoutMs) || 600_000
+  const ac = new AbortController()
+  let hardTimer = null
+  function resetHardTimer() {
+    try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
+    hardTimer = setTimeout(() => {
+      safeLogger.warn('[ai0-plugin] continueAgentInHistory 硬超时触发，abort')
+      try { ac.abort() } catch (_) {}
+    }, AGENT_HARD_TIMEOUT_MS)
+  }
+  // 若外部 signal 提前 aborted，则同步到内部 ac
+  if (signal) {
+    try {
+      if (signal.aborted) ac.abort()
+      else if (signal.addEventListener) signal.addEventListener('abort', () => ac.abort(), { once: true })
+    } catch (_) {}
+  }
+  resetHardTimer()
+
   const roundTrip = async () => {
-    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal }, callFn })
+    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal }, callFn })
     if (!call.ok) {
-      if (call.aborted || signal?.aborted) return { error: { aborted: true, message: '' } }
+      if (call.aborted || ac.signal?.aborted) return { error: { aborted: true, message: '' } }
       return { error: { rateLimit: isRateLimit(call.error), aborted: false, message: sanitizeLog(call.error?.message || call.error) } }
     }
     // 深度思考内容：回调发送方（如以聊天记录形式发到群/私聊），不阻断循环
     if (call.res?.reasoning && typeof onThinking === 'function') {
-      try { await onThinking(String(call.res.reasoning).trim()) } catch (_) {}
+      try { await onThinking(String(call.res?.reasoning).trim()) } catch (_) {}
     }
     return { text: String(call.res?.text || '').trim(), reasoning: String(call.res?.reasoning || '').trim() }
   }
@@ -590,23 +651,26 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
       logs.push({ cmd, ok: false, reason: check.reason })
       messages.push({ role: 'system', content: `命令被安全策略拒绝：${check.reason}\n请改用允许的命令继续。` })
     } else {
-      const r = await runCommand(cmd)
+      const r = await runCommand(cmd, { signal: ac.signal })
       logs.push({ cmd, ok: r.ok, code: r.code, costMs: r.costMs, output: r.detail })
       // 同上：命令输出为不可信内容，以 user 身份 + untrusted 边界注入，避免其内容以 system 权重劫持后续指令
       messages.push({ role: 'user', content: `<command_output>\n${formatResult(r)}\n</command_output>` })
     }
     executed++
+    resetHardTimer()
     const next = await roundTrip()
     if (next.error) {
       const reason = next.error.aborted ? '（请求已被取消/超时）'
         : next.error.rateLimit ? 'Agent 因 API 速率限制暂时无法继续，请稍后重试或降低 maxRounds 配置'
         : next.error.message || '（未知错误）'
+      try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
       return { done: false, finalText: `Agent 执行中断：模型调用失败 ${reason}`, rounds: executed, logs }
     }
     text = next.text
     if (!text) return { done: false, finalText: '模型未产生输出，Agent 提前结束。', rounds: executed, logs }
   }
 
+  try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
   const stillAction = /\[action:agent:/.test(text)
   const finalText = text.replace(/\[action:agent:[^\]]*\]/g, '').trim()
   if (stillAction) {
