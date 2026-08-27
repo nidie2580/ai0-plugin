@@ -141,6 +141,7 @@ if (route === 'dashboard') {
     $('#resp_typingDelay').value = resp.config.response?.typingDelay ?? 500
     $('#web_port').value = resp.config.web?.port ?? 12580
     $('#web_host').value = resp.config.web?.host ?? '127.0.0.1'
+    $('#web_trustProxy').checked = !!resp.config.web?.trustProxy
   }
 
   function buildModelTabs(models) {
@@ -248,7 +249,8 @@ if (route === 'dashboard') {
     }
     c.web = {
       port: parseInt($('#web_port').value, 10) || 12580,
-      host: $('#web_host').value.trim() || '127.0.0.1'
+      host: $('#web_host').value.trim() || '127.0.0.1',
+      trustProxy: $('#web_trustProxy').checked === true
     }
 
     const r = await api('/api/config', { method: 'POST', body: { config: c } })

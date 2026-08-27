@@ -184,6 +184,30 @@ function requireCsrf(req, res, next) {
 }
 
 /**
+ * 读取 web.trustProxy，兼容常见两种用户手写错格式：
+ *  1) 顶层写 "web.trustProxy": true （YAML 带点键不展开，读不到 web.trustProxy）
+ *  2) web: { trustProxy: "true" } 字符串（YAML 未加引号时 true 本应是 bool，但用户手写成 "true" 字符串）
+ * 同时也支持传入"本次请求要保存的新值" pendingWeb（来自请求体 config.web），允许一次保存同时改 host 和 trustProxy。
+ * 返回严格布尔。
+ */
+export function readTrustProxy(pendingWeb = null) {
+  const bool = (v) => v === true || String(v).toLowerCase() === 'true'
+  let got = false
+  if (pendingWeb && typeof pendingWeb === 'object') {
+    if (pendingWeb.trustProxy != null) got = got || bool(pendingWeb.trustProxy)
+  }
+  try {
+    if (cfg.get('web.trustProxy', false) === true) got = true
+  } catch (_) {}
+  try {
+    // 兼容：用户在顶层写成带点键 "web.trustProxy": true
+    const root = cfg.loadConfig?.() || {}
+    if (root['web.trustProxy'] != null && bool(root['web.trustProxy'])) got = true
+  } catch (_) {}
+  return got
+}
+
+/**
  * web.host 白名单 + trustProxy 校验（纯函数，便于单测）
  * @param {string} host 用户传入的 host 值
  * @param {boolean} trustProxy 当前已配置的 web.trustProxy
@@ -547,6 +571,22 @@ export function createApp() {
       const k = safe.imageGen.apiKey
       safe.imageGen.apiKey = (!/^\s*$/.test(k) && !/^\*+$/.test(k)) ? API_KEY_PLACEHOLDER : k
     }
+    // 兼容：把 config.yaml 中被写成顶层 "web.trustProxy"/"web.host"/"web.port" 带点键的值
+    //       合并进 safe.web，让前端始终能看到一致、正确的结构。吸收后删除顶层带点键（避免在前端显示/保存时产生 unknownKey 报错）。
+    for (const badKey of ['web.trustProxy', 'web.host', 'web.port']) {
+      if (safe && typeof safe === 'object' && badKey in safe) {
+        const subKey = badKey.split('.').slice(1).join('.')
+        if (!safe.web || typeof safe.web !== 'object') safe.web = {}
+        if (!(subKey in safe.web)) {
+          if (subKey === 'trustProxy') {
+            safe.web.trustProxy = safe[badKey] === true || String(safe[badKey]).toLowerCase() === 'true'
+          } else {
+            safe.web[subKey] = safe[badKey]
+          }
+        }
+        delete safe[badKey]
+      }
+    }
     res.json({ ok: true, config: safe })
   })
 
@@ -580,6 +620,26 @@ export function createApp() {
     const depth = getDepth(config)
     if (depth > 8) {
       return res.json({ ok: false, msg: `配置嵌套深度 ${depth} 超过上限 8，拒绝处理` })
+    }
+
+    // — 兼容：吸收 config 顶层中用户手误写成 "web.trustProxy" / "web.host" / "web.port" 的带点键，
+    //   并入 config.web 对应字段。否则这些带点键会被顶层白名单判为 unknownKeys 直接拒绝。
+    //   仅在正确嵌套路径中未设置对应字段时才吸收（以嵌套结构中的明确值为准，避免覆盖）。
+    if (typeof config === 'object' && config && !Array.isArray(config)) {
+      for (const badKey of ['web.trustProxy', 'web.host', 'web.port']) {
+        if (badKey in config) {
+          const subKey = badKey.split('.').slice(1).join('.')
+          if (!config.web || typeof config.web !== 'object') config.web = {}
+          if (!(subKey in config.web)) {
+            if (subKey === 'trustProxy') {
+              config.web.trustProxy = config[badKey] === true || String(config[badKey]).toLowerCase() === 'true'
+            } else {
+              config.web[subKey] = config[badKey]
+            }
+          }
+          delete config[badKey]
+        }
+      }
     }
 
     // — P0-2: 白名单校验顶层字段 —
@@ -636,18 +696,18 @@ export function createApp() {
       }
     }
 
-    // — P0-2: 数值字段范围校验 —
+    // — P0-2: 数值字段范围校验 + trustProxy 规范化 —
     const w = config.web
     if (w) {
       if (w.port != null && (typeof w.port !== 'number' || w.port < 1 || w.port > 65535)) {
         return res.json({ ok: false, msg: 'web.port 必须为 1-65535 之间的数字' })
       }
-      // — P0(三轮严审) + P0 补强: web.host 白名单 + 通配时强制 trustProxy —
+      // P3-1: trustProxy 强制 bool（同时兼容字符串 "true"）；让 "一次保存同时修改 host 和 trustProxy" 生效
+      if (w.trustProxy != null) {
+        w.trustProxy = w.trustProxy === true || String(w.trustProxy).toLowerCase() === 'true'
+      }
       if (w.host != null) {
-        // P3-1: trustProxy 强制严格布尔 === true。防止 YAML/前端传入字符串 "false"（truthy）
-        //       在 host=0.0.0.0 / :: 时被误判为"信任代理"，放行未配置 trustProxy 的部署。
-        // 同时检查请求体中的新值（w.trustProxy）和当前配置中的值，解决"先设 trustProxy 再改 host"的鸡生蛋问题。
-        const trustProxy = (w.trustProxy === true) || (cfg.get('web.trustProxy', false) === true)
+        const trustProxy = readTrustProxy(w)
         const r = validateWebHost(w.host, trustProxy)
         if (!r.ok) return res.json(r)
       }

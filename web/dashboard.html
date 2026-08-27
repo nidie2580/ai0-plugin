@@ -92,6 +92,12 @@
         <label>网页后台端口 <input id="web_port" type="number"/></label>
         <label>网页后台绑定地址 <input id="web_host" placeholder="127.0.0.1 / 0.0.0.0"/></label>
       </div>
+      <div class="hint" style="margin-top:4px">
+        <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-weight:500">
+          <input type="checkbox" id="web_trustProxy"/>
+          信任反向代理头 (web.trustProxy) — 部署在 Nginx/Caddy/Cloudflare 后时勾选；直接裸端口对外请勿勾选。
+        </label>
+      </div>
 
       <div class="actions">
         <button class="btn primary" id="saveCfg">💾 保存配置</button>
