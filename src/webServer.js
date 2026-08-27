@@ -646,7 +646,8 @@ export function createApp() {
       if (w.host != null) {
         // P3-1: trustProxy 强制严格布尔 === true。防止 YAML/前端传入字符串 "false"（truthy）
         //       在 host=0.0.0.0 / :: 时被误判为"信任代理"，放行未配置 trustProxy 的部署。
-        const trustProxy = cfg.get('web.trustProxy', false) === true
+        // 同时检查请求体中的新值（w.trustProxy）和当前配置中的值，解决"先设 trustProxy 再改 host"的鸡生蛋问题。
+        const trustProxy = (w.trustProxy === true) || (cfg.get('web.trustProxy', false) === true)
         const r = validateWebHost(w.host, trustProxy)
         if (!r.ok) return res.json(r)
       }
