@@ -30,10 +30,11 @@ async function main() {
     console.log(`  本机访问：http://${ip}:${port}`)
   }
   console.log('')
-  console.log('首次登录需使用「终端验证码」：')
+  console.log('首次登录需使用「终端验证码」（ID 固定为 stdin）：')
   // 独立启动场景拿不到 Web clientIp，显式传 'unknown'：
   //  verifyCode 内部退化为单次使用 + rate limit + 5 次错误作废防护（不强制 IP 一致，避免 IP 劫持 DoS）。
-  auth.generateTerminalCode('unknown')
+  // 验证码 ID 用 'stdin' 标识（可读），替代原来的 32 位 hex。
+  auth.generateTerminalCode('unknown', 'stdin')
   console.log('')
   console.log('提示：复制上述 ID + Code，在网页「终端验证码登录」处填入即可。')
   console.log('==========================================\n')

@@ -281,18 +281,24 @@ export function checkRateLimit(scope, id, maxAttempts = AUTH_CFG.rateMaxAttempts
   return { ok: true, remain: maxAttempts - rec.count, resetIn: Math.max(0, rec.resetAt - now) }
 }
 
-export function generateTerminalCode(clientIp = 'unknown') {
+export function generateTerminalCode(clientIp = 'unknown', idHint = null) {
   cleanup()
   const code = randomAlphanumeric(16)
-  const id = randomId(16)
+  // 身份提示：网页登录的"验证码 ID"改为请求人的可读标识——
+  //   - #ai验证码（QQ 触发）→ 该 QQ 号
+  //   - standalone/终端 → 'stdin'
+  // 未传入时退回随机 id（向后兼容）。用 idHint 作为 Map 的 key，
+  // 使"验证码 ID"就是用户肉眼可读的 QQ/stdin，而非 32 位 hex。
+  const id = idHint != null && String(idHint) ? String(idHint).slice(0, 64) : randomId(16)
   codes.set(id, {
     code,
     expireAt: Date.now() + AUTH_CFG.codeExpireMs,
     used: false,
     failCount: 0,
     createdIp: clientIp,
+    identity: id,
   })
-  const logLine = `[ai0-plugin] ===== 网页管理验证码：${code} ===== (5分钟内有效)`
+  const logLine = `[ai0-plugin] ===== 网页管理验证码：${code} (ID: ${id}) ===== (5分钟内有效)`
   if (typeof logger !== 'undefined') {
     const fn = (typeof logger.mark === 'function') ? logger.mark : (logger.info || console.log)
     fn(logLine)
@@ -412,7 +418,7 @@ export function consumeMagicLink(token) {
   return MAGIC_LINKS.delete(token)
 }
 
-export function issueSession(createIp = 'unknown') {
+export function issueSession(createIp = 'unknown', identity = null) {
   const token = randomId(48)
   const csrf = randomId(32)
   tokens.set(token, {
@@ -422,8 +428,17 @@ export function issueSession(createIp = 'unknown') {
     createIp,
     lastIp: createIp,
     ipChanges: 0,
+    identity: identity != null ? String(identity) : null,
   })
   return { token, csrf }
+}
+
+/** 读取 session 关联的登录身份（QQ 号或 'stdin'，可能为 null） */
+export function getSessionIdentity(token) {
+  if (!token) return null
+  const rec = tokens.get(token)
+  if (!rec) return null
+  return rec.identity ?? null
 }
 
 export function verifySession(token, currentIp = null) {

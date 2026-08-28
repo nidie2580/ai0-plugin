@@ -14,6 +14,10 @@
       <p class="sub">XRK-Yunzai 网页管理后台</p>
     </div>
 
+    <div class="theme-row">
+      <button id="themeToggle" class="btn ghost sm" title="切换深色/浅色模式">🌓 切换主题</button>
+    </div>
+
     <div class="tabs">
       <button class="tab active" data-tab="code">终端验证码</button>
       <button class="tab" data-tab="magic">主人快速链接</button>
@@ -22,13 +26,20 @@
     <div class="tab-pane active" id="tab-code">
       <p class="hint">由主人向机器人发送 <code>#ai验证码</code>，同时获取 ID 和 Code。</p>
       <label>验证码 ID
-        <input id="codeIdInput" maxlength="32" placeholder="验证码 ID（生成时的 32 位 hex）" inputmode="text" autocomplete="off" />
+        <input id="codeIdInput" maxlength="64" placeholder="请求人的 QQ 号 或 stdin" inputmode="text" autocomplete="off" />
       </label>
       <label>验证码 Code
         <input id="codeInput" maxlength="16" placeholder="16 位字母数字组合" inputmode="text" autocomplete="off" />
       </label>
       <button class="btn primary" id="loginBtn">登录</button>
       <p id="err" class="err"></p>
+
+      <div id="waitPane" class="wait-pane hidden">
+        <div class="wait-spinner"></div>
+        <p class="wait-title">等待管理端确认</p>
+        <p class="hint">你的登录请求已加密登记。请管理员在 XRK-Yunzai 运行终端执行 <code>继续操作 &lt;放行码&gt;</code> 以放行，本页会自动进入。</p>
+        <p class="hint">可先关闭本页，稍后频繁刷新登录页即可进入。</p>
+      </div>
     </div>
 
     <div class="tab-pane" id="tab-magic">

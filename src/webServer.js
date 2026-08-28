@@ -14,6 +14,7 @@ import * as imageGen from './imageGen.js'
 import * as helper from './helper.js'
 import { isAllowedOutboundUrl } from './security.js'
 import { safeLogger } from './globals.js'
+import * as loginGuard from './loginGuard.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -470,10 +471,53 @@ export function createApp() {
   // ==================== API ====================
   app.post('/api/login/code', (req, res) => {
     const { codeId, code } = req.body || {}
-    if (!codeId) return res.json({ ok: false, msg: '请输入验证码 ID' })
+    if (!codeId) return res.json({ ok: false, msg: '请输入验证码 ID（QQ 号或 stdin）' })
     const r = auth.verifyCode(codeId, code, req.clientIp)
     if (!r.ok) return res.json(r)
-    const session = auth.issueSession(req.clientIp)
+    const identity = String(codeId)
+    const setCookies = (token, csrf) => {
+      const secure = req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')
+      res.cookie('ai0_session', token, {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: !!secure,
+        maxAge: auth.AUTH_CFG.tokenExpireMs
+      })
+      res.cookie('ai0_csrf', csrf, {
+        httpOnly: false,
+        sameSite: 'strict',
+        secure: !!secure,
+        maxAge: auth.AUTH_CFG.tokenExpireMs
+      })
+    }
+    // 多身份二次确认：首个有效登录成为主身份（直通）；异身份登录进入待审批队列。
+    const isFirst = !loginGuard.hasPrimary()
+    if (isFirst || loginGuard.isPrimary(identity)) {
+      if (isFirst) loginGuard.setPrimaryIdentity(identity)
+      const session = auth.issueSession(req.clientIp, identity)
+      setCookies(session.token, session.csrf)
+      return res.json({ ok: true })
+    }
+    // 异身份：创建待审批请求，等待管理员在终端「继续操作 <放行码/QQ>」放行
+    const rec = loginGuard.createPending({ identity, ip: req.clientIp })
+    safeLogger.warn?.(`[ai0-plugin] 🚨 检测到异身份登录请求 (身份: ${identity}, IP: ${req.clientIp})，已锁定控制台。请在终端输入：继续操作 ${rec.code}`)
+    res.json({ ok: true, needVerify: true, pendingId: rec.pendingId })
+  })
+
+  // 待审批轮询：验证等待页据此得知是否已被放行
+  app.post('/api/login/code/need-verify', (req, res) => {
+    const { pendingId } = req.body || {}
+    if (!pendingId) return res.json({ ok: false, msg: 'missing pendingId' })
+    res.json({ ok: true, approved: loginGuard.isApproved(pendingId) })
+  })
+
+  // 放行后签收会话：发 cookie 并转向控制台
+  app.post('/api/login/code/claim', (req, res) => {
+    const { pendingId } = req.body || {}
+    if (!pendingId) return res.json({ ok: false, msg: 'missing pendingId' })
+    const rec = loginGuard.claimPending(pendingId)
+    if (!rec) return res.json({ ok: false, msg: '待审批请求不存在或已过期' })
+    const session = auth.issueSession(rec.ip || req.clientIp, rec.identity)
     const secure = req.secure || (cfg.get('web.trustProxy', false) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https')
     res.cookie('ai0_session', session.token, {
       httpOnly: true,
@@ -488,6 +532,11 @@ export function createApp() {
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     res.json({ ok: true })
+  })
+
+  // 已登录控制台的锁定/放行状态轮询
+  app.get('/api/guard/status', requireAuth, (req, res) => {
+    res.json({ ok: true, ...loginGuard.getStatus() })
   })
 
   app.post('/api/logout', requireCsrf, (req, res) => {
@@ -1001,6 +1050,8 @@ export function createApp() {
 }
 
 export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
+  // 安装一次 stdin 放行监听（幂等）：管理员可在 XRK-Yunzai 运行终端输入「继续操作 <码>」
+  loginGuard.installStdinWatcher()
   return new Promise((resolve, reject) => {
     // ------ 输入规范化（防止 YAML 把 0.0.0.0 解析成数字 0 或其他脏值） ------
     const bind = cfg.normalizeWebBind ? cfg.normalizeWebBind({ host, port }) : null

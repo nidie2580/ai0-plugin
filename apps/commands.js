@@ -616,12 +616,13 @@ export class AICommands extends plugin {
     // QQ 触发场景拿不到 Web clientIp，显式传 'unknown'：
     //  ① 明确语义（避免误以为未传参是疏漏）；
     //  ② verifyCode 内部对 createdIp='unknown' 退化为单次使用 + rate limit + 5 次错误作废防护（不强制 IP 一致，避免 IP 劫持 DoS）。
-    const { id, code } = auth.generateTerminalCode('unknown')
+    // 验证码 ID 改为请求人的 QQ 号（可读身份），便于在网页端输入自己的 QQ 号作为 ID。
+    const { id, code } = auth.generateTerminalCode('unknown', String(userId))
     const info = ws.getServerInfo()
     const lines = [
       '🔐 网页管理登录验证码（5分钟有效）：',
       '',
-      `    ID: ${id}`,
+      `    ID: ${id}（你的 QQ 号）`,
       `    Code: ${code}`,
       '',
       info.url ? `访问：${info.url}` : '',

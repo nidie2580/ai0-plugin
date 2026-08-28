@@ -20,6 +20,7 @@
     <a class="nav-item" data-view="image">🎨 图片管理</a>
     <a class="nav-item" data-view="about">ℹ️ 关于</a>
   </nav>
+  <button id="themeToggle" class="btn ghost sm" title="切换深色/浅色模式">🌓</button>
   <button id="logoutBtn" class="btn ghost sm">退出登录</button>
 </header>
 
@@ -220,10 +221,23 @@
         <li>权限：黑白名单 + 主人</li>
         <li>两种网页登录方式：<b>终端验证码</b> 或 主人发送 <code>#ai网页管理</code> 的 <b>一次性直链</b></li>
       </ul>
+      <div class="cmd-box">仓库地址：<a href="https://github.com/nidie2580/ai0-plugin" target="_blank" rel="noopener">https://github.com/nidie2580/ai0-plugin</a></div>
       <div id="aboutInfo"></div>
     </div>
   </section>
 </main>
+
+<!-- 登录守卫锁定遮罩：检测到异身份登录时冻结控制台 -->
+<div id="guardLock" class="guard-lock hidden">
+  <div class="guard-lock-card">
+    <div class="guard-lock-icon">🔐</div>
+    <h2>有新登录请求，等待批准</h2>
+    <p class="hint">控制台已临时锁定。请在 <b>XRK-Yunzai 运行终端</b>输入以下命令以放行对应请求：</p>
+    <div class="cmd-box guard-cmd" id="guardCmd">继续操作 &lt;放行码&gt;</div>
+    <p class="hint" id="guardTip"></p>
+    <div id="guardPendingList"></div>
+  </div>
+</div>
 
 <script src="/assets/app.js" data-route="dashboard"></script>
 </body>

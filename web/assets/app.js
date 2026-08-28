@@ -28,6 +28,25 @@ async function api(path, { method = 'GET', body, raw = false } = {}) {
 
 const route = document.currentScript?.dataset.route || ''
 
+// ============== 深色 / 浅色主题 ==============
+const THEME_KEY = 'ai0_theme'
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY)
+  const apply = (dark) => document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+  if (saved === 'dark') apply(true)
+  else if (saved === 'light') apply(false)
+  else apply(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+  const toggle = $('#themeToggle')
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      const dark = document.documentElement.getAttribute('data-theme') !== 'dark'
+      apply(dark)
+      localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light')
+    })
+  }
+}
+initTheme()
+
 // ============== Login ==============
 if (route === 'login') {
   $$('.tab').forEach(btn => {
@@ -42,12 +61,13 @@ if (route === 'login') {
   const codeIdInput = $('#codeIdInput')
   const input = $('#codeInput')
   const err = $('#err')
+  const waitPane = $('#waitPane')
   input?.addEventListener('input', () => {
     input.value = input.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)
     err.textContent = ''
   })
   codeIdInput?.addEventListener('input', () => {
-    codeIdInput.value = codeIdInput.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 32)
+    codeIdInput.value = codeIdInput.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 64)
     err.textContent = ''
   })
   input?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
@@ -55,11 +75,31 @@ if (route === 'login') {
 
   $('#loginBtn')?.addEventListener('click', doLogin)
 
+  function showWait() {
+    waitPane?.classList.remove('hidden')
+  }
+
+  async function pollClaim(pendingId) {
+    // 等到管理员放行后签收会话并进入控制台
+    const timer = setInterval(async () => {
+      try {
+        const st = await api('/api/login/code/need-verify', { method: 'POST', body: { pendingId } })
+        if (st && st.approved) {
+          clearInterval(timer)
+          const cl = await api('/api/login/code/claim', { method: 'POST', body: { pendingId } })
+          if (cl && cl.ok) { location.href = '/'; return }
+          err.textContent = cl?.msg || '放行失败，请稍后重试'
+        }
+      } catch (_) {}
+    }, 2500)
+  }
+
   async function doLogin() {
+    err.textContent = ''
     const codeId = (codeIdInput?.value || '').trim()
     const code = input.value.trim()
-    if (!codeId || codeId.length !== 32) {
-      err.textContent = '请输入 32 位验证码 ID'
+    if (!codeId) {
+      err.textContent = '请输入验证码 ID（你的 QQ 号或 stdin）'
       return
     }
     if (code.length !== 16) {
@@ -67,6 +107,11 @@ if (route === 'login') {
       return
     }
     const r = await api('/api/login/code', { method: 'POST', body: { codeId, code } })
+    if (r.ok && r.needVerify) {
+      showWait()
+      if (r.pendingId) pollClaim(r.pendingId)
+      return
+    }
     if (r.ok) {
       location.href = '/'
     } else {
@@ -95,6 +140,44 @@ if (route === 'dashboard') {
     await api('/api/logout', { method: 'POST' })
     location.href = '/'
   })
+
+  // ---- 登录守卫：锁定遮罩 + 放行提示轮询 ----
+  (function initGuard() {
+    const lockEl = $('#guardLock')
+    const guardCmd = $('#guardCmd')
+    const guardTip = $('#guardTip')
+    const listEl = $('#guardPendingList')
+    if (!lockEl) return
+    const esc = escapeHtml
+    let closing = false
+    async function poll() {
+      if (closing) return
+      let st = null
+      try { st = await api('/api/guard/status') } catch (_) {}
+      const locked = st && st.locked
+      lockEl.classList.toggle('hidden', !locked)
+      if (st && st.pending && st.pending.length) {
+        const req = st.pending.filter(p => !p.approved)[0]
+        if (req) {
+          guardCmd.textContent = `继续操作 ${req.approveCode}`
+          guardTip.innerHTML = `请求人：${esc(req.identity)} · IP：${esc(req.ip)}<br>放行码：<code>${esc(req.approveCode)}</code>（也可输入请求人 QQ：<code>${esc(req.identity)}</code>）`
+        }
+        const nonApproved = st.pending.filter(p => !p.approved)
+        listEl.innerHTML = nonApproved.length
+          ? '<p class="hint">待放行请求：</p>' + nonApproved.map(p =>
+              `<div class="guard-item">${esc(p.identity)} <span class="muted">(${esc(p.ip)})</span> — 放行码 <code>${esc(p.approveCode)}</code></div>`
+            ).join('')
+          : ''
+      }
+      // 有未放行请求时冻结控制台指针；放行后自动解除
+      if (locked) document.body.classList.add('guard-locked')
+      else document.body.classList.remove('guard-locked')
+    }
+    // 立即轮询一次，并每 2.5s 刷新
+    poll()
+    setInterval(poll, 2500)
+    window.addEventListener('beforeunload', () => { closing = true })
+  })()
 
   // ---- Config ----
   let currentConfig = null

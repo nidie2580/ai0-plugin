@@ -414,3 +414,143 @@ input:focus, select:focus, textarea:focus {
 .actions { margin-top: 0; }
 .img-preview { max-width: 100%; border-radius: 8px; }
 .img-test-preview { margin-top: 12px; }
+
+/* ===== 登录页主题切换 ===== */
+.theme-row { display: flex; justify-content: center; margin: -4px 0 14px; }
+
+/* ===== 验证等待页（异身份登录待审批） ===== */
+.wait-pane {
+  margin-top: 16px;
+  padding: 22px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.wait-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: waitSpin 0.9s linear infinite;
+}
+@keyframes waitSpin { to { transform: rotate(360deg); } }
+.wait-title { font-weight: 600; margin: 0; }
+
+/* ===== 登录守卫锁定遮罩 ===== */
+.guard-lock {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(8, 12, 24, 0.6);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+body.guard-locked { overflow: hidden; }
+.guard-lock-card {
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  padding: 26px 26px 22px;
+  text-align: center;
+}
+.guard-lock-icon { font-size: 42px; line-height: 1; }
+.guard-lock-card h2 { margin: 10px 0 8px; font-size: 18px; justify-content: center; }
+.guard-cmd {
+  margin: 14px auto;
+  width: 100%;
+  text-align: center;
+  user-select: all;
+  word-break: break-all;
+}
+.guard-item {
+  margin-top: 8px;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.guard-item code { flex: 1; }
+
+/* ===================== 深色模式 ===================== */
+[data-theme="dark"] {
+  --bg: #0f172a;
+  --card: #1e293b;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --primary: #818cf8;
+  --primary-hover: #a5b4fc;
+  --border: #334155;
+  --code-bg: #273449;
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+[data-theme="dark"] body,
+[data-theme="dark"] .login-page {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #1e1b4b 0%, transparent 60%),
+    radial-gradient(1000px 500px at 110% 10%, #0c4a6e 0%, transparent 55%),
+    var(--bg);
+}
+[data-theme="dark"] .topbar {
+  background: rgba(15, 23, 42, 0.92);
+}
+[data-theme="dark"] .tab.active {
+  background: var(--card);
+}
+[data-theme="dark"] .nav-item.active {
+  background: #312e81;
+}
+[data-theme="dark"] input,
+[data-theme="dark"] select,
+[data-theme="dark"] textarea,
+[data-theme="dark"] .model-tab,
+[data-theme="dark"] .provider-card,
+[data-theme="dark"] .btn:not(.primary):not(.warn) {
+  background: #0b1220;
+  color: var(--text);
+}
+[data-theme="dark"] .btn.primary,
+[data-theme="dark"] .btn.warn { color: #fff; }
+[data-theme="dark"] .model-tab.active {
+  background: var(--primary);
+  color: #fff;
+}
+[data-theme="dark"] .sess-item:hover { background: #334155; }
+[data-theme="dark"] .msg.user {
+  background: #3730a3;
+  border-color: #4338ca;
+  color: #e0e7ff;
+}
+[data-theme="dark"] .msg.assistant { background: var(--card); }
+[data-theme="dark"] .msg.system {
+  background: #3a2c0f;
+  border-color: #55401a;
+  color: #fbbf24;
+}
+[data-theme="dark"] .tag {
+  background: #312e81;
+  color: #c7d2fe;
+}
+[data-theme="dark"] .badge-agent {
+  background: #064e3b;
+  color: #6ee7b7;
+  border-color: #065f46;
+}
+[data-theme="dark"] .badge-risk {
+  background: #450a0a;
+  color: #fca5a5;
+  border-color: #7f1d1d;
+}
+[data-theme="dark"] a { color: #a5b4fc; }
