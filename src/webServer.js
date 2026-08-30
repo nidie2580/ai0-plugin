@@ -426,9 +426,39 @@ export function createApp() {
   app.use((req, res, next) => {
     const url = req.path || ''
     if (url.startsWith('/assets/') || url === '/' || url.startsWith('/magic/')) {
-      res.setHeader('Cache-Control', 'no-store')
+      res.setHeader('Cache-Control', 'no-store, must-revalidate, max-age=0')
       res.setHeader('Pragma', 'no-cache')
       res.setHeader('Expires', '0')
+    }
+    next()
+  })
+
+  // 启动时计算静态资源指纹（哈希前 12 位），并把 HTML 中 /assets/app.{js,css} 全部重写为指纹版 URL。
+  // 这样浏览器必须重新下载新资源，从根本上解决 WebView 顽固缓存导致「加载旧 app.js」的问题。
+  const APP_JS_RE = /\/assets\/app\.js(?:\?[^"]*)?"/g
+  const APP_CSS_RE = /\/assets\/app\.css(?:\?[^"]*)?"/g
+  const _hashedJs = '/assets/app.' + (crypto.createHash('sha256').update(fs.readFileSync(path.join(WEB_DIR, 'assets', 'app.js'))).digest('hex').slice(0, 12)) + '.js'
+  const _hashedCss = '/assets/app.' + (crypto.createHash('sha256').update(fs.readFileSync(path.join(WEB_DIR, 'assets', 'app.css'))).digest('hex').slice(0, 12)) + '.css'
+  // 在启动时给两份资源各做一份指纹副本（保证 URL 真实可下载）
+  try {
+    fs.copyFileSync(path.join(WEB_DIR, 'assets', 'app.js'), path.join(WEB_DIR, 'assets', _hashedJs.replace(/^\/assets\//, '')))
+    fs.copyFileSync(path.join(WEB_DIR, 'assets', 'app.css'), path.join(WEB_DIR, 'assets', _hashedCss.replace(/^\/assets\//, '')))
+  } catch (_) {}
+  // HTML 响应在 sendFile 之前重写资源 URL 到指纹版
+  app.use((req, res, next) => {
+    const origSendFile = res.sendFile.bind(res)
+    res.sendFile = function (file, opts, cb) {
+      const isHtml = typeof file === 'string' && (file.endsWith('.html') || file.endsWith('dashboard.html') || file.endsWith('login.html'))
+      if (!isHtml) return origSendFile(file, opts, cb)
+      try {
+        let html = fs.readFileSync(file, 'utf-8')
+        html = html.replace(APP_JS_RE, _hashedJs + '"')
+        html = html.replace(APP_CSS_RE, _hashedCss + '"')
+        res.setHeader('Content-Type', 'text/html; charset=UTF-8')
+        return res.send(html)
+      } catch (e) {
+        return origSendFile(file, opts, cb)
+      }
     }
     next()
   })
