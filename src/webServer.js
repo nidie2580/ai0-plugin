@@ -421,6 +421,18 @@ export function createApp() {
     next()
   })
 
+  // 静态资源与页面一律禁用缓存：避免升级/重装后浏览器继续用旧版 app.js/app.css
+  // 与新版 dashboard.html/login.html 错配，导致控制台初始化异常而「卡在配置加载中」。
+  app.use((req, res, next) => {
+    const url = req.path || ''
+    if (url.startsWith('/assets/') || url === '/' || url.startsWith('/magic/')) {
+      res.setHeader('Cache-Control', 'no-store')
+      res.setHeader('Pragma', 'no-cache')
+      res.setHeader('Expires', '0')
+    }
+    next()
+  })
+
   // 首页 / 静态资源
   app.get('/', (req, res) => {
     const token = req.cookies?.ai0_session
@@ -431,7 +443,7 @@ export function createApp() {
     res.status(500).send('页面文件缺失，请检查 web/ 目录')
   })
 
-  app.use('/assets', express.static(path.join(WEB_DIR, 'assets'), { dotfiles: 'deny' }))
+  app.use('/assets', express.static(path.join(WEB_DIR, 'assets'), { dotfiles: 'deny', maxAge: 0 }))
 
   app.get('/magic/:token', (req, res) => {
     const token = req.params.token

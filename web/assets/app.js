@@ -136,7 +136,7 @@ if (route === 'dashboard') {
     })
   })
 
-  $('#logoutBtn').addEventListener('click', async () => {
+  $('#logoutBtn')?.addEventListener('click', async () => {
     await api('/api/logout', { method: 'POST' })
     location.href = '/'
   })
@@ -184,8 +184,8 @@ if (route === 'dashboard') {
   let currentModelKey = null
   const saveMsg = $('#saveMsg')
 
-  $('#saveCfg').addEventListener('click', saveConfig)
-  $('#resetCfg').addEventListener('click', loadConfig)
+  $('#saveCfg')?.addEventListener('click', saveConfig)
+  $('#resetCfg')?.addEventListener('click', loadConfig)
 
   async function loadConfig() {
     saveMsg.textContent = ''
@@ -349,11 +349,11 @@ if (route === 'dashboard') {
 
   // ---- Sessions ----
   let lastSessions = []
-  $('#refreshSessBtn').addEventListener('click', loadSessions)
-  $('#closeSessionBtn').addEventListener('click', () => {
+  $('#refreshSessBtn')?.addEventListener('click', loadSessions)
+  $('#closeSessionBtn')?.addEventListener('click', () => {
     $('#sessDetailCard').classList.add('hidden')
   })
-  $('#delSessionBtn').addEventListener('click', async () => {
+  $('#delSessionBtn')?.addEventListener('click', async () => {
     const tag = $('#sessDetailTag').textContent
     const [userId, sessionId] = tag.split('/')
     if (!userId || !sessionId) return
@@ -425,7 +425,7 @@ if (route === 'dashboard') {
   }
 
   // ---- Model test ----
-  $('#runTestBtn').addEventListener('click', async () => {
+  $('#runTestBtn')?.addEventListener('click', async () => {
     const info = $('#testInfo')
     const out = $('#testOut')
     info.className = 'save-msg'
@@ -887,5 +887,12 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   }
 
   // 初始化
-  loadConfig()
+  // 即使某个子组件绑定/初始化发生意外异常，也必须保证配置加载流程执行，
+  // 否则页面会一直停留在「加载中…」（卡死）。
+  try {
+    loadConfig()
+  } catch (e) {
+    console.error('[ai0] 控制台初始化异常（已尝试继续加载配置）：', e)
+    loadConfig().catch(err => console.error('[ai0] 配置加载失败：', err))
+  }
 }
