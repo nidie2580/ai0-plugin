@@ -42,6 +42,23 @@ async function doFetch(path, opts, raw) {
 
 const route = document.currentScript?.dataset.route || ''
 
+// ============== 全局错误捕获 ==============
+// 任何未捕获的同步错误或 Promise 拒绝都会在这里弹窗显示具体报错（含行号），
+// 否则在手机上无法定位「卡在加载中」的真正原因。
+window.addEventListener('error', function (e) {
+  const msg = `AI0 Dashboard Error: ${e.message}\n${e.filename || ''}:${e.lineno || '?'}:${e.colno || '?'}`
+  try { alert(msg) } catch (_) {}
+  console.error('[ai0] 全局错误:', e.error || e.message)
+  const t = $('#cfgTag'); if (t) t.textContent = '初始化失败'
+})
+window.addEventListener('unhandledrejection', function (e) {
+  const r = e.reason
+  const msg = `AI0 Unhandled Rejection: ${(r && r.message) || String(r)}`
+  try { alert(msg) } catch (_) {}
+  console.error('[ai0] 未处理 Promise 拒绝:', r)
+  const t = $('#cfgTag'); if (t) t.textContent = '初始化失败'
+})
+
 // ============== 深色 / 浅色主题 ==============
 const THEME_KEY = 'ai0_theme'
 function initTheme() {
@@ -911,9 +928,10 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     })
   }
 
-  // 初始化
-  // 即使某个子组件绑定/初始化发生意外异常，也必须保证配置加载流程执行，
-  // 否则页面会一直停留在「加载中…」（卡死）。
+  // 初始化（正常路径：块内所有绑定成功 → 最后加载配置并填充表单）
+  // 若前面发生未捕获的同步错误，会由文件顶部的全局 window.onerror 弹窗提示并写「初始化失败」，
+  // 从而避免无提示地停留在「加载中…」。loadConfig 内部自带 10s 超时与错误提示。
+  console.log('[AI0] loadConfig START')
   try {
     loadConfig()
   } catch (e) {
