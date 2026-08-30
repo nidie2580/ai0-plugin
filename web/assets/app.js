@@ -3,7 +3,7 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-async function api(path, { method = 'GET', body, raw = false } = {}) {
+async function api(path, { method = 'GET', body, raw = false, timeout = 0 } = {}) {
   const opts = {
     method,
     headers: { 'Accept': 'application/json' },
@@ -18,6 +18,20 @@ async function api(path, { method = 'GET', body, raw = false } = {}) {
     const csrf = document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('ai0_csrf='))?.split('=')[1]
     if (csrf) opts.headers['X-CSRF-Token'] = csrf
   }
+  // 可选超时（毫秒）：防止 fetch 被挂起导致页面无限停留在加载状态
+  if (timeout > 0) {
+    const ctrl = new AbortController()
+    opts.signal = ctrl.signal
+    const timer = setTimeout(() => ctrl.abort(), timeout)
+    try {
+      return await doFetch(path, opts, raw)
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  return doFetch(path, opts, raw)
+}
+async function doFetch(path, opts, raw) {
   const r = await fetch(path, opts)
   const text = await r.text()
   let data = {}
@@ -189,7 +203,18 @@ if (route === 'dashboard') {
 
   async function loadConfig() {
     saveMsg.textContent = ''
-    const resp = await api('/api/config')
+    let resp
+    try {
+      // 10s 超时：若 /api/config 被代理/网络挂起，也立即给用户反馈，而不是无限“加载中…”
+      resp = await api('/api/config', { timeout: 10000 })
+    } catch (e) {
+      const aborted = e && e.name === 'AbortError'
+      $('#cfgTag').textContent = aborted ? '加载超时' : '加载失败'
+      saveMsg.className = 'save-msg err'
+      saveMsg.textContent = (aborted ? '配置加载超时（10s），请刷新重试' : '配置加载失败：' + (e && e.message || '网络错误')) + '，请刷新页面重试'
+      console.error('[ai0] /api/config 加载失败：', e)
+      return
+    }
     if (!resp.ok) { $('#cfgTag').textContent = '加载失败'; return }
     currentConfig = resp.config
     $('#cfgTag').textContent = '已加载'
