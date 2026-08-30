@@ -1,7 +1,18 @@
 /* global document, window, fetch */
 
+// 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
+window.__AI0_BUILD__ = '20260830b'
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+// 安全事件绑定：先取元素，再判空并校验 addEventListener 确实可调用，
+// 以避免任何情况下（元素缺失 / 返回非 Element 的 $）抛“addEventListener 不是函数”而中断脚本。
+const bind = (sel, ev, fn) => {
+  let el
+  try { el = $(sel) } catch (_) { return }
+  if (el && typeof el.addEventListener === 'function') el.addEventListener(ev, fn)
+}
 
 async function api(path, { method = 'GET', body, raw = false, timeout = 0 } = {}) {
   const opts = {
@@ -68,7 +79,7 @@ function initTheme() {
   else if (saved === 'light') apply(false)
   else apply(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
   const toggle = $('#themeToggle')
-  if (toggle) {
+  if (toggle && typeof toggle.addEventListener === 'function') {
     toggle.addEventListener('click', () => {
       const dark = document.documentElement.getAttribute('data-theme') !== 'dark'
       apply(dark)
@@ -104,7 +115,7 @@ if (route === 'login') {
   input?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
   codeIdInput?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
 
-  $('#loginBtn')?.addEventListener('click', doLogin)
+  bind('#loginBtn', 'click', doLogin)
 
   function showWait() {
     waitPane?.classList.remove('hidden')
@@ -167,7 +178,7 @@ if (route === 'dashboard') {
     })
   })
 
-  $('#logoutBtn')?.addEventListener('click', async () => {
+  bind('#logoutBtn', 'click', async () => {
     await api('/api/logout', { method: 'POST' })
     location.href = '/'
   })
@@ -215,8 +226,8 @@ if (route === 'dashboard') {
   let currentModelKey = null
   const saveMsg = $('#saveMsg')
 
-  $('#saveCfg')?.addEventListener('click', saveConfig)
-  $('#resetCfg')?.addEventListener('click', loadConfig)
+  bind('#saveCfg', 'click', saveConfig)
+  bind('#resetCfg', 'click', loadConfig)
 
   async function loadConfig() {
     saveMsg.textContent = ''
@@ -391,11 +402,11 @@ if (route === 'dashboard') {
 
   // ---- Sessions ----
   let lastSessions = []
-  $('#refreshSessBtn')?.addEventListener('click', loadSessions)
-  $('#closeSessionBtn')?.addEventListener('click', () => {
+  bind('#refreshSessBtn', 'click', loadSessions)
+  bind('#closeSessionBtn', 'click', () => {
     $('#sessDetailCard').classList.add('hidden')
   })
-  $('#delSessionBtn')?.addEventListener('click', async () => {
+  bind('#delSessionBtn', 'click', async () => {
     const tag = $('#sessDetailTag').textContent
     const [userId, sessionId] = tag.split('/')
     if (!userId || !sessionId) return
@@ -467,7 +478,7 @@ if (route === 'dashboard') {
   }
 
   // ---- Model test ----
-  $('#runTestBtn')?.addEventListener('click', async () => {
+  bind('#runTestBtn', 'click', async () => {
     const info = $('#testInfo')
     const out = $('#testOut')
     info.className = 'save-msg'
@@ -533,9 +544,9 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     return s
   }
 
-  $('#saveProviders')?.addEventListener('click', saveProviders)
-  $('#addProviderBtn')?.addEventListener('click', () => addProvider())
-  $('#probeAllBtn')?.addEventListener('click', probeAllProviders)
+  bind('#saveProviders', 'click', saveProviders)
+  bind('#addProviderBtn', 'click', () => addProvider())
+  bind('#probeAllBtn', 'click', probeAllProviders)
 
   async function loadProviders() {
     const msg = $('#provMsg')
@@ -837,8 +848,8 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   }
 
   // ---- Image management ----
-  $('#saveImgCfg')?.addEventListener('click', saveImageConfig)
-  $('#testImgBtn')?.addEventListener('click', testImageGen)
+  bind('#saveImgCfg', 'click', saveImageConfig)
+  bind('#testImgBtn', 'click', testImageGen)
 
   async function loadImageConfig() {
     const r = await api('/api/image-config')
