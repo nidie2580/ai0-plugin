@@ -1,18 +1,10 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260830b'
+window.__AI0_BUILD__ = '20260830c'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-
-// 安全事件绑定：先取元素，再判空并校验 addEventListener 确实可调用，
-// 以避免任何情况下（元素缺失 / 返回非 Element 的 $）抛“addEventListener 不是函数”而中断脚本。
-const bindEvent = (sel, ev, fn) => {
-  let el
-  try { el = $(sel) } catch (_) { return }
-  if (el && typeof el.addEventListener === 'function') el.addEventListener(ev, fn)
-}
 
 async function api(path, { method = 'GET', body, raw = false, timeout = 0 } = {}) {
   const opts = {
@@ -115,7 +107,10 @@ if (route === 'login') {
   input?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
   codeIdInput?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
 
-  bindEvent('#loginBtn', 'click', doLogin)
+  {
+    const el = $('#loginBtn')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', doLogin)
+  }
 
   function showWait() {
     waitPane?.classList.remove('hidden')
@@ -178,10 +173,15 @@ if (route === 'dashboard') {
     })
   })
 
-  bindEvent('#logoutBtn', 'click', async () => {
-    await api('/api/logout', { method: 'POST' })
-    location.href = '/'
-  })
+  {
+    const el = $('#logoutBtn')
+    if (el && typeof el.addEventListener === 'function') {
+      el.addEventListener('click', async () => {
+        await api('/api/logout', { method: 'POST' })
+        location.href = '/'
+      })
+    }
+  }
 
   // ---- 登录守卫：锁定遮罩 + 放行提示轮询 ----
   (function initGuard() {
@@ -226,8 +226,14 @@ if (route === 'dashboard') {
   let currentModelKey = null
   const saveMsg = $('#saveMsg')
 
-  bindEvent('#saveCfg', 'click', saveConfig)
-  bindEvent('#resetCfg', 'click', loadConfig)
+  {
+    const el = $('#saveCfg')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', saveConfig)
+  }
+  {
+    const el = $('#resetCfg')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', loadConfig)
+  }
 
   async function loadConfig() {
     saveMsg.textContent = ''
@@ -402,19 +408,32 @@ if (route === 'dashboard') {
 
   // ---- Sessions ----
   let lastSessions = []
-  bindEvent('#refreshSessBtn', 'click', loadSessions)
-  bindEvent('#closeSessionBtn', 'click', () => {
-    $('#sessDetailCard').classList.add('hidden')
-  })
-  bindEvent('#delSessionBtn', 'click', async () => {
-    const tag = $('#sessDetailTag').textContent
-    const [userId, sessionId] = tag.split('/')
-    if (!userId || !sessionId) return
-    if (!confirm(`删除该会话？（${userId}/${sessionId}）`)) return
-    await api(`/api/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
-    $('#sessDetailCard').classList.add('hidden')
-    await loadSessions()
-  })
+  {
+    const el = $('#refreshSessBtn')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', loadSessions)
+  }
+  {
+    const el = $('#closeSessionBtn')
+    if (el && typeof el.addEventListener === 'function') {
+      el.addEventListener('click', () => {
+        $('#sessDetailCard').classList.add('hidden')
+      })
+    }
+  }
+  {
+    const el = $('#delSessionBtn')
+    if (el && typeof el.addEventListener === 'function') {
+      el.addEventListener('click', async () => {
+        const tag = $('#sessDetailTag').textContent
+        const [userId, sessionId] = tag.split('/')
+        if (!userId || !sessionId) return
+        if (!confirm(`删除该会话？（${userId}/${sessionId}）`)) return
+        await api(`/api/sessions/${encodeURIComponent(userId)}/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+        $('#sessDetailCard').classList.add('hidden')
+        await loadSessions()
+      })
+    }
+  }
 
   async function loadSessions() {
     const r = await api('/api/sessions')
@@ -478,7 +497,10 @@ if (route === 'dashboard') {
   }
 
   // ---- Model test ----
-  bindEvent('#runTestBtn', 'click', async () => {
+  {
+    const el = $('#runTestBtn')
+    if (el && typeof el.addEventListener === 'function') {
+      el.addEventListener('click', async () => {
     const info = $('#testInfo')
     const out = $('#testOut')
     info.className = 'save-msg'
@@ -514,7 +536,9 @@ if (route === 'dashboard') {
         : ''
       out.textContent = probePart + `错误详情：\n${r.msg || '未知错误'}`
     }
-  })
+      })
+    }
+  }
 
   // ---- About ----
   async function loadAbout() {
@@ -544,9 +568,18 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     return s
   }
 
-  bindEvent('#saveProviders', 'click', saveProviders)
-  bindEvent('#addProviderBtn', 'click', () => addProvider())
-  bindEvent('#probeAllBtn', 'click', probeAllProviders)
+  {
+    const el = $('#saveProviders')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', saveProviders)
+  }
+  {
+    const el = $('#addProviderBtn')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', () => addProvider())
+  }
+  {
+    const el = $('#probeAllBtn')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', probeAllProviders)
+  }
 
   async function loadProviders() {
     const msg = $('#provMsg')
@@ -848,8 +881,14 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   }
 
   // ---- Image management ----
-  bindEvent('#saveImgCfg', 'click', saveImageConfig)
-  bindEvent('#testImgBtn', 'click', testImageGen)
+  {
+    const el = $('#saveImgCfg')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', saveImageConfig)
+  }
+  {
+    const el = $('#testImgBtn')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', testImageGen)
+  }
 
   async function loadImageConfig() {
     const r = await api('/api/image-config')
