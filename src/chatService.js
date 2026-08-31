@@ -297,6 +297,57 @@ async function sendOnlyAtDefaultReply(e, config) {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/*  防 AI 互聊无限循环（loopGuard）                                           */
+/*  群里若同时存在多个机器人（本插件或其他 AI 插件），它们互相 @ 回复会自激发   */
+/*  地无限互答，直至 API 欠费或手动停止。QQ 无法可靠判断"某个号是不是机器人"， */
+/*  于是改为检测"循环节奏"：同群同账号在短窗口内被我们连续回复达到阈值，即认定 */
+/*  为疑似双机/多机互聊，进入冷却静默，从机制上打断循环。                       */
+/* -------------------------------------------------------------------------- */
+const loopGuardState = new Map()   // key=`${groupId}/${userId}` → { times:[...], suppressedUntil }
+const LOOPGUARD_MAX_ENTRIES = 2000
+
+function loopGuardConfig() {
+  return {
+    enabled: cfg.get('chat.loopGuard.enabled', true) !== false,
+    windowMs: Math.max(1000, Number(cfg.get('chat.loopGuard.windowMs', 20000)) || 20000),
+    maxReplies: Math.max(2, Number(cfg.get('chat.loopGuard.maxReplies', 4)) || 4),
+    cooldownMs: Math.max(1000, Number(cfg.get('chat.loopGuard.cooldownMs', 60000)) || 60000),
+  }
+}
+
+// 每次"确认要回复某群某账号"时记录一次时间戳；若已处于冷却则直接跳过。
+// 返回 { suppressed: boolean }
+function loopGuardReport(groupId, userId, now = Date.now()) {
+  const cfgOpt = loopGuardConfig()
+  if (!cfgOpt.enabled || groupId == null || userId == null) return { suppressed: false }
+  const key = `${groupId}/${userId}`
+  let rec = loopGuardState.get(key)
+  if (!rec) {
+    rec = { times: [], suppressedUntil: 0 }
+    loopGuardState.set(key, rec)
+  }
+  // 冷却未结束 → 判定循环命中，忽略本次触发
+  if (now < rec.suppressedUntil) return { suppressed: true }
+  const cutoff = now - cfgOpt.windowMs
+  rec.times = rec.times.filter((t) => t >= cutoff)
+  rec.times.push(now)
+  // 超过窗口内阈值 → 触发冷却
+  if (rec.times.length >= cfgOpt.maxReplies) {
+    rec.suppressedUntil = now + cfgOpt.cooldownMs
+    rec.times = []
+    safeLogger.warn(
+      `[ai0-plugin] 疑似 AI 互聊循环：群 ${groupId} 账号 ${userId} 在 ${cfgOpt.windowMs}ms 内连续触发 ${cfgOpt.maxReplies} 次，已静默冷却 ${cfgOpt.cooldownMs}ms 以打断循环。`
+    )
+  }
+  // 容量保护：超出上限时淘汰最旧条目
+  if (loopGuardState.size > LOOPGUARD_MAX_ENTRIES) {
+    const keyOfFirst = loopGuardState.keys().next().value
+    if (keyOfFirst) loopGuardState.delete(keyOfFirst)
+  }
+  return { suppressed: false }
+}
+
 export async function handleChat(e) {
   helper.normalizeMessage(e)
   // 自回复防护：机器人自己发的消息、message_sent 事件直接跳过
@@ -370,6 +421,10 @@ export async function handleChat(e) {
   }
 
   if (!matched) return false
+
+  // 防 AI 互聊循环：确认要回复前登记一次触发；若判定循环冷却中则静默跳过，
+  // 避免与同群的其他机器人互相 @ 无限互答烧 token/余额。
+  if (loopGuardReport(groupId, userId).suppressed) return false
 
   // 如果 parsed.current.text 能拿到更干净的正文（已去掉 reply/quote 段等），优先用它
   const baseForPure = (parsed.current?.text && typeof parsed.current.text === 'string')
