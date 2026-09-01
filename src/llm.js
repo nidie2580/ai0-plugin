@@ -484,7 +484,7 @@ export async function chatCompletions(messages, {
     } catch (_) {}
     safeLogger.error(`[ai0-plugin] LLM HTTP ${status} ${sanitizeLog(resp.statusText || '')} | URL=${sanitizeLog(url)}` + (bodyPreview ? `\n响应体:\n${sanitizeLog(bodyPreview)}` : ''))
 
-    // 友好化常见错误
+    // 友好化常见错误：状态码 → 一句人话；无法命中时按大类兜底
     let extra = ''
     // 解析返回 JSON 里的 error.message
     let providerMsg = ''
@@ -496,14 +496,32 @@ export async function chatCompletions(messages, {
     const lower = String(providerMsg).toLowerCase()
     const looksModelError = /not found the model|model.*not found|permission denied|unknown model|model_not_found|invalid model|does not exist|model.*not allowed|模型.*不存在|模型.*未授权|无权访问.*模型/.test(lower)
 
-    if (status === 401) extra = '（API Key 错误、未生效或未填 Bearer 前缀）'
-    else if (status === 403) extra = '（权限不足：此 key 无该模型权限或账户欠费/被封禁）'
-    else if (status === 404) {
+    const codeMsg = {
+      400: '请求参数错误：多为上下文超长、消息格式不合法或 max_tokens 超限',
+      401: '鉴权失败：API Key 错误、未生效或未带 Bearer 前缀',
+      402: '余额/额度不足：需充值或领取免费额度',
+      403: '权限不足：此 key 无该模型权限，或账户欠费/被封禁',
+      408: '请求超时：本地模型推理过慢或网络拥塞',
+      409: '请求冲突：可能重复提交或并发数超限',
+      413: '请求体过大：上下文/图片/附件超长',
+      422: '无法处理的实体：消息结构或参数不合法',
+      429: '请求过于频繁 / 速率限制 / 余额不足，可稍后重试',
+      500: '服务端抽风：提供商内部错误，稍后再试',
+      502: '网关错误：上游模型服务挂了或负载过高，稍后再试',
+      503: '服务暂不可用：过载或维护中，稍后再试',
+      504: '网关超时：模型回应太久，本地部署建议调大 model.timeout'
+    }
+    if (status === 404) {
       extra = looksModelError
-        ? '（模型名错误或该账户未开通此模型权限，不是接口路径问题）'
-        : '（接口路径不存在：请确认 apiBase 是否正确）'
-    } else if (status === 429) extra = '（请求过于频繁 / 速率限制 / 余额不足）'
-    else if (status >= 500) extra = '（服务商服务端错误，稍后再试或查看服务状态页）'
+        ? '模型名错误或该账户未开通此模型权限（不是接口路径问题）'
+        : '接口路径不存在：请确认 apiBase 是否正确'
+    } else if (codeMsg[status]) {
+      extra = codeMsg[status]
+    } else if (status >= 500) {
+      extra = '服务端错误，稍后再试或查看服务状态页'
+    } else if (status >= 400) {
+      extra = '客户端请求错误'
+    }
 
     // 如果识别为模型错误，附加 /models 返回的可用模型列表，直接引导用户改配置
     let modelHint = ''

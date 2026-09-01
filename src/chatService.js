@@ -349,6 +349,15 @@ function loopGuardReport(groupId, userId, now = Date.now()) {
   return { suppressed: false }
 }
 
+// 把 LLM 抛出的错误压缩成适合发给用户的简明文本：
+// 条理化为"HTTP 码 + 友好原因（+ 提供商原始错误）"单行，限长防刷屏。
+function userFacingLLMError(msg) {
+  const s = String(msg || '').replace(/\s+/g, ' ').trim()
+  if (!s) return '未知原因'
+  // 原始错误里通常已含 HTTP 码；若只有原始错误文本，则原样保留
+  return s.length > 210 ? s.slice(0, 210) + '…' : s
+}
+
 export async function handleChat(e) {
   helper.normalizeMessage(e)
   // 自回复防护：机器人自己发的消息、message_sent 事件直接跳过
@@ -652,7 +661,7 @@ export async function handleChat(e) {
       }
     } else {
       safeLogger.error(`[ai0-plugin] LLM 调用失败: ${err.message}`)
-      replyText = '(调用失败，请联系管理员)'
+      replyText = `(模型调用出错：${userFacingLLMError(err.message)})`
     }
   } finally {
     clearTimeout(timeoutTimer)
