@@ -6,6 +6,19 @@ import { fileURLToPath } from 'node:url'
 import { isAllowedOutboundUrl, safeFetchWithRedirects } from './security.js'
 import { safeLogger } from './globals.js'
 
+// 系统提示词"注入段"的起止标记。仅用于持久化历史里的"上轮注入段剥离 + 本轮重建"记账，
+// 发送给模型的请求体必须先把这两个标记从 system 内容里剥掉（见 llm.stripInjectionMarkers），
+// 否则本地/深度思考模型会把标记里可读的 "injected system" 当成用户问句（源于首轮无上下文时的误读）。
+export const INJECT_BEGIN = '<!--[ai0-injected-system-start]-->'
+export const INJECT_END = '<!--[ai0-injected-system-end]-->'
+
+/** 去掉字符串里的注入段起止标记，保留标记内部的真实注入内容。 */
+export function stripInjectionMarkers(content) {
+  return String(content ?? '')
+    .split(INJECT_BEGIN).join('')
+    .split(INJECT_END).join('')
+}
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PLUGIN_ROOT = path.resolve(__dirname, '..')

@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import { safeAxiosRequest, isAllowedOutboundUrl } from './security.js'
-import { normalizeApiBase } from './helper.js'
+import { normalizeApiBase, stripInjectionMarkers } from './helper.js'
 import { safeLogger, sanitizeLog } from './globals.js'
 
 export { normalizeApiBase }
@@ -431,7 +431,15 @@ export async function chatCompletions(messages, {
     : (Number.isFinite(rawTemp) ? Math.max(0, Math.min(2, rawTemp)) : 0.8)
   const body = {
     model,
-    messages,
+    // 发送给模型前先把 system 内容里的注入段起止标记剥掉（见 helper.stripInjectionMarkers），
+    // 保留内部真实注入内容，只去掉记账用的可读标记，避免模型把 "injected system" 误读成用户问句。
+    messages: Array.isArray(messages)
+      ? messages.map((m) =>
+          m && m.role === 'system' && typeof m.content === 'string'
+            ? { ...m, content: stripInjectionMarkers(m.content) }
+            : m
+        )
+      : messages,
     temperature: effTemp,
     max_tokens: effMaxTokens
   }

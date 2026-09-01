@@ -7,6 +7,7 @@ import * as securityLog from './securityLog.js'
 import { safeLogger } from './globals.js'
 import * as imageGen from './imageGen.js'
 import * as agent from './agent.js'
+import { INJECT_BEGIN, INJECT_END } from './helper.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
 // Web 后台保存/返回的原始模板不做替换，保证编辑框里始终看到 <master> 等标记。
@@ -87,11 +88,11 @@ export function newSession(userId) {
   return sid
 }
 
-// 注入段的起止标记：system 头里属于"插件本轮/上轮注入"的区间。
+// 注入段的起止标记（定义在 helper.js）：system 头里属于"插件本轮/上轮注入"的区间。
 // 保存历史时该区间会随 system 头一起持久化，下一轮注入前先剥离旧注入段，
 // 只保留用户原始 system prompt，避免跨轮累积导致 system 头无限膨胀。
-const INJECT_BEGIN = '<!--[ai0-injected-system-start]-->'
-const INJECT_END = '<!--[ai0-injected-system-end]-->'
+// ⚠️ 这两个标记仅用于持久化"记账"，发送给模型的请求体会在 llm.chatCompletions 里剥掉，
+//    否则本地/深度思考模型会把可读的 "injected system" 误当成用户问句（首轮无上下文时尤甚）。
 
 // N5: 转义不可信用户内容中的 < >，防止伪造 </untrusted_content> 提前闭合标签造成注入越界。
 export function escapeUntrusted(text) {
