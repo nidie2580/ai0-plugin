@@ -579,7 +579,9 @@ export function formatTurnForPrompt({ name, text, isBot, tagBotAs = 'AI', tagUse
   const who =
     (name ? name : (isBot ? tagBotAs : tagUserAs)) +
     (isBot ? `（${tagBotAs}）` : '')
-  return `【${who}】：\n${t}`
+  // 用 "【发送者：昵称】\n消息内容：正文" 的两行结构，
+  // 避免弱模型把发件人标识和正文粘成一句话（如"昵称：正文"）。
+  return `【发送者：${who}】\n消息内容：${t}`
 }
 
 export async function replyForward(e, text) {

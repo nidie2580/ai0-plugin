@@ -122,9 +122,10 @@ export function injectContextIntoHistory({ history, sysPrompt, parsed, opts, mod
   if (sysPrompt) systemLines.push(sysPrompt)
   if (includeSenderTag) {
     systemLines.push(
-      '【对话格式约定】：以下对话中每条用户消息都会附带发件人标识（形如"【张三】：\n内容"）；若某个发件人以"（AI）"结尾，说明这条消息就是你（机器人/AI）之前发送的消息。' +
-        '请你在回复时区分不同发言者，针对被引用/被转发的上下文也能准确理解对方在跟谁说、说的是什么。' +
-        '你的最终回复只需要输出回答内容本身，不需要再在回复开头重复"【某某】"标签。'
+      '【对话格式约定】：以下对话中每条消息都严格分成两行：' +
+        '第一行是发件人标识：【发送者：昵称】，若昵称以"（AI）"结尾，说明这条消息就是你（机器人/AI）之前发送的消息；' +
+        '第二行是正文：消息内容：xxx。' +
+        '请你只把第二行"消息内容："后面的文字当作真正要回复的内容，不要重复"【发送者：...】"和"消息内容："这些标签。'
     )
   }
   if (systemLines.length) {
