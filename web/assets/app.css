@@ -315,6 +315,52 @@ input:focus, select:focus, textarea:focus {
 .sess-preview { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
 
+/* 模型互聊记录 */
+.chatlog-list { display: flex; flex-direction: column; gap: 12px; }
+.chatlog-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.chatlog-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.chatlog-head .chatlog-q {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+}
+.chatlog-head .chatlog-q .tag { flex: none; }
+.chatlog-q-text { word-break: break-word; }
+.chatlog-time { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.chatlog-meta { font-size: 12px; color: var(--muted); margin: 4px 0 8px; }
+.chatlog-replies { display: flex; flex-direction: column; gap: 8px; }
+.chatlog-reply {
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+}
+.chatlog-reply .modelname {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent, #4f46e5);
+  margin-bottom: 4px;
+}
+.chatlog-reply .body { white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
+.chatlog-list .empty { color: var(--muted); text-align: center; padding: 24px 0; }
+.inline-toggle { font-size: 12.5px; color: var(--muted); font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+
 .msgs { display: flex; flex-direction: column; gap: 10px; }
 .msg {
   border-radius: 10px;

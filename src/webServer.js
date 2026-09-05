@@ -9,6 +9,7 @@ import express from 'express'
 import cookieParser from 'cookie-parser'
 import * as cfg from '../config/index.js'
 import * as auth from './auth.js'
+import * as chatLog from './chatLog.js'
 import * as llm from './llm.js'
 import * as imageGen from './imageGen.js'
 import * as helper from './helper.js'
@@ -901,6 +902,15 @@ export function createApp() {
 
   app.get('/api/sessions', requireAuth, async (req, res) => {
     res.json({ ok: true, data: await listSessions() })
+  })
+
+  // 模型互聊记录：实时的最新在前，支持分页翻历史（limit/offset）。
+  // Web「互聊记录」页面用带 limit 的小条数轮询实现"实时"，翻页时带 offset 看历史。
+  app.get('/api/chat-log', requireAuth, (req, res) => {
+    const limit = Number(req.query.limit ?? 50)
+    const offset = Number(req.query.offset ?? 0)
+    const data = chatLog.queryChatLog({ limit, offset })
+    res.json({ ok: true, data })
   })
 
   app.delete('/api/sessions/:userId/:sessionId?', requireAuth, requireCsrf, (req, res) => {

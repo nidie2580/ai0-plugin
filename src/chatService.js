@@ -7,6 +7,7 @@ import * as securityLog from './securityLog.js'
 import { safeLogger } from './globals.js'
 import * as imageGen from './imageGen.js'
 import * as agent from './agent.js'
+import * as chatLog from './chatLog.js'
 import { INJECT_BEGIN, INJECT_END } from './helper.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
@@ -1035,6 +1036,18 @@ export async function handleChat(e) {
           const flat = body.replace(/\s*\n\s*/g, '；')
           history.push({ role: 'assistant', content: `[*] ${modelDisplay(r.modelKey)}：${flat}` })
         }
+      }
+      // 独立互聊记录：把本轮"问题 + 各模型发言"写入 chat-log，供 Web「互聊记录」实时/历史展示。
+      const loggedReplies = multiModelReplies
+        .map((r) => ({ model: modelDisplay(r.modelKey), text: String(r.text || '').trim() }))
+        .filter((r) => r.text)
+      if (loggedReplies.length > 0) {
+        chatLog.appendChatLog({
+          userId,
+          sessionId,
+          question: String(pureText || '').slice(0, 4000),
+          replies: loggedReplies,
+        })
       }
     } else if (historyText) {
       history.push({ role: 'assistant', content: historyText })

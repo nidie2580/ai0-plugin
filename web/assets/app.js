@@ -167,6 +167,8 @@ if (route === 'dashboard') {
       a.classList.add('active')
       document.getElementById('view-' + a.dataset.view).classList.add('active')
       if (a.dataset.view === 'sessions') loadSessions()
+      if (a.dataset.view === 'chatlog') { loadChatlog(); startChatlogTimerIfNeeded() }
+      else stopChatlogTimer()
       if (a.dataset.view === 'image') loadImageConfig()
       if (a.dataset.view === 'providers') loadProviders()
       if (a.dataset.view === 'about') loadAbout()
@@ -451,6 +453,94 @@ if (route === 'dashboard') {
         await loadSessions()
       })
     }
+  }
+
+  // ---- 模型互聊记录 ----
+  const CHATLOG_PAGE = 30
+  let chatlogOffset = 0
+  let chatlogTimer = null
+
+  function fmtTime(ts) { return new Date(ts).toLocaleString() }
+
+  function renderChatlogEntry(entry) {
+    const card = document.createElement('div')
+    card.className = 'chatlog-item'
+    const time = fmtTime(entry.ts)
+    const meta = `${entry.userId ? `用户 ${escapeHtml(entry.userId)}` : '用户'}${
+      entry.sessionId ? ' · ' + escapeHtml(entry.sessionId.slice(0, 8)) + '…' : ''
+    }`
+    card.innerHTML = `
+      <div class="chatlog-head">
+        <div class="chatlog-q">💬 <span class="chatlog-q-text">${escapeHtml(entry.question || '(无问题)')}</span></div>
+        <span class="chatlog-time">${time}</span>
+      </div>
+      <div class="chatlog-meta">${meta} · ${(entry.replies || []).length} 个模型发言</div>
+      <div class="chatlog-replies"></div>
+    `
+    const repliesBox = card.querySelector('.chatlog-replies')
+    for (const r of (entry.replies || [])) {
+      const rep = document.createElement('div')
+      rep.className = 'chatlog-reply'
+      rep.innerHTML = `<span class="modelname">🤖 ${escapeHtml(r.model || '模型')}</span><span class="body">${escapeHtml(r.text || '').replace(/\n/g, '<br>')}</span>`
+      repliesBox.appendChild(rep)
+    }
+    return card
+  }
+
+  async function loadChatlog({ append = false } = {}) {
+    const wrap = $('#chatlogList')
+    if (!append) { chatlogOffset = 0; wrap.innerHTML = '<p class="empty">加载中…</p>' }
+    let r
+    try {
+      r = await api(`/api/chat-log?limit=${CHATLOG_PAGE}&offset=${append ? chatlogOffset : 0}`)
+    } catch (e) {
+      if (!append) wrap.innerHTML = '<p class="empty">加载失败</p>'
+      return
+    }
+    if (!r.ok) { if (!append) wrap.innerHTML = '<p class="empty">加载失败</p>'; return }
+    const data = r.data || {}
+    const items = data.items || []
+    const total = data.total ?? 0
+    $('#chatlogTag').textContent = `${total} 条记录`
+    if (!items.length) {
+      if (!append) wrap.innerHTML = '<p class="empty">暂无互聊记录。开启多模型互聊后，模型间的对话会自动记录在这里。</p>'
+      $('#chatlogMoreBtn').style.display = 'none'
+      return
+    }
+    if (append) {
+      chatlogOffset += items.length
+      for (const e of items) wrap.appendChild(renderChatlogEntry(e))
+    } else {
+      chatlogOffset = items.length
+      wrap.innerHTML = ''
+      const frag = document.createDocumentFragment()
+      for (const e of items) frag.appendChild(renderChatlogEntry(e))
+      wrap.appendChild(frag)
+    }
+    $('#chatlogMoreBtn').style.display = (chatlogOffset < total) ? '' : 'none'
+  }
+
+  function stopChatlogTimer() {
+    if (chatlogTimer) { clearInterval(chatlogTimer); chatlogTimer = null }
+  }
+  function startChatlogTimerIfNeeded() {
+    stopChatlogTimer()
+    if ($('#chatlogAuto')?.checked) chatlogTimer = setInterval(() => loadChatlog(), 5000)
+  }
+
+  {
+    const el = $('#refreshChatlogBtn')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', () => loadChatlog())
+  }
+  {
+    const el = $('#chatlogAuto')
+    if (el && typeof el.addEventListener === 'function') {
+      el.addEventListener('change', () => { if (el.checked) loadChatlog(); startChatlogTimerIfNeeded() })
+    }
+  }
+  {
+    const el = $('#chatlogMoreBtn')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', () => loadChatlog({ append: true }))
   }
 
   async function loadSessions() {

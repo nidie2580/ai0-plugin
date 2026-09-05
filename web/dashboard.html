@@ -16,6 +16,7 @@
     <a class="nav-item active" data-view="config">📝 配置</a>
     <a class="nav-item" data-view="providers">🔌 多API平台</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
+    <a class="nav-item" data-view="chatlog">💭 互聊记录</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
     <a class="nav-item" data-view="image">🎨 图片管理</a>
     <a class="nav-item" data-view="about">ℹ️ 关于</a>
@@ -163,6 +164,25 @@
         </div>
       </div>
       <div id="sessDetail" class="msgs"></div>
+    </div>
+  </section>
+
+  <!-- ==================== 模型互聊记录 ==================== -->
+  <section id="view-chatlog" class="view">
+    <div class="card">
+      <h2>模型互聊记录 <span class="tag" id="chatlogTag">-</span>
+        <label class="inline-toggle">
+          <input type="checkbox" id="chatlogAuto"/> 实时
+        </label>
+        <button class="btn sm right" id="refreshChatlogBtn">🔄 刷新</button>
+      </h2>
+      <p class="hint">展示开启「多模型互聊」后，各模型就同一问题依次发言的记录。勾选「实时」后每 5s 自动刷新一次；未勾选则手动刷新。</p>
+      <div id="chatlogList" class="chatlog-list">
+        <p class="empty">暂无互聊记录。开启多模型互聊后，模型间的对话会自动记录在这里。</p>
+      </div>
+      <div class="actions" id="chatlogMore">
+        <button class="btn ghost sm" id="chatlogMoreBtn">加载更多</button>
+      </div>
     </div>
   </section>
 
