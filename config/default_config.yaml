@@ -16,6 +16,10 @@ model:
     temperature: 0.8
     maxTokens: 2000
     timeout: 60000
+    # 是否支持图片输入（多模态）。
+    #   true  → 用户发图片时直接把图片以 image_url 形式发给该模型（如 gpt-4o / qwen-vl / glm-4v / 通义VL 等）。
+    #   false → 不看图，收到图片时改用 imageInput.ocr 里配置的视觉模型把图片转成文字，再把文字发给本模型。
+    vision: false
     # 是否深度思考模型（如 DeepSeek-R1 / Qwen3 thinking 等）：
     #   true 时① 思考过程会以"聊天记录"形式发送（可关 response.showReasoning）
     #       ② 单次请求超时放宽到 thinkingTimeout（未配则用 timeout，兜底 180s），避免思考被切断
@@ -136,6 +140,27 @@ imageGen:
   quality: "standard"
   # 生成超时（毫秒）
   timeout: 120000
+
+# 图片输入设置（接收用户发的图片）
+# 处理策略：主对话模型 vision=true → 直接把图发给它；vision=false → 用它把图转成文字再发给主模型。
+# 注：图片输入不会主动启用，收到图片即触发；前提是 NapCat/适配器能收到图片段（type=image）。
+imageInput:
+  # 是否启用图片输入。false 时不处理任何用户图片（维持旧行为，只保留 [图片] 占位）。
+  enabled: true
+  # 主对话模型不支持视觉（vision=false）时，是否把"图片转出的文字"作为用户消息文本一起发给主模型。
+  #   true  → 用下方 ocr 视觉模型把图片文字提取出来，附在用户消息里，让主模型"间接看图"。
+  #   false → 主模型不理会图片内容，仅保留 [图片] 占位。
+  ocrToText: true
+  # 图片识别/转文字用的视觉模型（OpenAI 兼容 chat/completions 接口，支持 image_url 输入）。
+  # 当主对话模型 vision=false 且 ocrToText=true 时会用它把图片里文字转成文本。
+  ocr:
+    apiBase: "https://api.openai.com/v1"
+    apiKey: ""
+    model: "gpt-4o-mini"
+    # OCR 单次请求超时（毫秒）
+    timeout: 60000
+    # 给 OCR 模型的系统提示：让它只输出图里的文字
+    systemPrompt: "你是OCR工具，请把输入图片里的所有文字完整、逐行地提取出来。只输出提取到的文字，不要任何解释、前缀或闲聊。若图里没有文字，输出：<无文字>"
 
 # Agent 能力设置（AI 在受控沙箱工作区执行命令完成任务，仅主人可触发）
 agent:

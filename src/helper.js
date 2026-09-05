@@ -19,6 +19,70 @@ export function stripInjectionMarkers(content) {
     .split(INJECT_END).join('')
 }
 
+/* -------------------------------------------------------------------------- */
+/*                  敏感令牌确定性脱敏（防密钥/令牌随上下文流出）              */
+/* -------------------------------------------------------------------------- */
+
+// 已脱敏占位的正则——用于幂等判断：二次 scrub 时不重复替换成嵌套占位。
+const SCRUB_MARK_RE = /\[已脱敏:[^\]]+\]/g
+
+/**
+ * 把字符串中可识别的密钥/访问令牌指纹替换成 `[已脱敏:类型:前4...后4]`。
+ * 设计目标（针对"压缩包中不应带令牌"）：
+ *  - 确定性：非依赖模型自觉，任何离开本地的 content 都先过这里；
+ *  - 幂等：已脱敏占位不被再次替换；
+ *  - 保留少量可读指纹：便于排查是哪一种令牌，但绝不暴露完整密钥。
+ * 覆盖：GitHub PAT(ghp_/gho_/ghu_/ghs_/ghr_)、sk-*、Bearer 头、AWS(AKIA/ASIA)、
+ *        Xoxp/Slack 令牌、OpenAI 风格长 token、以及 `key: <长串>` 键值对形式。
+ * @param {string} text
+ * @returns {string}
+ */
+export function scrubSensitiveTokens(text) {
+  let s = String(text ?? '')
+  if (!s) return s
+
+  const repl = (match, type, token) => {
+    const t = token
+    const head = t.slice(0, 4)
+    const tail = t.slice(-4)
+    return `[已脱敏:${type}:${head}…${tail}]`
+  }
+
+  // 1) 常见成熟前缀类令牌（可识别类型）
+  const PREFIX_PATTERNS = [
+    { type: 'github-pat', re: /\b(gh[pousr]_[A-Za-z0-9]{20,})\b/g },
+    { type: 'openai-sk', re: /\b(sk-[A-Za-z0-9_-]{20,})\b/g },
+    { type: 'aws-secret', re: /\b((?:AKIA|ASIA)[A-Z0-9]{16})\b/g },
+    { type: 'bearer', re: /\b[Bb]earer\s+([A-Za-z0-9._~+/=-]{16,})\b/g },
+    { type: 'slack', re: /\b(xox[baprs]-[A-Za-z0-9-]{12,})\b/g },
+  ]
+  for (const p of PREFIX_PATTERNS) {
+    s = s.replace(p.re, (m, token) => repl(m, p.type, token))
+  }
+
+  // 2) 先把"已脱敏占位"藏起来，避免下面的键值对规则误伤占位里的 token 片段，
+  //    再无条件执行键值对规则（幂等：占位已被隐藏，不会被二次替换）。
+  const sentinel = '\u0000SC0\u0000'
+  const hidden = []
+  s = s.replace(SCRUB_MARK_RE, (m) => { hidden.push(m); return sentinel })
+
+  // 3) `key: <长串>` / `apiKey=...` / `"password": "..."` 等键值对形式
+  //    只匹配明确的凭据类键名（含下划线），值须为较长连续串，避免误伤普通词（如 token・话题、secret・小道消息）。
+  const KEYVAL_PATTERNS = [
+    { type: 'password', re: /(["']?(?:password|passwd|pwd)["']?\s*[:=]\s*["']?)([A-Za-z0-9.!@#$%^&*._~+/=-]{6,})/gi },
+    { type: 'api-key', re: /(["']?(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|refresh[_-]?token|secret[_-]?key|app[_-]?secret)["']?\s*[:=]\s*["']?)([A-Za-z0-9.\-_~/+${}=]{12,})/gi },
+  ]
+  for (const kp of KEYVAL_PATTERNS) {
+    s = s.replace(kp.re, (m, label, value) => `${label}${repl(m, kp.type, value)}`)
+  }
+
+  // 还原占位
+  s = s.split(sentinel).join('%__PLACEHOLDER__%')
+  hidden.forEach((h, i) => { s = s.replace('%__PLACEHOLDER__%', h) })
+
+  return s
+}
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PLUGIN_ROOT = path.resolve(__dirname, '..')
@@ -259,6 +323,111 @@ export function isAtBot(e) {
     if (qq && qq === selfId) return true
   }
   return false
+}
+
+/* -------------------------------------------------------------------------- */
+/*                      图片段提取 + 图片转 base64 data URL                  */
+/* -------------------------------------------------------------------------- */
+
+const IMAGE_SEG_CONTEXT = 'imageSegments'
+
+/**
+ * 从 e.message 中提取所有图片段（type === 'image'），并缓存到 e[IMAGE_SEG_CONTEXT]。
+ * 兼容段结构：{ type:'image', file, url, data } / { type:'image', data:{ status, fileId, url } }。
+ * @returns {Array<{file?:string, url?:string, data?:string}>} 空数组 = 无图片
+ */
+export function getImageSegments(e) {
+  if (!e) return []
+  if (e[IMAGE_SEG_CONTEXT]) return e[IMAGE_SEG_CONTEXT]
+  const segs = []
+  const msg = Array.isArray(e.message) ? e.message : null
+  if (!msg) {
+    e[IMAGE_SEG_CONTEXT] = segs
+    return segs
+  }
+  for (const seg of msg) {
+    if (!seg || seg.type !== 'image') continue
+    const d = seg.data && typeof seg.data === 'object' ? seg.data : {}
+    const item = {
+      file: seg.file ?? seg.face ?? d.file ?? d.fileUrl ?? d.path ?? null,
+      url: seg.url ?? d.url ?? d.imageUrl ?? null,
+      data: seg.data ?? d.base64 ?? d.data ?? null,
+    }
+    if (item.file || item.url || item.data) segs.push(item)
+  }
+  e[IMAGE_SEG_CONTEXT] = segs
+  return segs
+}
+
+/**
+ * 将单个图片段解析为 base64 data URL（OpenAI 兼容多模态 image_url 标准格式）。
+ * 优先级：data:URL 原样 → base64 data → 本地文件读取 → http(s) 下载。
+ * @param {{file?:string, url?:string, data?:string}} seg
+ * @param {number} [maxBytes=8*1024*1024] 单张图允许的最大字节数（避免超大 payload）
+ * @returns {Promise<{ok:true, dataUrl:string, bytes:number}|{ok:false, error:string}>}
+ */
+export async function imageSegmentToDataUrl(seg, maxBytes = 8 * 1024 * 1024) {
+  if (!seg || (typeof seg !== 'object')) return { ok: false, error: '空图片段' }
+
+  // 1) 已是 data:image URL
+  if (typeof seg.data === 'string' && /^data:image\//i.test(seg.data)) {
+    const b64 = seg.data.split(',')[1] || ''
+    const bytes = Buffer.byteLength(b64, 'base64')
+    if (bytes > maxBytes) return { ok: false, error: `图片过大(${Math.round(bytes / 1024 / 1024)}MB)已拒绝` }
+    return { ok: true, dataUrl: seg.data, bytes }
+  }
+
+  // 2) base64 data（字段 data/base64 前缀缺失时补全）
+  if (typeof seg.data === 'string' && seg.data) {
+    const bytes = Buffer.byteLength(seg.data, 'base64')
+    if (bytes > maxBytes) return { ok: false, error: `图片过大(${Math.round(bytes / 1024 / 1024)}MB)已拒绝` }
+    const mime = guessMimeFromBuffer(Buffer.from(seg.data, 'base64')) || 'image/png'
+    return { ok: true, dataUrl: `data:${mime};base64,${seg.data}`, bytes }
+  }
+
+  // 3) 本地文件路径（NapCat 缓存通常不在插件允许根目录内，但仍限制为"已存在的小文件"，防拖任意大文件）
+  const local = seg.file || seg.url
+  if (local && fs.existsSync(local)) {
+    let st
+    try { st = fs.statSync(local) } catch (_) { return { ok: false, error: '读取图片失败' } }
+    if (!st.isFile()) return { ok: false, error: '非普通文件' }
+    if (st.size > maxBytes) return { ok: false, error: `图片过大(${Math.round(st.size / 1024 / 1024)}MB)已拒绝` }
+    const buf = fs.readFileSync(local)
+    const mime = guessMimeFromBuffer(buf) || 'image/png'
+    return { ok: true, dataUrl: `data:${mime};base64,${buf.toString('base64')}`, bytes: buf.length }
+  }
+
+  // 4) http(s) URL → 下载
+  if (typeof seg.url === 'string' && /^https?:\/\//i.test(seg.url)) {
+    try {
+      const dl = await downloadImageViaFetch(seg.url, maxBytes)
+      if (!dl.ok) return { ok: false, error: dl.error }
+      const mime = guessMimeFromBuffer(dl.buffer) || 'image/png'
+      return { ok: true, dataUrl: `data:${mime};base64,${dl.buffer.toString('base64')}`, bytes: dl.buffer.length }
+    } catch (err) {
+      return { ok: false, error: `下载图片失败: ${err.message}` }
+    }
+  }
+
+  return { ok: false, error: '无法识别的图片来源' }
+}
+
+const MIME_BY_MAGIC = [
+  { mime: 'image/png', head: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+  { mime: 'image/jpeg', head: Buffer.from([0xff, 0xd8, 0xff]) },
+  { mime: 'image/gif', head: Buffer.from([0x47, 0x49, 0x46]) },
+  { mime: 'image/webp', head: Buffer.from([0x52, 0x49, 0x46, 0x46]) },
+]
+
+function guessMimeFromBuffer(buf) {
+  if (!buf || !buf.length) return null
+  for (const it of MIME_BY_MAGIC) {
+    if (buf.length >= it.head.length && buf.subarray(0, it.head.length).equals(it.head)) {
+      if (it.mime === 'image/webp') return 'image/webp'
+      return it.mime
+    }
+  }
+  return null
 }
 
 /* -------------------------------------------------------------------------- */

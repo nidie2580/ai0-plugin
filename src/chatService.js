@@ -359,6 +359,90 @@ function userFacingLLMError(msg) {
   return s.length > 210 ? s.slice(0, 210) + '…' : s
 }
 
+/**
+ * 把当前用户消息里的图片段接入"发给主模型的 history"：
+ * - 主模型 vision=true  → 把最后一条 user 消息的 content 改成多模态数组，
+ *                        在 text 基础上追加 image_url（base64 data URL）。
+ * - 主模型 vision=false → 若 imageInput.ocrToText 开启，调用 imageInput.ocr
+ *                        模型做图片转文字，再把文字附到该 user 消息上（"间接看图"）。
+ * 只改造"用于本次请求"的 history 副本，绝不写回持久化 history（避免 base64 撑爆历史/上下文）。
+ * @returns {Promise<Array>} 新的 history（无图片或失败时原样返回）
+ */
+export async function enrichHistoryWithImages(history, e, { modelKey }) {
+  const segs = helper.getImageSegments(e)
+  if (!Array.isArray(segs) || segs.length === 0) return history
+  if (cfg.get('imageInput.enabled', true) === false) return history
+  if (!Array.isArray(history) || history.length === 0) return history
+
+  // 找"当前这一轮"的 user 消息：正常是 history 里最后一条 role==='user'。
+  // 若无（极端情况），就作为新 user 消息垫在末尾。
+  let userIdx = -1
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]?.role === 'user') { userIdx = i; break }
+  }
+
+  const modelCfgAll = cfg.loadConfig().model || {}
+  const defaultKey = modelCfgAll.default || 'openai-compatible'
+  const modelConf = modelCfgAll[modelKey || defaultKey] || modelCfgAll[defaultKey] || {}
+  const mainVision = modelConf.vision === true
+  const ocrToText = cfg.get('imageInput.ocrToText', true) !== false
+
+  // 逐张图解析为 base64 data URL（失败则跳过该张）
+  const dataUrls = []
+  for (const seg of segs) {
+    try {
+      const r = await helper.imageSegmentToDataUrl(seg)
+      if (r.ok) dataUrls.push(r.dataUrl)
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 图片解析失败: ${err.message}`)
+    }
+  }
+  if (dataUrls.length === 0) {
+    safeLogger.warn('[ai0-plugin] 图片段全部解析失败，未注入图片，回退文本链路')
+    return history
+  }
+
+  const from = userIdx >= 0 ? history[userIdx] : null
+  let baseText = ''
+  if (from && typeof from.content === 'string') baseText = from.content
+  // 清理正文里已有的 [图片:...] 占位，避免和实际图片重复
+  const cleanText = baseText.replace(/\[图片(?::[^\]]*)?\]/g, '').trim()
+
+  const newHistory = history.slice()
+  const newUser = from ? { ...from } : { role: 'user', content: '' }
+
+  if (mainVision) {
+    // 多模态：text + 若干 image_url
+    const contentParts = []
+    if (cleanText) contentParts.push({ type: 'text', text: cleanText })
+    for (const u of dataUrls) contentParts.push({ type: 'image_url', image_url: { url: u } })
+    if (contentParts.length === 0) contentParts.push({ type: 'text', text: '（用户发送了一张图片）' })
+    newUser.content = contentParts
+  } else if (ocrToText) {
+    // 图片转文字：串行 OCR（多图时串联）
+    let ocrText = ''
+    for (const u of dataUrls) {
+      try {
+        const t = await llm.transcribeImage(u)
+        if (t && t.trim() && t.trim() !== '<无文字>') ocrText += (ocrText ? '\n' : '') + t.trim()
+      } catch (err) {
+        safeLogger.warn(`[ai0-plugin] OCR 执行异常: ${err.message}`)
+      }
+    }
+    const parts = []
+    if (cleanText) parts.push(cleanText)
+    if (ocrText) parts.push(ocrText)
+    newUser.content = parts.length ? parts.join('\n') : '[图片]'
+  } else {
+    // 不看图也不 OCR：维持占位
+    newUser.content = cleanText || '[图片]'
+  }
+
+  if (userIdx >= 0) newHistory[userIdx] = newUser
+  else newHistory.push(newUser)
+  return newHistory
+}
+
 export async function handleChat(e) {
   helper.normalizeMessage(e)
   // 自回复防护：机器人自己发的消息、message_sent 事件直接跳过
@@ -368,7 +452,11 @@ export async function handleChat(e) {
   const text = helper.getMessageText(e)
   const isGroup = !!groupId
 
-  if (!userId || !text) return false
+  // 图片输入开关：启用时允许"纯图片"消息通过入口守卫（正文为空但有图片段也能进入处理链路）
+  const imageInputEnabled = cfg.get('imageInput.enabled', true) !== false
+  const hasImageSegs = imageInputEnabled && helper.getImageSegments(e).length > 0
+
+  if (!userId || (!text && !hasImageSegs)) return false
 
   if (!helper.isUserAllowed(userId, groupId, e)) {
     return false
@@ -456,7 +544,7 @@ export async function handleChat(e) {
   }
 
   /* ---------- 仅艾特默认回复（去掉@/前缀后 + 解析引用转发后 仍无实质内容） ---------- */
-  if (!pureText) {
+  if (!pureText && !hasImageSegs) {
     const onlyAtCfg = cfg.get('chat.onlyAtDefaultReply', {}) || {}
     const isEnabled = onlyAtCfg.enabled !== false
     // 判断是不是"纯艾特触发"场景：
@@ -670,7 +758,15 @@ export async function handleChat(e) {
   inflightChat.set(inflightKey, { controller: ac, at: Date.now() })
 
   try {
-    const res = await llm.chatCompletions(history, { signal: ac.signal })
+    // 图片输入：把当前轮图片接入"发给主模型的 history"副本（不改持久化 history，避免 base64 污染上下文）
+    let reqHistory = history
+    try {
+      reqHistory = await enrichHistoryWithImages(history, e, { modelKey: defaultKey })
+    } catch (imgErr) {
+      safeLogger.warn(`[ai0-plugin] 图片注入失败（回退文本链路）: ${imgErr?.message || imgErr}`)
+      reqHistory = history
+    }
+    const res = await llm.chatCompletions(reqHistory, { signal: ac.signal })
     replyText = res.text
     modelName = res.modelName
     // 深度思考模型：思考完毕后把思考过程以"聊天记录"（合并转发）形式发送

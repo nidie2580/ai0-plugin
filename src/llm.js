@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import { safeAxiosRequest, isAllowedOutboundUrl } from './security.js'
-import { normalizeApiBase, stripInjectionMarkers } from './helper.js'
+import { normalizeApiBase, stripInjectionMarkers, scrubSensitiveTokens } from './helper.js'
 import { safeLogger, sanitizeLog } from './globals.js'
 
 export { normalizeApiBase }
@@ -106,7 +106,12 @@ export function saveHistory(userId, sessionId, messages) {
     const tmp = file + `.tmp.${crypto.randomBytes(16).toString('hex')}`
     const bak = file + '.bak'
     try {
-      const data = JSON.stringify(latest, null, 2)
+      // M6: 落盘前对每条字符串 content 做敏感令牌脱敏——历史文件永不保存明文密钥/令牌。
+      const scrubbedLatest = latest.map(m => {
+        if (m && typeof m.content === 'string') return { ...m, content: scrubSensitiveTokens(m.content) }
+        return m
+      })
+      const data = JSON.stringify(scrubbedLatest, null, 2)
       // M5: 会话文件大小上限 512KB，超过则截断旧消息
       const MAX_HISTORY_BYTES = 512 * 1024
       let trimmedData = data
@@ -114,7 +119,7 @@ export function saveHistory(userId, sessionId, messages) {
         // 保留最后 contextSize*2 条消息（防御式读取：配置缺失/非法时兜底 10，避免 NaN slice）
         const rawCtx = cfg.get('chat.contextSize', 10)
         const ctxSize = Number.isFinite(Number(rawCtx)) ? Math.max(1, Math.floor(Number(rawCtx))) : 10
-        const keep = latest.slice(-(ctxSize * 2 + 2))
+        const keep = scrubbedLatest.slice(-(ctxSize * 2 + 2))
         trimmedData = JSON.stringify(keep, null, 2)
         safeLogger.warn(`[ai0-plugin] 会话历史超过 512KB，已截断至 ${keep.length} 条消息`)
       }
@@ -204,12 +209,15 @@ async function summarizeWithModel(messagesToCompress, opts = {}) {
   const turns = Array.isArray(messagesToCompress) ? messagesToCompress : []
   // B2: user 消息内容包 <untrusted_content> 标签隔离
   // N1: 转义用户内容中的 < >，防止伪造 </untrusted_content> 提前闭合标签造成注入越界
+  // B3: 压缩摘要前对整个待压缩对话做敏感令牌脱敏——明文密钥不进入压缩模型，
+  //     也就不会以任何形式被默写进【上下文压缩包】持久化并反复注入。
   const wrappedTurns = turns.map(m => {
-    if (m.role === 'user' && typeof m.content === 'string') {
-      const safeContent = m.content.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const scrubbed = typeof m.content === 'string' ? scrubSensitiveTokens(m.content) : m.content
+    if (m.role === 'user' && typeof scrubbed === 'string') {
+      const safeContent = scrubbed.replace(/</g, '&lt;').replace(/>/g, '&gt;')
       return { role: 'user', content: `<untrusted_content>\n${safeContent}\n</untrusted_content>` }
     }
-    return m
+    return { ...m, content: scrubbed }
   })
   const payload = [{ role: 'system', content: sys }, ...wrappedTurns].slice(0, 80)   // 上限：防止压 100 条仍然超 128k 上下文
   try {
@@ -275,7 +283,10 @@ export async function compressHistoryIfNeeded(history, { contextSize = 10, extra
     summaryText = await summarizeWithModel(toCompress, extra)
   } catch (_) { summaryText = null }
   if (summaryText) {
-    const summaryMsg = { role: 'system', content: summaryText }
+    // M7: 压缩摘要同样过一遍敏感令牌脱敏（防线兜底——即使输入侧 scrub 有遗漏，
+    //     也确保【上下文压缩包】持久化/注入时不携明文密钥）。
+    const sb = scrubSensitiveTokens(summaryText)
+    const summaryMsg = { role: 'system', content: sb }
     const newDialog = [
       ...dialog.slice(0, compressStart),  // 保留"之前的压缩包"也可以，不过上面 while 已经跳过
       summaryMsg,
@@ -431,14 +442,22 @@ export async function chatCompletions(messages, {
     : (Number.isFinite(rawTemp) ? Math.max(0, Math.min(2, rawTemp)) : 0.8)
   const body = {
     model,
-    // 发送给模型前先把 system 内容里的注入段起止标记剥掉（见 helper.stripInjectionMarkers），
-    // 保留内部真实注入内容，只去掉记账用的可读标记，避免模型把 "injected system" 误读成用户问句。
+    // 发送给模型前：
+    //  1) 剥掉注入段起止标记（见 helper.stripInjectionMarkers），保留内部真实注入内容
+    //     只去掉记账用的可读标记，避免模型把 "injected system" 误读成用户问句。
+    //  2) 对每条消息的字符串 content 做敏感令牌脱敏，确保密钥/令牌不会以明文发给模型
+    //    （压缩包含令牌的本质是"发送前没隔离"，这里在源头根治）。
     messages: Array.isArray(messages)
-      ? messages.map((m) =>
-          m && m.role === 'system' && typeof m.content === 'string'
-            ? { ...m, content: stripInjectionMarkers(m.content) }
-            : m
-        )
+      ? messages.map((m) => {
+          if (!m) return m
+          if (m.role === 'system' && typeof m.content === 'string') {
+            return { ...m, content: scrubSensitiveTokens(stripInjectionMarkers(m.content)) }
+          }
+          if (typeof m.content === 'string') {
+            return { ...m, content: scrubSensitiveTokens(m.content) }
+          }
+          return m
+        })
       : messages,
     temperature: effTemp,
     max_tokens: effMaxTokens
@@ -582,5 +601,74 @@ export function extractReasoning(choice) {
   else if (choice?.delta?.reasoning_content && typeof choice.delta.reasoning_content === 'string') raw = choice.delta.reasoning_content
   const trimmed = String(raw || '').trim()
   return trimmed ? trimmed.slice(0, 20_000) : ''
+}
+
+/**
+ * 使用 imageInput.ocr 配置的视觉模型，把一张图（base64 data URL）转成文字。
+ * 主对话模型 vision=false 时，用它做"图片 → 文本"兜底后再喂给主模型。
+ * @param {string} dataUrl - data:image/...;base64,... 形式
+ * @returns {Promise<string>} 提取到的文字；无文字/失败返回空串（caller 应静默降级）
+ */
+export async function transcribeImage(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== 'string' || !/^data:image\//i.test(dataUrl)) return ''
+  const config = cfg.loadConfig()
+  const ocr = config.imageInput?.ocr || {}
+  const apiBase = String(ocr.apiBase || '').trim()
+  const apiKey = String(ocr.apiKey || '').trim()
+  const ocrModel = String(ocr.model || '').trim()
+  if (!apiBase || !apiKey || !ocrModel) {
+    safeLogger.warn('[ai0-plugin] imageInput.ocr 未完整配置（apiBase/apiKey/model），跳过图片转文字')
+    return ''
+  }
+
+  const normalizedBase = normalizeApiBase(apiBase)
+  const url = buildEndpoint(normalizedBase, '/chat/completions')
+  if (!(await isAllowedOutboundUrl(url)).ok) {
+    safeLogger.warn('[ai0-plugin] imageInput.ocr apiBase URL 未通过安全校验，跳过图片转文字')
+    return ''
+  }
+
+  const systemPrompt = String(ocr.systemPrompt || '你是OCR工具，请把图片里的文字完整、逐行提取出来，不要任何解释或前缀。如图里无文字，输出：<无文字>')
+  const effTimeout = Number(ocr.timeout) || 60000
+  const body = {
+    model: ocrModel,
+    temperature: 0,
+    max_tokens: 2000,
+    messages: [
+      { role: 'system', content: stripInjectionMarkers(systemPrompt) },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '请提取这张图片中的所有文字。' },
+          { type: 'image_url', image_url: { url: dataUrl } },
+        ],
+      },
+    ],
+  }
+
+  safeLogger.info(`[ai0-plugin] OCR 请求：url=${sanitizeLog(url)}  model=${sanitizeLog(ocrModel)}  apiKey=${redactKey(ocr.apiKey)}`)
+
+  let resp
+  try {
+    resp = await safeAxiosRequest('post', url, body, {
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      timeout: effTimeout,
+    })
+  } catch (e) {
+    const s = summarizeAxiosError(e)
+    safeLogger.error(`[ai0-plugin] OCR 调用异常: code=${sanitizeLog(s.code)} message=${sanitizeLog(s.message)}`)
+    return ''
+  }
+
+  if (resp.status < 200 || resp.status >= 300) {
+    safeLogger.error(`[ai0-plugin] OCR HTTP ${resp.status} ${sanitizeLog(resp.statusText || '')}`)
+    return ''
+  }
+
+  const choice = resp.data?.choices?.[0]
+  let text = ''
+  if (choice?.message?.content) text = choice.message.content
+  else if (typeof resp.data?.content === 'string') text = resp.data.content
+  return String(text || '')
 }
 
