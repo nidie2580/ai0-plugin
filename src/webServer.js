@@ -811,6 +811,32 @@ export function createApp() {
       if (chat.maxSessionsPerUser != null && (typeof chat.maxSessionsPerUser !== 'number' || chat.maxSessionsPerUser < 1 || chat.maxSessionsPerUser > 50)) {
         return res.json({ ok: false, msg: 'chat.maxSessionsPerUser 必须为 1-50 之间的数字' })
       }
+      // 防 AI 互聊无限循环：总开关 + 阈值，网页端可调
+      const lg = chat.loopGuard
+      if (lg) {
+        if (lg.enabled != null && typeof lg.enabled !== 'boolean') {
+          return res.json({ ok: false, msg: 'chat.loopGuard.enabled 必须为布尔值' })
+        }
+        if (lg.windowMs != null && (typeof lg.windowMs !== 'number' || lg.windowMs < 1000 || lg.windowMs > 600000)) {
+          return res.json({ ok: false, msg: 'chat.loopGuard.windowMs 必须为 1000-600000 之间的数字' })
+        }
+        if (lg.maxReplies != null && (typeof lg.maxReplies !== 'number' || !Number.isInteger(lg.maxReplies) || lg.maxReplies < 2 || lg.maxReplies > 100)) {
+          return res.json({ ok: false, msg: 'chat.loopGuard.maxReplies 必须为 2-100 之间的整数' })
+        }
+        if (lg.cooldownMs != null && (typeof lg.cooldownMs !== 'number' || lg.cooldownMs < 1000 || lg.cooldownMs > 3600000)) {
+          return res.json({ ok: false, msg: 'chat.loopGuard.cooldownMs 必须为 1000-3600000 之间的数字' })
+        }
+      }
+      // 多模型并行回答 + 模型间互聊
+      const mm = chat.multiModel
+      if (mm) {
+        if (mm.enabled != null && typeof mm.enabled !== 'boolean') {
+          return res.json({ ok: false, msg: 'chat.multiModel.enabled 必须为布尔值' })
+        }
+        if (mm.multiChat != null && typeof mm.multiChat !== 'boolean') {
+          return res.json({ ok: false, msg: 'chat.multiModel.multiChat 必须为布尔值' })
+        }
+      }
     }
     const g = config.groupOps
     if (g) {

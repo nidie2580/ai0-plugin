@@ -60,8 +60,71 @@ function pruneMapToSize(map, max) {
   }
 }
 
+// 模型间互聊时注入的"机器人消息"标记协议说明（追加到系统提示末尾）。
+// 需求背景：多个 AI 就同一问题各自作答后希望它们能相互点评/聊天。带 [*] 前缀的
+// 消息属于"机器人(其他 AI)发言"，模型可选择回应，也可选择忽略，避免强制互答。
+const MULTI_CHAT_PROTOCOL = [
+  '> 请留意：消息里带 [*] 前缀的段落属于[其他 AI 机器人]的发言（本提示词约定）。',
+  '> 你可以选择针对 [*] 消息补充你的看法、提出反问、纠正或赞同；若不值得回应，可以忽略并只回复人类用户。',
+  '> 你的回复若发在同属机器人的段落中，同样会被其他 AI 看到。',
+].join('\n')
+
+// 列出所有"已配置可用"的模型 key（要求 apiKey 与 apiBase 都非空；default 键本身不算模型，
+// 但它指向的具体模型 key 会被当作一个可用模型）。多模型并行回答 / 模型间互聊会遍历该列表。
+export function listConfiguredModels() {
+  const m = cfg.loadConfig().model || {}
+  const defaultKey = m.default || 'openai-compatible'
+  const usable = (k) => {
+    const c = m[k]
+    return c && typeof c === 'object' && String(c.apiKey || '').trim() && String(c.apiBase || '').trim()
+  }
+  const keys = Object.keys(m)
+    .filter((k) => k !== 'default')
+    .filter(usable)
+  if (usable(defaultKey) && !keys.includes(defaultKey)) keys.push(defaultKey)
+  return keys
+}
+
 function getUserSessionKey(userId) {
   return `current:${userId}`
+}
+
+// 从对话历史中抽取以 "[*] 模型名：正文" 形式存在的机器人（其他模型）发言，按模型名分组。
+// 供多模型互聊时把"其他 AI 的历史发言"注入当前模型，实现跨轮 AI 群聊。
+export function collectArchiveReplies(hist) {
+  if (!Array.isArray(hist)) return {}
+  const byModel = {}
+  for (const h of hist) {
+    if (!h || typeof h.content !== 'string') continue
+    for (const line of h.content.split('\n')) {
+      const m = line.match(/^\[\*\]\s*(.+?)[:：]\s*(.+)$/)
+      if (m) {
+        const name = m[1].trim()
+        if (!byModel[name]) byModel[name] = []
+        byModel[name].push(m[2].trim())
+      }
+    }
+  }
+  return byModel
+}
+
+// 为单个模型构造专属请求历史：互聊开启时，把"除本模型外"的其他模型历史发言以 [*] 前缀
+// 追加到本轮 user 消息末尾，让当前模型能看到其他 AI 的旧发言并选择回应/忽略。
+export function buildMultiChatRequest({ reqHistory, archiveReplies, modelKey, modelDisplay, multiChatEnabled }) {
+  if (!multiChatEnabled) return reqHistory
+  const selfDisplay = modelDisplay(modelKey)
+  const others = Object.entries(archiveReplies)
+    .filter(([name]) => name !== selfDisplay)
+    .map(([name, lines]) => `[*] ${name}：${lines.join('；')}`)
+    .join('\n')
+  if (!others) return reqHistory
+  const base = reqHistory.map((m) => (m && typeof m === 'object' ? { ...m } : m))
+  const next = [...base]
+  const lastIdx = next.length - 1
+  if (lastIdx >= 0 && next[lastIdx].role === 'user') {
+    next[lastIdx] = { ...next[lastIdx], content: `${String(next[lastIdx].content || '')}\n\n${others}` }
+  }
+  return next
 }
 
 export function getCurrentSession(userId) {
@@ -611,6 +674,8 @@ export async function handleChat(e) {
   const modelCfg = cfg.loadConfig().model || {}
   const defaultKey = modelCfg.default || 'openai-compatible'
   const modelNameCfg = modelCfg?.[defaultKey]?.name || modelCfg?.[defaultKey]?.model || 'AI'
+  // 模型展示名：取 name，退化到 model，再退化到 key。在多模型聚合回复与历史 [*] 标记中使用。
+  const modelDisplay = (k) => String(modelCfg[k]?.name || modelCfg[k]?.model || k)
 
   let history = llm.loadHistory(userId, sessionId)
   // 不再在此手动 prepend sysPrompt：
@@ -689,7 +754,15 @@ export async function handleChat(e) {
   // 动态变量在"发送前的最终 prompt"处替换：Web 后台保存的原始模板保持不变
   const basePrompt = resolvePromptVars(sysPrompt, e)
   const extraContext = [identityContext, groupContext, imageContext, agentContext].filter(Boolean).join('\n\n')
-  const finalSysPrompt = (extraContext ? basePrompt + '\n\n' + extraContext : basePrompt)
+  let finalSysPrompt = (extraContext ? basePrompt + '\n\n' + extraContext : basePrompt)
+
+  // 多模型互聊：给所有参与模型注入"机器人消息 [*] 标记协议"，让它们能辨认并选择回应/忽略彼此发言。
+  const mmCfg = cfg.get('chat.multiModel', {}) || {}
+  const multiModelEnabled = mmCfg.enabled === true
+  const multiChatEnabled = multiModelEnabled && mmCfg.multiChat !== false
+  if (multiChatEnabled) {
+    finalSysPrompt = finalSysPrompt + '\n\n' + MULTI_CHAT_PROTOCOL
+  }
 
   // 注入引用消息 + 合并转发 + 发件人标签
   history = injectContextIntoHistory({
@@ -730,6 +803,7 @@ export async function handleChat(e) {
 
   let replyText = ''
   let modelName = ''
+  let multiModelReplies = []   // 多模型模式下各模型的回答（含 modelKey/text/modelName），供落历史时以 [*] 前缀标记
 
   // 并发控制：同一用户同一会话的新请求 → 取消正在飞的旧请求（防止"先发后到"的串上下文）
   // 再做一层超时保险：AbortController 配合 axios 的 signal，同时给 model timeout 留余地
@@ -766,15 +840,58 @@ export async function handleChat(e) {
       safeLogger.warn(`[ai0-plugin] 图片注入失败（回退文本链路）: ${imgErr?.message || imgErr}`)
       reqHistory = history
     }
-    const res = await llm.chatCompletions(reqHistory, { signal: ac.signal })
-    replyText = res.text
-    modelName = res.modelName
-    // 深度思考模型：思考完毕后把思考过程以"聊天记录"（合并转发）形式发送
-    if (res?.reasoning && cfg.get('response.showReasoning', true) !== false) {
-      try {
-        await helper.replyReasoningAsChat(e, res.reasoning)
-      } catch (err) {
-        safeLogger.warn(`[ai0-plugin] 发送深度思考过程失败: ${err?.message || err}`)
+
+    // 多模型并行回答 + 模型间互聊：
+    //   每个模型各用一份"配有 * 标识协商日志"的独立请求历史，互不串扰（各自独立入参）。
+    const activeModelKeys = multiModelEnabled ? listConfiguredModels() : [defaultKey]
+
+    // 从已持久化 history 中提取"其他模型的 [*] 发言"，聚合成"本轮用户消息之外"的对话背景。
+    // 这样开启 multiChat 后，模型在下一轮就能看到彼此此前说过的话 → 形成可持续的多轮 AI 聊天。
+    const archiveReplies = collectArchiveReplies(reqHistory)
+
+    // 并行调用所有目标模型。每个模型彼此独立，失败互不影响；互聊时注入其他模型的 [*] 历史发言。
+    const tasks = activeModelKeys.map(async (k) => {
+      const modelReq = buildMultiChatRequest({
+        reqHistory,
+        archiveReplies,
+        modelKey: k,
+        modelDisplay,
+        multiChatEnabled
+      })
+      const res = await llm.chatCompletions(modelReq, { modelKey: k, signal: ac.signal })
+      return { modelKey: k, text: res?.text || '', modelName: res?.modelName || k, reasoning: res?.reasoning }
+    })
+    const results = await Promise.allSettled(tasks)
+    const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value)
+    const failed = results.filter((r) => r.status === 'rejected').map((r) => r.reason)
+
+    if (multiModelEnabled) {
+      // 多模型模式：各模型各自成段，由用户自行对照。回答以 [*] 前缀记入 multiModelReplies，
+      //   落历史时逐条保存，下一轮模型便能通过注入段"看到"彼此的旧发言，形成持续的多轮 AI 聊天。
+      multiModelReplies = ok.map((r) => ({ modelKey: r.modelKey, text: r.text, modelName: r.modelName ?? r.modelKey, reasoning: r.reasoning }))
+      replyText = ok.length
+        ? ok.map((r) => `【${modelDisplay(r.modelKey)}】${r.text}`).join('\n\n')
+        : `(所有模型均调用出错：${userFacingLLMError(failed[0]?.message)})`
+      modelName = ok.map((r) => modelDisplay(r.modelKey)).join('、')
+      // 多模型模式的深度思考：分别发送各模型思考过程
+      if (cfg.get('response.showReasoning', true) !== false) {
+        for (const r of ok) {
+          if (r.reasoning) {
+            try { await helper.replyReasoningAsChat(e, r.reasoning) } catch (_) {}
+          }
+        }
+      }
+    } else {
+      // 单模型：原有行为
+      const res = ok[0]
+      replyText = res ? res.text : `(模型调用出错：${userFacingLLMError(failed[0]?.message)})`
+      modelName = res?.modelName || ''
+      if (res?.reasoning && cfg.get('response.showReasoning', true) !== false) {
+        try {
+          await helper.replyReasoningAsChat(e, res.reasoning)
+        } catch (err) {
+          safeLogger.warn(`[ai0-plugin] 发送深度思考过程失败: ${err?.message || err}`)
+        }
       }
     }
   } catch (err) {
@@ -907,8 +1024,21 @@ export async function handleChat(e) {
       }
     }
 
-    // 存入历史使用 historyText（不含群操作报告，避免污染 AI 上下文）
-    history.push({ role: 'assistant', content: historyText })
+    // 存入历史使用 historyText（不含群操作报告，避免污染 AI 上下文）。
+    // 多模型模式：把每个模型的回答以 "[*] 模型名：正文" 逐条保存，下一轮模型即可通过
+    //   注入段看到彼此的旧发言，形成持续的多轮 AI 聊天。非多模型模式则退回单条历史。
+    //   注意：正文里的换行压成"；"，保证整条 [*] 消息在单行（collectArchiveReplies 按行匹配）。
+    if (multiModelReplies.length) {
+      for (const r of multiModelReplies) {
+        const body = String(r.text || '').trim()
+        if (body) {
+          const flat = body.replace(/\s*\n\s*/g, '；')
+          history.push({ role: 'assistant', content: `[*] ${modelDisplay(r.modelKey)}：${flat}` })
+        }
+      }
+    } else if (historyText) {
+      history.push({ role: 'assistant', content: historyText })
+    }
     llm.saveHistory(userId, sessionId, history)
   }
 

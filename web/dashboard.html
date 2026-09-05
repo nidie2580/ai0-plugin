@@ -53,7 +53,20 @@
         <label>单用户最大会话数 <input id="chat_maxSessionsPerUser" type="number" min="1" max="50"/></label>
         <label>触发前缀（逗号分隔） <input id="chat_triggerPrefix" placeholder="如：#ai,小爱"/></label>
         <label>会话过期(ms) <input id="chat_sessionTimeout" type="number" min="-1"/></label>
+        <label>多模型并行回答 <select id="chat_multiModel_enabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
+        <label>模型间互聊 <select id="chat_multiModel_multiChat"><option value="false">关闭</option><option value="true">开启</option></select></label>
       </div>
+      <p class="hint">多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。注意：并行回答会成倍增加模型 API 调用次数。</p>
+
+      <hr>
+      <h3>防 AI 互聊循环</h3>
+      <div class="grid-2">
+        <label>总开关 <select id="chat_loopGuard_enabled"><option value="true">开启</option><option value="false">关闭</option></select></label>
+        <label>检测窗口(ms) <input id="chat_loopGuard_windowMs" type="number" min="1000" max="600000"/></label>
+        <label>窗口内最多回复次数 <input id="chat_loopGuard_maxReplies" type="number" min="2" max="100"/></label>
+        <label>冷却时长(ms) <input id="chat_loopGuard_cooldownMs" type="number" min="1000" max="3600000"/></label>
+      </div>
+      <p class="hint">群里同时存在多个机器人时，它们可能互相 @ 形成无限互答烧 token。此机制在「同群同账号短窗口内连续回复达上限」时判定为疑似循环，进入冷却静默。正常人类间歇聊天几乎不会误判。关闭总开关即停用该保护。</p>
 
       <hr>
       <h3>Agent 配置</h3>

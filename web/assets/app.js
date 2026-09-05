@@ -265,6 +265,14 @@ if (route === 'dashboard') {
     $('#chat_maxSessionsPerUser').value = resp.config.chat?.maxSessionsPerUser ?? 3
     $('#chat_triggerPrefix').value = (resp.config.chat?.triggerPrefix || []).join(',')
     $('#chat_sessionTimeout').value = resp.config.chat?.sessionTimeout ?? 1800000
+    const mmCfg = resp.config.chat?.multiModel || {}
+    $('#chat_multiModel_enabled').value = String(mmCfg.enabled ?? false)
+    $('#chat_multiModel_multiChat').value = String(mmCfg.multiChat ?? false)
+    const lgCfg = resp.config.chat?.loopGuard || {}
+    $('#chat_loopGuard_enabled').value = String(lgCfg.enabled ?? true)
+    $('#chat_loopGuard_windowMs').value = lgCfg.windowMs ?? 20000
+    $('#chat_loopGuard_maxReplies').value = lgCfg.maxReplies ?? 4
+    $('#chat_loopGuard_cooldownMs').value = lgCfg.cooldownMs ?? 60000
 
     $('#system_prompt').value = resp.config.system?.prompt || ''
     $('#agent_maxRounds').value = resp.config.agent?.maxRounds ?? 5
@@ -358,7 +366,17 @@ if (route === 'dashboard') {
       contextSize: parseInt($('#chat_contextSize').value, 10) || 10,
       maxSessionsPerUser: parseInt($('#chat_maxSessionsPerUser').value, 10) || 3,
       triggerPrefix: splitCsv($('#chat_triggerPrefix').value),
-      sessionTimeout: parseInt($('#chat_sessionTimeout').value, 10) || -1
+      sessionTimeout: parseInt($('#chat_sessionTimeout').value, 10) || -1,
+      multiModel: {
+        enabled: $('#chat_multiModel_enabled').value === 'true',
+        multiChat: $('#chat_multiModel_multiChat').value === 'true'
+      },
+      loopGuard: {
+        enabled: $('#chat_loopGuard_enabled').value === 'true',
+        windowMs: parseInt($('#chat_loopGuard_windowMs').value, 10) || 20000,
+        maxReplies: parseInt($('#chat_loopGuard_maxReplies').value, 10) || 4,
+        cooldownMs: parseInt($('#chat_loopGuard_cooldownMs').value, 10) || 60000
+      }
     }
     c.system = { prompt: $('#system_prompt').value }
 
