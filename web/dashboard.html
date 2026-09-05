@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI0-Plugin · 控制台</title>
-<link rel="stylesheet" href="/assets/app.css?v=20260830a" />
+<link rel="stylesheet" href="/assets/app.css?v=20260905b" />
 </head>
 <body>
 <header class="topbar">
@@ -16,7 +16,7 @@
     <a class="nav-item active" data-view="config">📝 配置</a>
     <a class="nav-item" data-view="providers">🔌 多API平台</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
-    <a class="nav-item" data-view="chatlog">💭 互聊记录</a>
+    <a class="nav-item" data-view="chatlog">💭 模型互聊</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
     <a class="nav-item" data-view="image">🎨 图片管理</a>
     <a class="nav-item" data-view="about">ℹ️ 关于</a>
@@ -56,8 +56,9 @@
         <label>会话过期(ms) <input id="chat_sessionTimeout" type="number" min="-1"/></label>
         <label>多模型并行回答 <select id="chat_multiModel_enabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
         <label>模型间互聊 <select id="chat_multiModel_multiChat"><option value="false">关闭</option><option value="true">开启</option></select></label>
+        <label>艾特指定模型 <select id="chat_multiModel_atModel"><option value="true">开启</option><option value="false">关闭</option></select></label>
       </div>
-      <p class="hint">多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。注意：并行回答会成倍增加模型 API 调用次数。</p>
+      <p class="hint">多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。「艾特指定模型」允许用 /模型名 把消息单独转给某个模型。注意：并行回答会成倍增加模型 API 调用次数。</p>
 
       <hr>
       <h3>防 AI 互聊循环</h3>
@@ -167,21 +168,49 @@
     </div>
   </section>
 
-  <!-- ==================== 模型互聊记录 ==================== -->
+  <!-- ==================== 模型互聊 ==================== -->
   <section id="view-chatlog" class="view">
     <div class="card">
-      <h2>模型互聊记录 <span class="tag" id="chatlogTag">-</span>
-        <label class="inline-toggle">
-          <input type="checkbox" id="chatlogAuto"/> 实时
-        </label>
+      <h2>模型互聊 <span class="tag" id="chatlogTag">-</span>
         <button class="btn sm right" id="refreshChatlogBtn">🔄 刷新</button>
       </h2>
-      <p class="hint">展示开启「多模型互聊」后，各模型就同一问题依次发言的记录。勾选「实时」后每 5s 自动刷新一次；未勾选则手动刷新。</p>
-      <div id="chatlogList" class="chatlog-list">
-        <p class="empty">暂无互聊记录。开启多模型互聊后，模型间的对话会自动记录在这里。</p>
+
+      <div class="seg-toggle" id="chatlogModeToggle">
+        <button class="seg-btn active" data-mode="chatlog">📋 显示日志</button>
+        <button class="seg-btn" data-mode="chat">💬 显示聊天</button>
       </div>
-      <div class="actions" id="chatlogMore">
-        <button class="btn ghost sm" id="chatlogMoreBtn">加载更多</button>
+
+      <!-- 模式一：显示日志（原互聊记录） -->
+      <div id="chatlogPane" class="chatlog-pane">
+        <p class="hint">展示开启「多模型互聊」后，各模型就同一问题依次发言的日志记录。勾选「实时」后每 5s 自动刷新；未勾选则手动刷新。</p>
+        <label class="inline-toggle"><input type="checkbox" id="chatlogAuto"/> 实时</label>
+        <div id="chatlogList" class="chatlog-list">
+          <p class="empty">暂无互聊记录。开启多模型互聊后，模型间的对话会自动记录在这里。</p>
+        </div>
+        <div class="actions" id="chatlogMore">
+          <button class="btn ghost sm" id="chatlogMoreBtn">加载更多</button>
+        </div>
+      </div>
+
+      <!-- 模式二：显示聊天（登录者以本人QQ身份向模型发消息） -->
+      <div id="chatPane" class="chatlog-pane hidden">
+        <p class="hint">以登录者身份（<b id="chatAsLabel">-</b>）向模型发消息。可勾选 <b>单个/多个模型</b> 响应，模型以各自模型名身份作答、模型间可互聊，并自动选出最合适的一条回答。</p>
+
+        <div class="mic-models">
+          <strong>参与模型：</strong>
+          <div id="micModelList" class="chips">加载中…</div>
+        </div>
+
+        <div class="mic-chat" id="micChatBox">
+          <p class="empty">选择模型并发送消息开始互聊。</p>
+        </div>
+
+        <div class="mic-input-row">
+          <input id="micInput" type="text" placeholder="输入要问的问题，回车发送…" maxlength="10000"/>
+          <button class="btn primary" id="micSendBtn">发送</button>
+          <button class="btn ghost" id="micClearBtn">清空</button>
+        </div>
+        <div class="hint" id="micBusy">空闲</div>
       </div>
     </div>
   </section>

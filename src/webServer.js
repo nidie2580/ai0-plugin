@@ -13,6 +13,7 @@ import * as chatLog from './chatLog.js'
 import * as llm from './llm.js'
 import * as imageGen from './imageGen.js'
 import * as helper from './helper.js'
+import * as multiChatService from './multiChatService.js'
 import { isAllowedOutboundUrl } from './security.js'
 import { safeLogger } from './globals.js'
 import * as loginGuard from './loginGuard.js'
@@ -1031,6 +1032,45 @@ export function createApp() {
     } catch (e) {
       res.json({ ok: false, msg: e.message || String(e) })
     }
+  })
+
+  // ---- 模型互聊（网页端）----
+  // 登录者身份 = 登录会话绑定的 QQ（未绑定则用机器人 QQ 号）；可发起一次"多模型互聊"，
+  // 各模型以各自模型名身份作答、模型间可互聊，并自动选出最合适的一条回答。
+  const getWebIdentity = (req) => {
+    const token = req.cookies?.ai0_session || req.headers['x-ai0-session']
+    const identity = auth.getSessionIdentity(token)
+    return (identity && String(identity).trim()) ? String(identity).trim() : null
+  }
+  app.get('/api/multi-chat', requireAuth, (req, res) => {
+    res.json({ ok: true, identity: getWebIdentity(req) })
+  })
+  app.post('/api/multi-chat', requireAuth, requireCsrf, async (req, res) => {
+    let { question = '', modelKeys = null, multiChat = null, clear = false } = req.body || {}
+    const identity = getWebIdentity(req)
+    const userId = identity || multiChatService.resolveUserLabel(null, null)
+    if (clear) {
+      multiChatService.clearWebConversation(userId)
+      return res.json({ ok: true, cleared: true })
+    }
+    if (typeof question !== 'string' || !question.trim()) {
+      return res.json({ ok: false, msg: '问题不能为空' })
+    }
+    if (question.length > 10000) {
+      return res.json({ ok: false, msg: '问题过长（最多 10000 字符）' })
+    }
+    if (Array.isArray(modelKeys) && modelKeys.length > 50) {
+      return res.json({ ok: false, msg: '选中的模型过多（最多 50 个）' })
+    }
+    const result = await multiChatService.runWebMultiChat({
+      userId,
+      userLabel: userId,
+      question: String(question),
+      modelKeys: Array.isArray(modelKeys) ? modelKeys : null,
+      multiChat,
+    })
+    // 返回登录者身份到前端，用于聊天界面显示"以谁的身份发言"
+    res.json({ ...result, identity })
   })
 
   app.get('/api/server-info', (req, res) => {

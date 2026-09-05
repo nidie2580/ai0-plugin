@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260830c'
+window.__AI0_BUILD__ = '20260905b'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -167,7 +167,7 @@ if (route === 'dashboard') {
       a.classList.add('active')
       document.getElementById('view-' + a.dataset.view).classList.add('active')
       if (a.dataset.view === 'sessions') loadSessions()
-      if (a.dataset.view === 'chatlog') { loadChatlog(); startChatlogTimerIfNeeded() }
+      if (a.dataset.view === 'chatlog') { loadChatlog(); startChatlogTimerIfNeeded(); initChatAcrossApp() }
       else stopChatlogTimer()
       if (a.dataset.view === 'image') loadImageConfig()
       if (a.dataset.view === 'providers') loadProviders()
@@ -270,6 +270,7 @@ if (route === 'dashboard') {
     const mmCfg = resp.config.chat?.multiModel || {}
     $('#chat_multiModel_enabled').value = String(mmCfg.enabled ?? false)
     $('#chat_multiModel_multiChat').value = String(mmCfg.multiChat ?? false)
+    $('#chat_multiModel_atModel').value = String(mmCfg.atModel ?? true)
     const lgCfg = resp.config.chat?.loopGuard || {}
     $('#chat_loopGuard_enabled').value = String(lgCfg.enabled ?? true)
     $('#chat_loopGuard_windowMs').value = lgCfg.windowMs ?? 20000
@@ -326,7 +327,19 @@ if (route === 'dashboard') {
       <label>温度 (temperature)<input id="m_temperature" type="number" step="0.1" min="0" max="2" value="${model.temperature ?? 0.8}"/></label>
       <label>Max Tokens<input id="m_maxTokens" type="number" min="1" value="${model.maxTokens ?? 2000}"/></label>
       <label>超时 (ms)<input id="m_timeout" type="number" min="1000" value="${model.timeout ?? 60000}"/></label>
+      <label>深度思考 (thinking)
+        <select id="m_thinking"><option value="false">关闭</option><option value="true">开启</option></select>
+      </label>
+      <label>支持图片输入 (vision)
+        <select id="m_vision"><option value="false">关闭</option><option value="true">开启</option></select>
+      </label>
+      <label>联网检索 (web)
+        <select id="m_web"><option value="false">关闭</option><option value="true">开启</option></select>
+      </label>
     `
+    $('#m_thinking').value = String(model.thinking ?? false)
+    $('#m_vision').value = String(model.vision ?? false)
+    $('#m_web').value = String(model.web ?? false)
   }
 
   function readFormModel() {
@@ -343,6 +356,11 @@ if (route === 'dashboard') {
     if (!Number.isNaN(temperature)) obj.temperature = temperature
     if (!Number.isNaN(maxTokens)) obj.maxTokens = maxTokens
     if (!Number.isNaN(timeout)) obj.timeout = timeout
+    // 布尔开关：读取 select 真假
+    const boolOf = (id) => document.getElementById('m_' + id)?.value === 'true'
+    obj.thinking = boolOf('thinking')
+    obj.vision = boolOf('vision')
+    obj.web = boolOf('web')
     return { oldKey, newKey, obj }
   }
 
@@ -371,7 +389,8 @@ if (route === 'dashboard') {
       sessionTimeout: parseInt($('#chat_sessionTimeout').value, 10) || -1,
       multiModel: {
         enabled: $('#chat_multiModel_enabled').value === 'true',
-        multiChat: $('#chat_multiModel_multiChat').value === 'true'
+        multiChat: $('#chat_multiModel_multiChat').value === 'true',
+        atModel: $('#chat_multiModel_atModel').value === 'true'
       },
       loopGuard: {
         enabled: $('#chat_loopGuard_enabled').value === 'true',
@@ -541,6 +560,179 @@ if (route === 'dashboard') {
   {
     const el = $('#chatlogMoreBtn')
     if (el && typeof el.addEventListener === 'function') el.addEventListener('click', () => loadChatlog({ append: true }))
+  }
+
+  // ---- 模型互聊：日志 / 聊天 双模式 ----
+  // 聊天模式以登录者身份(QQ)向模型发消息，可选单个/多个模型；模型以各自模型名身份作答，
+  // 模型间可互聊，并自动选出最合适的一条回答。会话仅存内存，刷新后重来。
+  let chatMode = 'chatlog'          // 'chatlog' | 'chat'
+  let micInitDone = false
+  let chatHistory = []              // 内存中的聊天消息（用于渲染当前聊天框）
+  let micBusy = false
+  const micModelIndex = new Map()   // key → { key, name }
+
+  function initChatAcrossApp() {
+    if (micInitDone) return
+    micInitDone = true
+    setupChatModeToggle()
+    bindMicEvents()
+    loadMicModelList()
+  }
+
+  function showChatMode(mode) {
+    chatMode = mode
+    $$('#chatlogModeToggle .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode))
+    $('#chatlogPane').classList.toggle('hidden', mode !== 'chatlog')
+    $('#chatPane').classList.toggle('hidden', mode !== 'chat')
+    if (mode === 'chatlog') { loadChatlog(); startChatlogTimerIfNeeded() }
+    else { stopChatlogTimer(); loadMicIdentity() }
+  }
+
+  function setupChatModeToggle() {
+    const toggle = $('#chatlogModeToggle')
+    if (!toggle) return
+    $$('#chatlogModeToggle .seg-btn').forEach(b => {
+      b.addEventListener('click', () => showChatMode(b.dataset.mode))
+    })
+  }
+
+  async function loadMicModelList() {
+    const wrap = $('#micModelList')
+    if (!wrap) return
+    try {
+      const resp = await api('/api/config')
+      const modelCfg = (resp && resp.config && resp.config.model) || {}
+      micModelIndex.clear()
+      let html = ''
+      for (const k of Object.keys(modelCfg)) {
+        if (k === 'default') continue
+        const m = modelCfg[k]
+        if (!m || typeof m !== 'object') continue
+        const name = m.name || m.model || k
+        micModelIndex.set(k, { key: k, name })
+        html += `<label class="chip"><input type="checkbox" value="${escapeHtml(k)}" checked/> ${escapeHtml(name)}</label>`
+      }
+      if (!html) { wrap.innerHTML = '<span class="hint">暂无模型配置。</span>'; return }
+      wrap.innerHTML = html
+    } catch (e) {
+      wrap.innerHTML = '<span class="hint">模型列表加载失败</span>'
+    }
+  }
+
+  async function loadMicIdentity() {
+    const label = $('#chatAsLabel')
+    try {
+      const r = await api('/api/multi-chat')
+      if (r && r.identity) label.textContent = escapeHtml(r.identity)
+      else if (r && r.ok) label.textContent = await resolveFallbackIdentity()
+    } catch (_) {}
+  }
+
+  async function resolveFallbackIdentity() {
+    try {
+      const cfgResp = await api('/api/config')
+      const botId = (cfgResp.config?.bot?.self_id || cfgResp.config?.bot?.uin || '')
+      return botId ? botId : '机器人'
+    } catch (_) { return '机器人' }
+  }
+
+  function selectedModelKeys() {
+    return $$('#micModelList input[type="checkbox"]:checked').map(el => el.value)
+  }
+
+  function appendMic(html) {
+    const box = $('#micChatBox')
+    if (!box) return
+    const empty = box.querySelector('.empty')
+    if (empty) empty.remove()
+    const node = document.createElement('div')
+    node.className = 'mic-msg'
+    node.innerHTML = html
+    box.appendChild(node)
+    box.scrollTop = box.scrollHeight
+  }
+
+  function renderChatHistory() {
+    const box = $('#micChatBox')
+    if (!box) return
+    if (!chatHistory.length) {
+      box.innerHTML = '<p class="empty">选择模型并发送消息开始互聊。</p>'
+      return
+    }
+    box.innerHTML = ''
+    for (const m of chatHistory) {
+      const node = document.createElement('div')
+      node.className = 'mic-msg ' + (m.role === 'user' ? 'user' : 'bot')
+      node.innerHTML = m.html
+      box.appendChild(node)
+    }
+    box.scrollTop = box.scrollHeight
+  }
+
+  function setMicBusy(busy, text) {
+    micBusy = busy
+    const el = $('#micBusy')
+    if (el) el.textContent = text
+    const btn = $('#micSendBtn')
+    if (btn) btn.disabled = busy
+  }
+
+  async function sendMic() {
+    if (micBusy) return
+    const input = $('#micInput')
+    const question = (input?.value || '').trim()
+    if (!question) return
+    const keys = selectedModelKeys()
+    if (!keys.length) { alert('请至少选择一个模型'); return }
+    input.value = ''
+
+    const userHtml = `<div class="mic-bubble user-bubble">${escapeHtml(question)}</div>`
+    chatHistory.push({ role: 'user', html: userHtml })
+    renderChatHistory()
+    setMicBusy(true, '模型互聊中，请稍候…')
+
+    try {
+      const r = await api('/api/multi-chat', { method: 'POST', body: { question, modelKeys: keys } })
+      if (!r.ok) {
+        setMicBusy(false, '互聊失败：' + (r.msg || '未知错误'))
+        chatHistory.push({ role: 'bot', html: `<div class="mic-bubble bot-bubble">⚠️ ${escapeHtml(r.msg || '互聊失败')}</div>` })
+        renderChatHistory()
+        return
+      }
+      const identity = r.identity || ''
+      const best = r.best
+      const replies = r.replies || []
+      let botHtml = ''
+      for (const rep of replies) {
+        const isBest = best && rep.model === best.model && rep.text === best.text
+        botHtml += `<div class="mic-bubble bot-bubble${isBest ? ' best' : ''}"><div class="mic-model">🤖 ${escapeHtml(rep.model)}${isBest ? ' ✅ 最优' : ''}</div><div class="mic-text">${escapeHtml(rep.text).replace(/\n/g, '<br>')}</div></div>`
+      }
+      chatHistory.push({ role: 'bot', html: botHtml || '<div class="mic-bubble bot-bubble">(无回答)</div>' })
+      renderChatHistory()
+      setMicBusy(false, '完成')
+      // 刷新"当前以谁身份显示"
+      $('#chatAsLabel').textContent = identity ? escapeHtml(identity) : $('#chatAsLabel').textContent
+    } catch (e) {
+      setMicBusy(false, '互聊失败：' + (e && e.message || '网络错误'))
+    }
+  }
+
+  function clearMic() {
+    chatHistory = []
+    const box = $('#micChatBox')
+    if (box) box.innerHTML = '<p class="empty">选择模型并发送消息开始互聊。</p>'
+    api('/api/multi-chat', { method: 'POST', body: { clear: true } }).catch(() => {})
+  }
+
+  function bindMicEvents() {
+    const send = $('#micSendBtn')
+    if (send && typeof send.addEventListener === 'function') send.addEventListener('click', sendMic)
+    const input = $('#micInput')
+    if (input && typeof input.addEventListener === 'function') {
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMic() })
+    }
+    const clear = $('#micClearBtn')
+    if (clear && typeof clear.addEventListener === 'function') clear.addEventListener('click', clearMic)
   }
 
   async function loadSessions() {
