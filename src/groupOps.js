@@ -568,12 +568,16 @@ export async function buildIdentityContext(e, out = null) {
   })()
 
   const lines = [
-    '【当前群的真实信息（重要：必须严格按此信息如实回答，信息未检测到时就说未检测到，不要瞎猜！）】',
+    '【本群内部参考数据（禁止主动播报/复述：仅供你在用户明确询问"身份/角色/群信息"时按需引用，日常聊天严禁输出或转述以下任何字段）】',
     `群号：${groupId}`,
     `群名：${groupName ? groupName : '未检测到（机器人接口未返回群名称字段）'}`,
     `群成员数：${Number.isFinite(memberCount) ? memberCount + ' 人' : '未检测到'}`,
     `群主 UIN：${ownerUin ? ownerUin : '未检测到'}`
   ]
+
+  // 使用边界：信息仅供"被直接问到"时引用，平时（打招呼/闲聊/其他话题）绝不主动把
+  // 群号/群名/角色/群主UIN/成员数等字段输出出来，也不要去"请求/确认/播报"这些群资料。
+  lines.push('  使用边界：如果本条只是打招呼或日常闲聊，请正常聊天，严禁输出上面这些内部数据；只有用户明确问及其中某一项，才引用对应字段作答。')
 
   lines.push('')
   lines.push(`你（AI / 机器人）：QQ=${botSelf.uin || '未知'}，昵称=${botSelf.nickname}，在本群角色=${botRoleLabel}${botRoleDesc}`)
@@ -628,6 +632,19 @@ const HARD_FALLBACK_TEXT = {
 /** 文本是否带提问/查询语气（过滤"我把群主踢了"这类非问句，降低误伤） */
 function isQueryLike(text) {
   return /[?？]|吗|么|是不是|是否|还是|多少|什么|谁|能|可以|帮|查|看看|确认|知道|告诉我|怎么|如何|几|算不算|叫|有没有/.test(text)
+}
+
+/* ————————————————————————————————————————————————
+ * 群身份/群信息主题宽松预判（chatService 群聊分支使用）：
+ * 只有消息疑似涉及"身份/角色/群信息/群管理"时才去构建身份上下文。
+ * 原因：buildIdentityContext 会发起群信息接口请求，若"你好"这类闲聊也构建，
+ *   既产生无谓的协议请求，注入的群资料还常被模型在闲聊里整段复述/播报。
+ * 本判定刻意做宽（宁可多注入，也别漏掉真正的身份问题），
+ * 是否命中只影响"是否请求接口/注入上下文"，不影响回复正确性。
+ * ———————————————————————————————————————————————— */
+export function looksLikeIdentityTopic(text) {
+  if (!text) return false
+  return /(群主|管理员|群管理|群员|普通群员|身份|角色|群角色|群内角色|管理权限|权限|头衔|群名|群号|本群|群信息|群成员|成员数|群里|群人数|多少人|多少个|群叫什么|群叫啥|什么群)/.test(String(text))
 }
 
 /**
@@ -772,6 +789,7 @@ export async function buildGroupContext(e) {
   const tgtRoleZh = targetRole === 'owner' ? '群主' : targetRole === 'admin' ? '管理员' : targetRole === 'member' ? '普通群员' : (targetUid ? '未知' : '-')
 
   const lines = [
+    '【群操作内部参考数据（禁止主动播报：日常闲聊严禁复述/罗列下面任何群号/角色/主人QQ/权限等数据；仅在用户请求群操作或明确询问身份时才使用）】',
     '【群操作能力】',
     `当前群号：${groupId}`,
     `机器人角色：${botRoleZh}${botInferred === 'owner' ? '（群主，可设置管理员）' : botInferred === 'admin' ? '（管理员，可踢出/禁言）' : botInferred === 'member' ? '（普通成员，无法执行管理操作）' : '（身份未知，按保守策略不允许执行管理操作）'}`,

@@ -10,6 +10,8 @@ import assert from 'node:assert/strict'
  *  - T3：pickHardIdentityFallback 纯逻辑——全缺失+身份问句 → 固定兜底；
  *        普通闲聊（你好/在吗）与操作类请求（帮我把群主踢了）不触发；
  *        部分数据可用 / 主人自称身份 / 群数据可用 → 不触发，交给模型。
+ *  - T4：looksLikeIdentityTopic 主题预判（闲聊不命中→不请求/不注入）+
+ *        身份/群操作上下文"禁止主动播报"边界文案。
  */
 
 // 顶层 await import：node --test 在 ESM 模式下支持顶层 await
@@ -195,5 +197,49 @@ describe('T3: pickHardIdentityFallback 确定性兜底纯逻辑', () => {
   it('非主人自问身份 → 仍命中兜底', () => {
     const r = groupOps.pickHardIdentityFallback('我是不是群主？', dead, { isMaster: false })
     assert.equal(r.kind, 'self')
+  })
+})
+
+describe('T4: looksLikeIdentityTopic 群身份主题预判 + 防播报边界文案', () => {
+  it('身份/角色/群信息类消息命中预判（才会去请求/注入身份上下文）', () => {
+    const hits = [
+      '我是群主吗？',
+      '我是不是管理员？',
+      '你是群主还是管理员？',
+      '我在本群是什么角色？',
+      '我有管理权限吗？',
+      '群主是谁？',
+      '群里有多少人？',
+      '这个群叫什么？',
+      '帮我@一下管理员'
+    ]
+    for (const t of hits) {
+      assert.equal(groupOps.looksLikeIdentityTopic(t), true, `应命中: ${t}`)
+    }
+  })
+
+  it('普通闲聊/打招呼不命中（不请求群接口、不注入群资料）', () => {
+    const misses = ['你好', '在吗？', '今天天气怎么样？', '哈哈', '吃了没', '嗯', '晚安', '好的谢谢']
+    for (const t of misses) {
+      assert.equal(groupOps.looksLikeIdentityTopic(t), false, `不应命中: ${t}`)
+    }
+  })
+
+  it('buildIdentityContext 输出包含"禁止主动播报/使用边界"约束', async () => {
+    const { requesterUid } = makeHealthyBot({ requesterRole: 'admin' })
+    const e = makeEvent('BOUNDARY01', requesterUid)
+    const text = await groupOps.buildIdentityContext(e, {})
+    assert.ok(text.includes('禁止主动播报'), '应包含禁止主动播报约束')
+    assert.ok(text.includes('使用边界'), '应包含使用边界说明')
+    assert.ok(/【本群内部参考数据/.test(text), '头部应标注内部参考数据')
+  })
+
+  it('buildGroupContext 输出包含禁止播报的边界说明', async () => {
+    // 复用健康 mock（is_owner 未设置，走成员接口路径）
+    makeHealthyBot({ requesterRole: 'member' })
+    const e = makeEvent('BOUNDARY02', '10001')
+    const text = await groupOps.buildGroupContext(e)
+    assert.ok(/【群操作内部参考数据（禁止主动播报/.test(text), '群操作上下文应标注禁止主动播报')
+    assert.ok(text.includes('【群操作能力】'), '仍应包含群操作能力区块')
   })
 })

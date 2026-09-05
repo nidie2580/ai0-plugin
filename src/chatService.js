@@ -529,10 +529,18 @@ export async function handleChat(e) {
   // 下方 injectContextIntoHistory 会把 finalSysPrompt 合并进消息头的 first system 消息，
   // 若这里再 prepend 一次会导致 sysPrompt 在最终 system 消息里出现两次（浪费 token、干扰权重）。
 
-  // 群聊：无条件注入身份信息（回答"我是群主吗 / 你是管理员吗"这类问题用，不依赖 groupOps 开关）
+  // 群聊身份信息：仅在消息疑似涉及"身份/角色/群信息"时才构建并注入。
+  // 原因：buildIdentityContext 会发起群信息接口请求，若"你好"这类闲聊也去构建，
+  //   既产生无谓的协议请求，注入的群资料还常被模型在闲聊里整段复述/播报出来
+  //   （用户反馈：只发"你好"，AI 却输出一串 角色/群主UIN 数据）。
+  // looksLikeIdentityTopic 只是宽松预判，宁多勿漏；普通闲聊（无任何身份/群关键词）
+  // 一律不请求、不注入 → 模型无从复述这些资料，自然回归正常聊天。
+  const needIdentity =
+    isGroup &&
+    (cfg.get('groupOps.injectIdentityAlways', false) === true || groupOps.looksLikeIdentityTopic(pureText))
   let identityContext = null
   const identityProbe = {}   // buildIdentityContext 回填的结构化解析结果（供确定性兜底用）
-  if (isGroup) {
+  if (needIdentity) {
     try {
       identityContext = await groupOps.buildIdentityContext(e, identityProbe)
     } catch (err) {
@@ -543,7 +551,8 @@ export async function handleChat(e) {
   // —— P0 兜底：群角色/群信息接口完全未返回（掉线/风控/超时）时，身份类问题直接走固定文案 ——
   // 不再把"接口未返回"交给 LLM 自由发挥（历史出现过 AI 不遵守指令反而闲聊身份），
   // 这里由本地确定性判定：数据全缺失 + 用户确实在问身份/角色/群信息 → 直接回固定句并结束。
-  if (isGroup && cfg.get('groupOps.hardIdentityFallback', true) !== false) {
+  // 仅在 needIdentity（消息确实涉及身份/群信息）时才启用，闲聊消息直接跳过。
+  if (needIdentity && cfg.get('groupOps.hardIdentityFallback', true) !== false) {
     try {
       const fallback = groupOps.pickHardIdentityFallback(pureText, identityProbe, {
         isMaster: helper.isMaster(userId, e)
