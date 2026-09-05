@@ -8,6 +8,7 @@ import { safeLogger } from './globals.js'
 import * as imageGen from './imageGen.js'
 import * as agent from './agent.js'
 import * as chatLog from './chatLog.js'
+import * as groupConfirm from './groupConfirm.js'
 import { INJECT_BEGIN, INJECT_END } from './helper.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
@@ -85,6 +86,11 @@ export function listConfiguredModels() {
     .filter(usable)
   if (usable(defaultKey) && !keys.includes(defaultKey)) keys.push(defaultKey)
   return keys
+}
+
+// 返回 chat.multiModel 配置（供其他模块读取，如群操作同行评审门控）。
+export function getMultiModelConfig() {
+  return cfg.get('chat.multiModel', {}) || {}
 }
 
 function getUserSessionKey(userId) {
@@ -991,16 +997,39 @@ export async function handleChat(e) {
     let historyText = replyText
     if (isGroup && groupContext) {
       try {
-        const { cleanText, results } = await groupOps.parseAndExecuteActions(replyText, groupId, e, { userId, sessionId })
+        // 群操作同行评审（多模型一致确认，仅 multiChat 开启且 >=2 模型时生效）。
+        // 任一评审模型否决/出错/未明确 → 该操作取消，不进入执行链路。
+        let execText = replyText
+        let cancelReport = ''
+        if (groupConfirm.isGroupReviewEnabled()) {
+          const { verdicts } = await groupConfirm.reviewGroupActions({
+            replyText, groupId, e, userText: pureText
+          })
+          const cancelled = verdicts.filter((v) => !v.ok)
+          if (cancelled.length) {
+            for (const v of cancelled) execText = execText.replace(v.full, '')
+            cancelReport = cancelled
+              .map((v) => `🛡️ ${v.full} 已取消（同行评审未一致通过：${v.reasons.join('；')}）`)
+              .join('\n')
+            safeLogger.warn(`[ai0-plugin] 群操作同行评审取消: ${JSON.stringify(cancelled)}`)
+          }
+        }
+        const { cleanText, results } = await groupOps.parseAndExecuteActions(execText, groupId, e, { userId, sessionId })
+        // cleanText：剔除已识别群操作后的 AI 正文。历史只存正文。
         historyText = cleanText
-        replyText = cleanText
+        // 最终展示 = 正文（若正文被取消影响则反映编辑后内容） + 取消报告 + 执行报告
+        let shown = cleanText
+        if (cancelReport) {
+          shown = (shown.trim() ? shown.trim() + '\n\n' : '') + cancelReport
+        }
         if (results.length) {
           const actionReport = results.map(r =>
             r.ok ? `✅ ${r.msg}` : `❌ ${r.msg}`
           ).join('\n')
-          replyText = replyText + '\n\n' + actionReport
+          shown = shown + '\n\n' + actionReport
           safeLogger.info(`[ai0-plugin] 群操作执行结果: ${JSON.stringify(results)}`)
         }
+        replyText = shown
       } catch (err) {
         safeLogger.error(`[ai0-plugin] 群操作执行异常: ${err.message}`)
       }

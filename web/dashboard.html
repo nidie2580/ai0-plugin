@@ -56,9 +56,10 @@
         <label>会话过期(ms) <input id="chat_sessionTimeout" type="number" min="-1"/></label>
         <label>多模型并行回答 <select id="chat_multiModel_enabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
         <label>模型间互聊 <select id="chat_multiModel_multiChat"><option value="false">关闭</option><option value="true">开启</option></select></label>
+        <label>群操一致性确认 <select id="chat_multiModel_groupConfirm"><option value="true">开启</option><option value="false">关闭</option></select></label>
         <label>艾特指定模型 <select id="chat_multiModel_atModel"><option value="true">开启</option><option value="false">关闭</option></select></label>
       </div>
-      <p class="hint">多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。「艾特指定模型」允许用 /模型名 把消息单独转给某个模型。注意：并行回答会成倍增加模型 API 调用次数。</p>
+      <p class="hint">多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。「艾特指定模型」允许用 /模型名 把消息单独转给某个模型。「群操一致性确认」：互聊开启时，AI 回复里带出的群操作会先转发给其他模型确认，任一否决则取消。注意：并行回答会成倍增加模型 API 调用次数。</p>
 
       <hr>
       <h3>防 AI 互聊循环</h3>
