@@ -531,11 +531,32 @@ export async function handleChat(e) {
 
   // 群聊：无条件注入身份信息（回答"我是群主吗 / 你是管理员吗"这类问题用，不依赖 groupOps 开关）
   let identityContext = null
+  const identityProbe = {}   // buildIdentityContext 回填的结构化解析结果（供确定性兜底用）
   if (isGroup) {
     try {
-      identityContext = await groupOps.buildIdentityContext(e)
+      identityContext = await groupOps.buildIdentityContext(e, identityProbe)
     } catch (err) {
       safeLogger.warn(`[ai0-plugin] 构建群身份上下文失败: ${err.message}`)
+    }
+  }
+
+  // —— P0 兜底：群角色/群信息接口完全未返回（掉线/风控/超时）时，身份类问题直接走固定文案 ——
+  // 不再把"接口未返回"交给 LLM 自由发挥（历史出现过 AI 不遵守指令反而闲聊身份），
+  // 这里由本地确定性判定：数据全缺失 + 用户确实在问身份/角色/群信息 → 直接回固定句并结束。
+  if (isGroup && cfg.get('groupOps.hardIdentityFallback', true) !== false) {
+    try {
+      const fallback = groupOps.pickHardIdentityFallback(pureText, identityProbe, {
+        isMaster: helper.isMaster(userId, e)
+      })
+      if (fallback) {
+        safeLogger.info(
+          `[ai0-plugin] 身份接口未返回数据，命中确定性兜底(kind=${fallback.kind})：群=${groupId} 用户=${userId} 原文=${pureText.slice(0, 60)}`
+        )
+        await helper.replyText(e, fallback.reply)
+        return true
+      }
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 身份确定性兜底处理失败（忽略，继续走正常流程）: ${err.message}`)
     }
   }
 

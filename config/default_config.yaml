@@ -88,6 +88,13 @@ groupOps:
   allowTitle: true
   # 默认禁言时长（秒），不指定时使用
   defaultMuteDuration: 600
+  # QQ 协议适配器（NapCat/LLOneBot/ICQQ/XRK 等）成员角色/群信息接口调用超时（毫秒）。
+  # 协议端掉线或风控时，这些方法可能既不返回也不报错；这里统一强制超时，
+  # 避免 buildIdentityContext/buildGroupContext 无限 pending 把整条群聊 AI 链路卡死。
+  apiTimeoutMs: 5000
+  # 群角色/群信息接口完全未返回时，身份/角色类问题是否走本地固定文案兜底。
+  # 开启后这类问题不再交给 AI 自由发挥（AI 可能不遵守指令反而闲聊身份），改为直接回固定句。
+  hardIdentityFallback: true
   # —— AI 群操作开关（可独立禁用高危操作）——
   # 允许全体禁言（mute_all）
   allowMuteAll: true

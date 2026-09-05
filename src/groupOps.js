@@ -1,7 +1,7 @@
 import * as cfg from '../config/index.js'
 import * as helper from './helper.js'
 import * as securityLog from './securityLog.js'
-import { safeLogger } from './globals.js'
+import { safeLogger, sanitizeLog } from './globals.js'
 
 /**
  * AI0-Plugin 群操作执行模块（AI驱动）
@@ -17,6 +17,103 @@ import { safeLogger } from './globals.js'
  *     - 动作输出格式约定
  *  3) AI 回复后，chatService 调用 parseAndExecuteActions() 解析回复中的动作标签并执行
  */
+
+/* ————————————————————————————————————————————————
+ * QQ 协议适配器调用护栏（群成员角色 / 群信息等接口）
+ *
+ * 问题背景：NapCat / LLOneBot / ICQQ / XRK 等协议端掉线、被风控或拉流缓慢时，
+ * 其 group.getMemberInfo / group.getMemberMap / group.getGroupInfo 等方法返回的
+ * Promise 可能既不 resolve 也不 reject —— 调用处 await 会无限 pending，
+ * 把 buildIdentityContext / buildGroupContext / verifyGroupOpPermission 整条链路
+ * 卡死，群里表现为"机器人一直不出结果/接口一直未返回"。
+ *
+ * 这里给所有协议适配器方法调用统一加超时（groupOps.apiTimeoutMs，默认 5000ms）
+ * 并打印【请求参数 / 耗时 / 返回摘要 / 错误】详细日志，便于服务端定位：
+ *   - 超时 → 明确 reject（err.__qqTimeout=true），调用方据此快速失败、不再
+ *     逐个候选方法空等，避免协议端掉线时每个候选都白等一个超时周期。
+ *   - 失败 → 抛出异常并记录，调用方按原 fail-safe 语义返回 null / 拒绝操作。
+ * ———————————————————————————————————————————————— */
+let QQ_API_TIMEOUT_MS = 5000
+let QQ_API_TIMEOUT_MS_OVERRIDE = null   // 仅供 __test__ 覆盖默认/配置值（测试需极短超时）
+
+function getQqApiTimeoutMs() {
+  if (QQ_API_TIMEOUT_MS_OVERRIDE != null) return QQ_API_TIMEOUT_MS_OVERRIDE
+  const v = Number(cfg.get('groupOps.apiTimeoutMs', QQ_API_TIMEOUT_MS))
+  return Number.isFinite(v) && v >= 50 ? Math.floor(v) : QQ_API_TIMEOUT_MS
+}
+
+function isQqTimeoutError(err) {
+  return !!(err && err.__qqTimeout === true)
+}
+
+/** 返回值摘要（避免把大 Map / 超长对象原样刷日志） */
+function qqResultSummary(value) {
+  if (value == null) return String(value)
+  try {
+    if (value instanceof Map) return `Map(${value.size})`
+    if (value instanceof Set) return `Set(${value.size})`
+    if (Array.isArray(value)) return `Array(${value.length})`
+    if (typeof value === 'object') {
+      const keys = Object.keys(value).slice(0, 10).join(',')
+      return `{ ${keys} }`
+    }
+    return String(value).slice(0, 120)
+  } catch (_) {
+    return '(对象)'
+  }
+}
+
+/**
+ * 单次调用协议适配器方法：带超时 + 详细日志。
+ * 超时/异常都会 reject；超时时 err.__qqTimeout = true。
+ * @param {string} label      调用点描述，如 'group.getMemberInfo'
+ * @param {object} params     请求参数（groupId / userId…），用于日志
+ * @param {Function} fn       实际发起调用的函数（返回 Promise）
+ * @param {number} [timeoutMs] 单次超时（默认取 groupOps.apiTimeoutMs）
+ */
+async function callQQ(label, params, fn, timeoutMs) {
+  const startedAt = Date.now()
+  const ms = Math.max(50, Math.floor(timeoutMs ?? getQqApiTimeoutMs()))
+  let timer = null
+  const timeoutP = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`${label} 调用超时(${ms}ms)：QQ协议端无响应，请检查协议端连接/风控状态`)
+      err.__qqTimeout = true
+      reject(err)
+    }, ms)
+  })
+  try {
+    const value = await Promise.race([Promise.resolve().then(fn), timeoutP])
+    safeLogger.info(
+      `[ai0-plugin] 群接口调用成功: ${label} 参数=${JSON.stringify(params)} 耗时=${Date.now() - startedAt}ms 返回=${qqResultSummary(value)}`
+    )
+    return value
+  } catch (err) {
+    safeLogger.error(
+      `[ai0-plugin] 群接口调用失败: ${label} 参数=${JSON.stringify(params)} 耗时=${Date.now() - startedAt}ms ` +
+        `结果=${isQqTimeoutError(err) ? '超时' : '异常'} 错误=${sanitizeLog(err?.message || String(err))}`
+    )
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** 候选方法调用哨兵：超时（协议端疑似掉线）时中断后续候选 */
+const QQ_CALL_TIMED_OUT = Symbol('qq_call_timed_out')
+
+/**
+ * 单候选调用：成功返回 { value }；普通失败返回 { value: null }（继续试下一个候选）；
+ * 超时返回 QQ_CALL_TIMED_OUT（调用方应立即停止后续网络候选，避免反复空等）。
+ */
+async function qqCandidate(label, params, fn) {
+  try {
+    const value = await callQQ(label, params, fn)
+    return { value }
+  } catch (err) {
+    return isQqTimeoutError(err) ? QQ_CALL_TIMED_OUT : { value: null }
+  }
+}
 
 // 自定义头衔请求限流：用户ID -> [timestamp1, timestamp2, ...]
 const customTitleRateLimit = new Map()
@@ -90,9 +187,11 @@ function resolveGroup(groupId) {
 
 /** 获取群成员信息（role: owner/admin/member）
  *  尝试多种适配器实现，兼容 XRK-Yunzai + NapCat/LLOneBot/ICQQ/QSign 等不同后端
+ *  所有适配器方法调用都带 5s 超时 + 日志；协议端掉线时快速返回 null，绝不无限 pending。
  */
 async function getMemberInfo(groupId, userId) {
   if (!groupId || !userId) return null
+  const params = { groupId: String(groupId), userId: String(userId) }
   try {
     const bot = global.Bot || global.bot
     if (!bot) return null
@@ -101,19 +200,23 @@ async function getMemberInfo(groupId, userId) {
 
     // 1) 标准方法
     if (typeof group.getMemberInfo === 'function') {
-      const r = await group.getMemberInfo(userId).catch(() => null)
-      if (r) return r
+      const r = await qqCandidate('group.getMemberInfo', params, () => group.getMemberInfo(userId))
+      if (r === QQ_CALL_TIMED_OUT) return null
+      if (r.value) return r.value
     }
     // 2) 别名
     for (const fn of ['getMember', 'getGroupMemberInfo', 'getMemberInfoV2']) {
       if (typeof group[fn] === 'function') {
-        const r = await group[fn](userId).catch(() => null)
-        if (r) return r
+        const r = await qqCandidate(`group.${fn}`, params, () => group[fn](userId))
+        if (r === QQ_CALL_TIMED_OUT) return null
+        if (r.value) return r.value
       }
     }
     // 3) getMemberMap（同步/异步都兼容）再兜底
     if (typeof group.getMemberMap === 'function') {
-      const map = await Promise.resolve(group.getMemberMap()).catch(() => null)
+      const r = await qqCandidate('group.getMemberMap', params, () => Promise.resolve(group.getMemberMap()))
+      if (r === QQ_CALL_TIMED_OUT) return null
+      const map = r.value
       if (map) {
         const entry = map.get?.(userId) ?? map?.[userId] ?? map.get?.(String(userId)) ?? map.get?.(Number(userId))
         if (entry) return entry
@@ -129,11 +232,12 @@ async function getMemberInfo(groupId, userId) {
     // 4) bot 直接方法
     for (const fn of ['getGroupMemberInfo', 'getMemberInfo']) {
       if (typeof bot[fn] === 'function') {
-        const r = await bot[fn](groupId, userId).catch(() => null)
-        if (r) return r
+        const r = await qqCandidate(`bot.${fn}`, params, () => bot[fn](groupId, userId))
+        if (r === QQ_CALL_TIMED_OUT) return null
+        if (r.value) return r.value
       }
     }
-    // 5) group.info.members 数组兜底（极少数情况）
+    // 5) group.info.members 数组兜底（极少数情况，纯本地数据不走网络）
     const members = group?.info?.members || group?.memberList || group?.members || []
     if (Array.isArray(members) && members.length) {
       const hit = members.find(m => String(m?.uin ?? m?.uid ?? m?.user_id ?? m?.qq ?? '') === String(userId))
@@ -211,9 +315,12 @@ async function getBotRole(groupId) {
 
 /** 获取群信息：群名 / 成员数 / 群主 UIN 等
  *  同样做多层适配，覆盖 NapCat/LLOneBot/ICQQ 各种字段命名
+ *  所有协议端方法调用同样走 5s 超时 + 日志；掉线时快速返回 null，绝不无限 pending。
  */
 async function getGroupInfo(groupId) {
   if (!groupId) return null
+  const params = { groupId: String(groupId) }
+  let networkTimeout = false // 协议端疑似掉线：跳过后续所有"网络"候选，避免反复空等
   try {
     const bot = global.Bot || global.bot
     if (!bot) return null
@@ -222,22 +329,26 @@ async function getGroupInfo(groupId) {
 
     let info = null
     // A) pickGroup 上的标准方法
-    for (const fn of ['getInfo', 'getGroupInfo', 'info', 'fetchInfo', 'refreshInfo']) {
-      if (typeof group[fn] === 'function') {
-        const r = await group[fn]().catch(() => null)
-        if (r && typeof r === 'object') { info = r; break }
-      }
-    }
-    // B) bot 直接方法
-    if (!info) {
-      for (const fn of ['getGroupInfo', 'getGroup', 'pickGroupInfo', 'getGroupDetail']) {
-        if (typeof bot[fn] === 'function') {
-          const r = await bot[fn](groupId).catch(() => null)
-          if (r && typeof r === 'object') { info = r; break }
+    if (!networkTimeout) {
+      for (const fn of ['getInfo', 'getGroupInfo', 'info', 'fetchInfo', 'refreshInfo']) {
+        if (typeof group[fn] === 'function') {
+          const r = await qqCandidate(`group.${fn}`, params, () => group[fn]())
+          if (r === QQ_CALL_TIMED_OUT) { networkTimeout = true; break }
+          if (r.value && typeof r.value === 'object') { info = r.value; break }
         }
       }
     }
-    // C) 已经挂在 group.info / group.groupInfo / group.$info 上
+    // B) bot 直接方法
+    if (!info && !networkTimeout) {
+      for (const fn of ['getGroupInfo', 'getGroup', 'pickGroupInfo', 'getGroupDetail']) {
+        if (typeof bot[fn] === 'function') {
+          const r = await qqCandidate(`bot.${fn}`, params, () => bot[fn](groupId))
+          if (r === QQ_CALL_TIMED_OUT) { networkTimeout = true; break }
+          if (r.value && typeof r.value === 'object') { info = r.value; break }
+        }
+      }
+    }
+    // C) 已经挂在 group.info / group.groupInfo / group.$info 上（本地缓存，非网络调用）
     if (!info) {
       for (const k of ['info', 'groupInfo', '$info', '_info', 'rawInfo']) {
         const v = group[k]
@@ -272,10 +383,12 @@ async function getGroupInfo(groupId) {
     // E) 终极兜底：getGroupInfo 没有 owner 字段（XRK就是这个情况），
     //    那就扫 getMemberMap() 找第一个 role==='owner' 的 user_id 作为群主 UIN。
     //    为避免大群卡死，上限 500 人；超过 500 人时不做此兜底。
-    if (ownerUin == null && typeof group.getMemberMap === 'function') {
+    //    协议端已超时（掉线）时跳过，避免再等一个完整超时周期。
+    if (ownerUin == null && !networkTimeout && typeof group.getMemberMap === 'function') {
       try {
-        const map = await Promise.resolve(group.getMemberMap()).catch(() => null)
-        if (map) {
+        const r = await qqCandidate('group.getMemberMap', params, () => Promise.resolve(group.getMemberMap()))
+        if (r !== QQ_CALL_TIMED_OUT && r.value) {
+          const map = r.value
           const size = map.size ?? Object.keys(map).length ?? 0
           if (size > 0 && size <= 500) {
             const values = typeof map.values === 'function'
@@ -384,9 +497,13 @@ function getBotSelf() {
  *  - 群号 / 群名 / 成员数 / 群主 UIN
  *  - 机器人本身的 QQ + 昵称 + 群内角色(群主/管理员/普通/未检测到)
  *  - 当前消息发送者的 QQ + 昵称 + 群内角色
- *  - 明确告诉 AI：信息未检测到时，回答"我这边暂未获取到"，不要脑补成默认的普通群员。
+ *  - 明确告诉 AI：信息未检测到时，必须输出固定的兜底文案，不脑补、不闲聊。
+ *
+ * @param {object} e 消息事件
+ * @param {object} [out] 若传入对象，则回填结构化解析结果，供调用方做确定性的兜底判断
+ *                       （requesterRole/botRole/ownerUin/groupName/memberCount/botUin/userId/groupId）
  */
-export async function buildIdentityContext(e) {
+export async function buildIdentityContext(e, out = null) {
   if (!e?.group_id) return null
   const groupId = e.group_id
   const userId = helper.getUserId(e)
@@ -395,11 +512,13 @@ export async function buildIdentityContext(e) {
   const eGroupName = e.groupName || e.group_name || e.group?.groupName || e.group?.name || null
 
   const botSelf = getBotSelf()
+  const startedAt = Date.now()
   const [botRoleRaw, requesterInfo, groupInfo] = await Promise.all([
     getBotRoleCached(groupId),
     userId ? getMemberInfoCached(groupId, userId) : null,
     getGroupInfoCached(groupId)
   ])
+  const ctxCostMs = Date.now() - startedAt
 
   // 发送者角色：0成本优先从事件对象 e.sender.role / permission / group_role 取
   // （XRK诊断已证实 e.sender.role = "owner" 直接有值，无需API请求）
@@ -409,6 +528,27 @@ export async function buildIdentityContext(e) {
   const groupName = groupInfo?.name || eGroupName || null
   const memberCount = groupInfo?.memberCount || null
   const ownerUin = groupInfo?.ownerUin != null ? String(groupInfo.ownerUin) : null
+
+  // 回填结构化结果（供 chatService 身份问题确定性兜底使用）
+  if (out && typeof out === 'object') {
+    out.groupId = String(groupId)
+    out.userId = userId != null ? String(userId) : null
+    out.botUin = botSelf.uin || null
+    out.requesterRole = requesterRoleRaw || null
+    out.botRole = botRoleRaw || null
+    out.ownerUin = ownerUin
+    out.groupName = groupName
+    out.memberCount = Number.isFinite(memberCount) ? memberCount : null
+  }
+
+  // 接口调用处详细日志：仅当有数据缺失（未检测到）时输出 info，
+  // 健康群全量返回时不刷屏；超时/失败细节已在 callQQ 内逐条 error 记录。
+  if (!botRoleRaw || !requesterRoleRaw || !groupName || memberCount == null || ownerUin == null) {
+    safeLogger.info(
+      `[ai0-plugin] 群身份上下文数据缺失: 群=${groupId} 群名=${groupName || 'NULL'} 成员数=${memberCount ?? 'NULL'} ` +
+        `群主UIN=${ownerUin || 'NULL'} 机器人角色=${botRoleRaw || 'NULL'} 发送者=${userId} 发送者角色=${requesterRoleRaw || 'NULL'} 耗时=${ctxCostMs}ms`
+    )
+  }
 
   // 重点：拿不到角色时 DON'T fallback 为 member，而是明确标记「未检测到」
   // 这是之前出现"你们两个都是普通群员"这种错误回答的根因。
@@ -449,20 +589,86 @@ export async function buildIdentityContext(e) {
   }
 
   lines.push('')
-  lines.push('【身份问答规则（必须严格遵守！违反 = 回答错误）】')
-  lines.push('当用户询问任何与"群身份 / 角色 / 基本信息"相关的问题时：')
-  lines.push('  - 问题示例："我是群主还是管理员？"、"我是谁？"、"你是群主还是管理员？"')
-  lines.push('            "你是什么角色？"、"谁是群主？"、"我有管理权限吗？"')
-  lines.push('            "这个群叫啥？"、"群名叫什么？"、"群里有多少人？"、"群里还有谁？"')
-  lines.push('  - 严格根据上方真实信息回答。')
-  lines.push('  - 只有当上方明确写了"群主" / "管理员" / "普通群员"时才能这么答；')
-  lines.push('    写的是"未检测到（接口未返回）"时，必须回答"我这边暂未获取到你的角色信息"，绝对不能脑补成普通群员！')
-  lines.push('  - "群名"未检测到时，回答"我这边没拿到群名"，不要编。')
-  lines.push('  - "群里还有谁？" / "都有谁？"：除非把群成员列表也注入给你了，否则一律回答"我只知道你和我在群里，其他成员信息没拿到不能瞎编。"')
-  lines.push('  - 回答语气要自然，可以用 emoji、加一些可爱的口癖，但不能改变事实本身。')
-  lines.push('  - owner = 群主，admin = 管理员，member = 普通群员，三者不要搞混。')
+  lines.push('【身份问答判定（先判断要不要启用，普通闲聊一律不套用）】')
+  lines.push('  - 仅当本条消息确实在询问"群身份 / 群角色 / 群基本信息"时才启用下面的身份问答流程。')
+  lines.push('    问题示例："我是群主还是管理员？""我是谁？""你是群主吗？""你是什么角色？""谁是群主？"')
+  lines.push('            "我有管理权限吗？""这个群叫啥？""群里有几个人？""群里都有谁？"')
+  lines.push('  - 如果只是普通聊天、打招呼或聊别的话题（例如"你好""在吗""今天天气如何"），')
+  lines.push('    请正常闲聊即可，绝不要主动去确认任何人的身份/角色，也不要输出下面的固定兜底文案。')
+  lines.push('')
+  lines.push('【身份问答强制规则（最高优先级，违反即视为回答错误）】')
+  lines.push('  1) 必须以上方【当前群的真实信息】白纸黑字写出的角色为准作答：')
+  lines.push('     某角色/字段写的是"群主"/"管理员"/"普通群员"→ 才能照实那样说；')
+  lines.push('     某角色/字段写的是"未检测到（接口未返回）"→ 该数据就是未知，禁止把它脑补成任何角色。')
+  lines.push('  2) 【强制兜底格式】当你要回答的那个角色/群信息的字段是"未检测到（接口未返回）"时，')
+  lines.push('     你必须严格只输出下面最贴切的一句固定文本，禁止在后面添加任何解释、反问、闲聊、emoji 或编造：')
+  lines.push('     - 问"我（发送者）的身份/角色/管理权限"→ 只输出：我这边暂未获取到你的角色信息（群接口未返回数据），没法确认你是不是群主/管理员。')
+  lines.push('     - 问"你（机器人）是不是群主/管理员"→ 只输出：我这边暂未获取到我在本群的角色信息（群接口未返回数据），没法确认我是不是群主/管理员。')
+  lines.push('     - 问"某某（第三方）是不是群主/管理员"→ 只输出：我这边暂未获取到该成员的角色信息（群接口未返回数据），没法确认他/她是不是群主/管理员。')
+  lines.push('  3) 群信息字段未检测到（群名/成员数/群主/群成员列表等）：一律只输出：我这边没拿到本群的这个信息（群接口未返回数据），暂时回答不了。')
+  lines.push('     （"群里还有谁/都有谁"一律回答：我只知道你和我在群里，其他成员信息没拿到不能瞎编。）')
+  lines.push('  4) 只有当上方数据齐全（角色明确写出）时，才可以自然作答（语气可俏皮、可用 emoji），但仍不得改变事实。')
+  lines.push('  5) owner=群主，admin=管理员，member=普通群员，三者不要搞混；"机器人主人"不等于"群主/管理员"。')
 
   return lines.join('\n')
+}
+
+/* ————————————————————————————————————————————————
+ * 确定性兜底：群身份/角色接口完全未返回（掉线/风控/超时）时，
+ * 身份类问题不再交给 LLM 自由发挥（LLM 可能不听指令闲聊），而是由本地
+ * 直接返回固定文案。仅在"整幅群身份数据全部缺失"时启用，此时任何
+ * 身份/群信息问题回答"未获取到"都是准确且安全的，不会误伤可推断场景。
+ * ———————————————————————————————————————————————— */
+const HARD_FALLBACK_TEXT = {
+  self: '我这边暂未获取到你的角色信息（群接口未返回数据），没法确认你是不是群主/管理员。',
+  bot: '我这边暂未获取到我在本群的角色信息（群接口未返回数据），没法确认我是不是群主/管理员。',
+  group: '我这边没拿到本群的这个信息（群接口未返回数据），暂时回答不了。'
+}
+
+/** 文本是否带提问/查询语气（过滤"我把群主踢了"这类非问句，降低误伤） */
+function isQueryLike(text) {
+  return /[?？]|吗|么|是不是|是否|还是|多少|什么|谁|能|可以|帮|查|看看|确认|知道|告诉我|怎么|如何|几|算不算|叫|有没有/.test(text)
+}
+
+/**
+ * 判断是否需要走"接口未返回"的确定性固定兜底。
+ * @param {string} text   用户消息正文（已去除 @/前缀）
+ * @param {object} probe  buildIdentityContext 回填的结构化结果
+ * @param {object} [opts] { isMaster?: boolean }
+ * @returns {{ reply: string, kind: 'self'|'bot'|'group' } | null}
+ */
+export function pickHardIdentityFallback(text, probe = {}, opts = {}) {
+  if (!text || !probe) return null
+  // 数据未完全缺失（哪怕只拿到一个角色/群名/群主UIN）→ 交给模型/提示词规则处理
+  const allDead = !probe.requesterRole && !probe.botRole && !probe.ownerUin &&
+    probe.memberCount == null && !probe.groupName
+  if (!allDead) return null
+
+  const isMaster = !!opts.isMaster
+  const t = String(text)
+  if (!isQueryLike(t)) return null
+
+  // 仅匹配"明确在问身份/角色/群信息"的问句，避免误伤操作类请求（如"帮我把群主踢了"）
+  const asksSelf =
+    /(我|本人)/.test(t) && (
+      /(?:我是|我是不是|我算是|我又是|我也是)(?:这个|本)?群?(?:的)?(?:群主|管理员|普通群员|群员|群管理|管理)/.test(t) ||
+      /(?:我是谁|我是什么(?:身份|角色|群角色)|我的(?:身份|角色|群角色|权限|管理权限)|我(?:有|有没有|有没)(?:什么)?管理权限|我(?:能|可以|能不能|可不可以)管理(?:这个|本)?群)/.test(t)
+    )
+  const asksBot =
+    /(你|机器人)/.test(t) &&
+    /你是(?:这个|本)?群?(?:的)?(?:群主|管理员|普通群员|群员|群管理)|你是不是(?:这个|本)?群(?:的)?(?:群主|管理员|群员)|你的(?:群角色|角色|身份|权限)|你是什么(?:角色|身份)|你有(?:没有|没)?(?:这个|本)?群?(?:的)?(?:管理)?权限/.test(t)
+  const asksGroup =
+    /(?:群名|群号|群成员数|成员数|本群|群信息|群里|群成员|人数|多少人|多少个|群叫什么|群叫啥|叫什么群|什么群)/.test(t) ||
+    /(?:谁|有谁).{0,6}(?:群主|管理员)/.test(t) ||   // 谁是群主 / 群主管理员都有谁
+    /(?:群主|管理员)(?:是|是谁)/.test(t)              // 群主是谁 / 管理员是张三吗
+
+  // 机器人主人有本地配置可确认其"主人"身份，不必走未知兜底，交给模型回答
+  if (asksSelf && isMaster) return null
+
+  if (asksSelf) return { reply: HARD_FALLBACK_TEXT.self, kind: 'self' }
+  if (asksBot) return { reply: HARD_FALLBACK_TEXT.bot, kind: 'bot' }
+  if (asksGroup) return { reply: HARD_FALLBACK_TEXT.group, kind: 'group' }
+  return null
 }
 
 /** 从消息中提取被@的用户QQ号（排除@机器人本身） */
@@ -524,6 +730,14 @@ export async function buildGroupContext(e) {
   const targetRole = _roleOf(targetInfo) || 'unknown'
   const requesterName = requesterInfo?.nickname || requesterInfo?.card || `QQ${userId}`
   const targetName = targetInfo?.nickname || targetInfo?.card || (targetUid ? `QQ${targetUid}` : '')
+
+  // 群操作上下文接口日志：角色/群信息缺失（接口未返回/超时）时输出，便于服务端定位
+  if (botRole === 'unknown' || requesterRole === 'unknown' || (targetUid && targetRole === 'unknown')) {
+    safeLogger.info(
+      `[ai0-plugin] 群操作上下文数据缺失: 群=${groupId} 请求者=${userId} 请求者角色=${requesterRole} ` +
+        `目标=${targetUid || '-'} 目标角色=${targetRole} 机器人角色=${botRole}`
+    )
+  }
 
   // 群主 UIN 兜底：如果能拿到 ownerUin，即使角色未知也能反向推断
   const ownerUin = groupInfoRaw?.ownerUin != null ? String(groupInfoRaw.ownerUin) : null
@@ -1206,4 +1420,19 @@ async function executeLevelTitle(groupId, userId, level, title) {
   else if (typeof group.setGroupLevelTitle === 'function') await group.setGroupLevelTitle(userId, level, title)
   else if (typeof group.setTitleByLevel === 'function') await group.setTitleByLevel(userId, level, title)
   else throw new Error('当前适配器不支持设置等级头衔')
+}
+
+/* ————————————————————————————————————————————————
+ * 仅供单元测试使用的内部钩子（遵循 security.js __test__ 惯例）。
+ * 默认 5s 超时在测试中太慢，测试通过 setGroupApiTimeoutMs 调小超时验证：
+ *   - 协议端 Promise 永不 resolve 时能按时返回（不无限 pending）
+ *   - 超时后会中止后续网络候选、快速失败
+ * ———————————————————————————————————————————————— */
+export const __test__ = {
+  get groupApiTimeoutMs() { return QQ_API_TIMEOUT_MS_OVERRIDE != null ? QQ_API_TIMEOUT_MS_OVERRIDE : QQ_API_TIMEOUT_MS },
+  setGroupApiTimeoutMs(v) {
+    const n = Number(v)
+    if (Number.isFinite(n) && n >= 5) QQ_API_TIMEOUT_MS_OVERRIDE = Math.floor(n)
+  },
+  get HARD_FALLBACK_TEXT() { return HARD_FALLBACK_TEXT }
 }
