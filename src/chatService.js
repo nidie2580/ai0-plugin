@@ -109,6 +109,52 @@ export function collectArchiveReplies(hist) {
   return byModel
 }
 
+// 构建用于"/<模型名>"艾特匹配的映射：把每个可用模型的 key/name/model 值统一归一到一个
+// 集合，便于用 "/deepseek" / "DeepSeek X" / "deepseek-chat" 任一别名命中某个模型 key。
+export function buildAtModelIndex() {
+  const m = cfg.loadConfig().model || {}
+  const defaultKey = m.default || 'openai-compatible'
+  const idx = new Map() // alias(lowercased) -> key
+  const add = (alias, key) => {
+    const low = String(alias || '').trim().toLowerCase()
+    if (low) idx.set(low, key)
+  }
+  for (const k of Object.keys(m)) {
+    if (k === 'default') continue
+    const c = m[k]
+    if (!c || typeof c !== 'object') continue
+    const usable = String(c.apiKey || '').trim() && String(c.apiBase || '').trim()
+    if (!usable) continue
+    add(k, k)
+    add(c.name, k)
+    add(c.model, k)
+  }
+  // default 指向的模型兜底纳入
+  if (m[defaultKey] && typeof m[defaultKey] === 'object') {
+    const usable = String(m[defaultKey].apiKey || '').trim() && String(m[defaultKey].apiBase || '').trim()
+    if (usable && !idx.has(String(defaultKey).toLowerCase())) add(defaultKey, defaultKey)
+  }
+  return idx
+}
+
+// 解析一条消息是否存在 "/<模型名>" 艾特指令。
+// 命中时返回匹配到的模型 key；未命中返回 null。要求 multiChat 场景下才生效（由调用方判断）。
+export function resolveAtModel(text) {
+  if (typeof text !== 'string') return null
+  const m = text.trim().match(/^\/(?:@\s*)?([^\s/]+)/)
+  if (!m) return null
+  const alias = m[1]
+  const idx = buildAtModelIndex()
+  return idx.get(alias.toLowerCase()) || null
+}
+
+// 判断指定模型 key 是否开启了联网检索（web:true）。仅该 key 自身配置的 web 字段生效，缺省 false。
+export function isModelWebEnabled(key) {
+  const m = cfg.loadConfig().model || {}
+  const c = m[key]
+  return !!(c && typeof c === 'object' && c.web === true)
+}
+
 // 为单个模型构造专属请求历史：互聊开启时，把"除本模型外"的其他模型历史发言以 [*] 前缀
 // 追加到本轮 user 消息末尾，让当前模型能看到其他 AI 的旧发言并选择回应/忽略。
 export function buildMultiChatRequest({ reqHistory, archiveReplies, modelKey, modelDisplay, multiChatEnabled }) {
@@ -844,7 +890,31 @@ export async function handleChat(e) {
 
     // 多模型并行回答 + 模型间互聊：
     //   每个模型各用一份"配有 * 标识协商日志"的独立请求历史，互不串扰（各自独立入参）。
-    const activeModelKeys = multiModelEnabled ? listConfiguredModels() : [defaultKey]
+    // 艾特：多模型模式下可用 "/<模型名> 追问" 把消息单独转给某模型让其立即回应。
+    const atModelEnabled = multiModelEnabled && mmCfg.atModel !== false
+    let activeModelKeys = multiModelEnabled ? listConfiguredModels() : [defaultKey]
+    let atUserText = null
+
+    if (atModelEnabled) {
+      const atKey = resolveAtModel(pureText)
+      if (atKey && activeModelKeys.includes(atKey)) {
+        activeModelKeys = [atKey]
+        // 去前缀后的"正文"，作为发给被艾特模型的用户消息体。
+        const stripped = pureText.replace(/^\/(?:@\s*)?\S+\s*/, '').trim()
+        atUserText = stripped || pureText.trim()
+        if (atUserText && Array.isArray(reqHistory) && reqHistory.length) {
+          // 只改写本轮待发请求的末条 user 消息，让被艾特模型收到"去前缀后的追问"；
+          // 持久化 history 不动（完整记录带前缀的原文）。
+          reqHistory = reqHistory.map((msg, i, arr) => {
+            if (i === arr.length - 1 && msg && msg.role === 'user') {
+              return { ...msg, content: typeof msg.content === 'string' ? atUserText : msg.content }
+            }
+            return msg
+          })
+        }
+        safeLogger.info(`[ai0-plugin] 多模型艾特：/ 命中模型 key=${atKey}（仅该模型本轮回应）`)
+      }
+    }
 
     // 从已持久化 history 中提取"其他模型的 [*] 发言"，聚合成"本轮用户消息之外"的对话背景。
     // 这样开启 multiChat 后，模型在下一轮就能看到彼此此前说过的话 → 形成可持续的多轮 AI 聊天。

@@ -448,19 +448,34 @@ export async function chatCompletions(messages, {
     //  2) 对每条消息的字符串 content 做敏感令牌脱敏，确保密钥/令牌不会以明文发给模型
     //    （压缩包含令牌的本质是"发送前没隔离"，这里在源头根治）。
     messages: Array.isArray(messages)
-      ? messages.map((m) => {
-          if (!m) return m
-          if (m.role === 'system' && typeof m.content === 'string') {
-            return { ...m, content: scrubSensitiveTokens(stripInjectionMarkers(m.content)) }
+      ? messages.map((m2) => {
+          if (!m2) return m2
+          if (m2.role === 'system' && typeof m2.content === 'string') {
+            return { ...m2, content: scrubSensitiveTokens(stripInjectionMarkers(m2.content)) }
           }
-          if (typeof m.content === 'string') {
-            return { ...m, content: scrubSensitiveTokens(m.content) }
+          if (typeof m2.content === 'string') {
+            return { ...m2, content: scrubSensitiveTokens(m2.content) }
           }
-          return m
+          return m2
         })
       : messages,
     temperature: effTemp,
     max_tokens: effMaxTokens
+  }
+
+  // 联网检索：模型配置 web:true 时，注入"可联网"说明并附加标准 web_search 工具。
+  // 若上游 API 不支持该工具会请求失败，下方 safeAxiosRequest 捕获后回退为"不带工具"重试，
+  // 保证兼容性（联网能力失败逐步降级到普通对话，不影响主链路）。
+  if (m.web === true) {
+    body.messages = Array.isArray(body.messages) && body.messages.length
+      ? body.messages.map((msg, i) => {
+          if (i === 0 && msg.role === 'system' && typeof msg.content === 'string') {
+            return { ...msg, content: msg.content + '\n\n（当前功能支持联网检索：如需实时/最新信息，可主动调用 web_search 工具联网查询后再回答。）' }
+          }
+          return msg
+        })
+      : body.messages
+    body.tools = [{ type: 'web_search' }]
   }
 
   // 深度思考模型：thinking=true 时单次响应可能思考 1~3 分钟，
@@ -474,23 +489,42 @@ export async function chatCompletions(messages, {
   safeLogger.info(`[ai0-plugin] LLM 请求：base(原始)=${sanitizeLog(rawBase)}  base(归一化)=${sanitizeLog(normalizedBase)}  url=${sanitizeLog(url)}  model=${sanitizeLog(model)}  apiKey=${redactKey(m.apiKey)}`)
 
   let resp
-  try {
-    resp = await safeAxiosRequest('post', url, body, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${rawKey}`
-      },
-      timeout: effTimeout,
-      signal,
-    })
-  } catch (e) {
-    const s = summarizeAxiosError(e)
-    safeLogger.error(`[ai0-plugin] LLM 调用异常(${sanitizeLog(s.method)} ${sanitizeLog(s.url)}): code=${sanitizeLog(s.code)} message=${sanitizeLog(s.message)}`)
-    let msg = '请求异常，请检查模型配置或稍后重试'
-    if (s.code === 'ECONNREFUSED') msg = '连接被拒绝：请确认 apiBase 地址/端口正确，且服务已启动。'
-    else if (s.code === 'ETIMEDOUT' || s.code === 'ECONNABORTED') msg = '连接超时：请稍后重试或调大 timeout。'
-    else if (s.code === 'ENOTFOUND') msg = 'DNS 解析失败：apiBase 域名无法解析。'
-    throw new Error(msg)
+  let toolsFallbackTried = false
+  const doRequest = async () => {
+    try {
+      return await safeAxiosRequest('post', url, body, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${rawKey}`
+        },
+        timeout: effTimeout,
+        signal,
+      })
+    } catch (e) {
+      const s = summarizeAxiosError(e)
+      // 当模型开启联网(web:true)却因上游不支持 web_search 工具而失败时，回退为"不联网"重试一次，
+      // 保证对话主链路可用（联网是增强项，不应阻塞正常问答）。
+      if (m.web === true && !toolsFallbackTried && body.tools) {
+        toolsFallbackTried = true
+        delete body.tools
+        return doRequest()
+      }
+      safeLogger.error(`[ai0-plugin] LLM 调用异常(${sanitizeLog(s.method)} ${sanitizeLog(s.url)}): code=${sanitizeLog(s.code)} message=${sanitizeLog(s.message)}`)
+      let msg = '请求异常，请检查模型配置或稍后重试'
+      if (s.code === 'ECONNREFUSED') msg = '连接被拒绝：请确认 apiBase 地址/端口正确，且服务已启动。'
+      else if (s.code === 'ETIMEDOUT' || s.code === 'ECONNABORTED') msg = '连接超时：请稍后重试或调大 timeout。'
+      else if (s.code === 'ENOTFOUND') msg = 'DNS 解析失败：apiBase 域名无法解析。'
+      throw new Error(msg)
+    }
+  }
+  resp = await doRequest()
+
+  // 联网工具回退（HTTP 层）：部分上游 API 收到不认识的 web_search 工具会返回 4xx。
+  // 此时删除 tools 再重试一次，把"联网增强"降级为普通对话，不阻塞主链路。
+  if (m.web === true && !toolsFallbackTried && body.tools && (resp.status < 200 || resp.status >= 300)) {
+    toolsFallbackTried = true
+    delete body.tools
+    resp = await doRequest()
   }
 
   const status = resp.status
