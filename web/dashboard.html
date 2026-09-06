@@ -13,7 +13,8 @@
     <span>AI0-Plugin 管理后台</span>
   </div>
   <nav class="nav">
-    <a class="nav-item active" data-view="config">📝 配置</a>
+    <a class="nav-item active" data-view="home">🏠 首页</a>
+    <a class="nav-item" data-view="config">📝 配置</a>
     <a class="nav-item" data-view="providers">🔌 多API平台</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="chatlog">💭 模型互聊</a>
@@ -26,8 +27,28 @@
 </header>
 
 <main class="container">
+  <!-- ==================== 首页：模型详情 ==================== -->
+  <section id="view-home" class="view active">
+    <div class="card">
+      <div class="row justify">
+        <div>
+          <h2>🏠 模型健康一览 <span class="tag" id="homeTag">加载中…</span></h2>
+          <p class="hint">展示当前所有已配置模型的连通状态。点击任一模型卡片可直接跳转到「多API平台」对应配置页。</p>
+        </div>
+        <div class="actions">
+          <button class="btn" id="homeRefresh">🔄 刷新</button>
+        </div>
+      </div>
+
+      <div id="homeSummary" class="home-summary"></div>
+      <div id="homeModelList" class="home-models">
+        <p class="empty">加载中…</p>
+      </div>
+    </div>
+  </section>
+
   <!-- ==================== 配置视图 ==================== -->
-  <section id="view-config" class="view active">
+  <section id="view-config" class="view">
     <div class="card">
       <h2>插件配置 <span class="tag" id="cfgTag">加载中…</span></h2>
       <p class="hint">修改后点击「保存配置」即实时生效（API Key 显示为脱敏，未修改时不会被覆盖）。</p>

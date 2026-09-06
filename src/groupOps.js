@@ -883,6 +883,11 @@ export async function buildGroupContext(e) {
   lines.push('  好的，我来帮你禁言该成员10分钟。')
   lines.push('  [action:mute:123:600]')
   lines.push('')
+  lines.push('【信息获取类操作（只读，无需权限）】')
+  lines.push('这类操作只是读取群内信息，不产生任何群变更，任何群成员请求均可执行。输出格式同上：')
+  lines.push('  查群成员列表（可选关键词，如输入 @某人昵称）:[action:member_list:关键词]   —— 不写关键词（写成 [action:member_list:]）即返回全体成员')
+  lines.push('  例：用户问"群里都有谁/查一下小明的QQ"，你可输出 [action:member_list:小明] 获取结果后再按实际需求回复用户。')
+  lines.push('')
   lines.push('重要规则：')
   lines.push('  1) 你必须先判断请求者是否有权限、目标是否受保护，如果无权或受保护，拒绝并说明原因，不要输出操作指令。')
   lines.push('  2) 如果用户没有明确说时长，禁言使用默认时长。')
@@ -1028,6 +1033,80 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
   return { ok: true, requesterRole, botRole }
 }
 
+/** 角色显示名 */
+function roleLabel(role) {
+  if (role === 'owner') return '群主'
+  if (role === 'admin') return '管理员'
+  if (role === 'member') return '成员'
+  return role || '成员'
+}
+
+/**
+ * 获取群成员列表摘要（信息获取类，不产生群变更）。
+ * 从 getMemberMap / memberList / group.info.members 等多层适配拉取，
+ * 返回一段可直接展示给用户的"昵称(QQ) · 角色"清单；可选关键词过滤（args[0]）。
+ * 失败返回带提示的字符串（由调用方包成 ok:true 的结果，避免打断主流程）。
+ */
+async function getMemberListSummary(groupId, filter) {
+  try {
+    if (!groupId) return '无法获取群信息'
+    const bot = global.Bot || global.bot
+    const group = resolveGroup(groupId)
+    if (!group) return '无法获取群信息'
+
+    const params = { groupId: String(groupId) }
+    let map = null
+    if (typeof group.getMemberMap === 'function') {
+      const r = await qqCandidate('group.getMemberMap', params, () => Promise.resolve(group.getMemberMap()))
+      if (r !== QQ_CALL_TIMED_OUT && r.value) map = r.value
+    }
+    if (!map) {
+      // 兜底：memberList / group.info.members 数组
+      const arr = group?.info?.members || group?.memberList || group?.members || []
+      if (Array.isArray(arr) && arr.length) {
+        map = arr
+      }
+    }
+
+    const members = []
+    if (map instanceof Map) {
+      for (const v of map.values()) members.push(v)
+    } else if (typeof map === 'object' && map !== null) {
+      for (const [_k, v] of Object.entries(map)) members.push(v)
+    } else if (Array.isArray(map)) {
+      members.push(...map)
+    }
+
+    if (!members.length) return '未获取到群成员列表（协议端未返回或群里暂无成员）'
+
+    // 角色排序：群主 > 管理员 > 成员
+    const ROLE_RANK = { owner: 0, admin: 1, member: 2 }
+    const normalized = members.map((m) => {
+      const uid = String(m?.user_id ?? m?.uin ?? m?.uid ?? m?.qq ?? m?.userId ?? '')
+      const nick = String(m?.nickname ?? m?.card ?? m?.name ?? m?.nick ?? '-')
+      const role = _roleOf(m) || 'member'
+      return { uid, nick, role }
+    }).filter((x) => x.uid)
+
+    const keyword = String(filter || '').trim()
+    const filtered = keyword
+      ? normalized.filter((x) => x.uid.includes(keyword) || x.nick.includes(keyword))
+      : normalized
+
+    filtered.sort((a, b) => (ROLE_RANK[a.role] ?? 9) - (ROLE_RANK[b.role] ?? 9) || a.nick.localeCompare(b.nick))
+    const total = normalized.length
+    // 上限 50 人，避免在群里刷屏
+    const shown = filtered.slice(0, 50)
+    const lines = shown.map((x) => `${x.nick}(${x.uid}) · ${roleLabel(x.role)}`)
+    let summary = `本群共 ${total} 名成员` + (keyword ? `，匹配「${keyword}」${filtered.length} 人` : '') + `：\n` + lines.join('\n')
+    if (filtered.length > 50) summary += `\n…（仅显示前 50 人）`
+    return summary
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 获取群成员列表失败: ${sanitizeLog(err?.message || err)}`)
+    return '获取群成员列表失败'
+  }
+}
+
 /**
  * 从 AI 回复中解析操作指令并执行
  * 返回 { cleanText, results }
@@ -1083,7 +1162,12 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
 
   // 无目标操作集合：这些操作的 args[0] 不是目标 QQ，而是开关值/内容字符串
   // 必须同时：① 跳过 QQ 号正则校验；② targetUid 置 null 跳过目标保护检查；③ 取参改为 args[0]
-  const TARGETLESS_OPS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search'])
+  const TARGETLESS_OPS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search', 'member_list'])
+
+  // —— 信息获取类操作：只读、不产生群内变更，跳过权限硬验证与目标保护 ——
+  // 这类操作帮助用户/AI 了解当前群内信息，本身不应被当作"群操作"审计或require权限。
+  // member_list：获取群成员列表（含昵称/角色/QQ）。
+  const INFO_ACTIONS = new Set(['member_list'])
 
   for (const match of matches) {
     const { type, args } = match
@@ -1105,10 +1189,13 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
       }
 
       // —— 4 条硬验证（本地判定，不依赖 AI）——
-      const perm = await verifyGroupOpPermission(type, groupId, targetUid, e)
-      if (!perm.ok) {
-        results.push({ type, ok: false, msg: perm.reason })
-        continue
+      // 信息获取类操作只读，不校验群主/管理员权限（任何群成员请求获取群信息都合法）
+      if (!INFO_ACTIONS.has(type)) {
+        const perm = await verifyGroupOpPermission(type, groupId, targetUid, e)
+        if (!perm.ok) {
+          results.push({ type, ok: false, msg: perm.reason })
+          continue
+        }
       }
 
       // 功能开关检查
@@ -1287,6 +1374,11 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
         await executeLevelTitle(groupId, targetUid, level, titleText)
         safeLogger.info(`[ai0-plugin] 群操作: level_title 群${groupId} 目标${targetUid} 等级${level} 头衔${titleText} 请求者${requesterUid}`)
         results.push({ type, ok: true, msg: `已为 ${targetUid} 设置等级${level}头衔：${titleText}` })
+
+      } else if (type === 'member_list') {
+        // 信息获取类：获取群成员列表（昵称/QQ/角色），不产生任何群变更。
+        const listSummary = await getMemberListSummary(groupId, args[0])
+        results.push({ type, ok: true, msg: listSummary })
 
       } else {
         results.push({ type, ok: false, msg: `未知操作类型：${type}` })

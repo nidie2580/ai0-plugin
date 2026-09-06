@@ -603,11 +603,17 @@ export async function chatCompletions(messages, {
   }
 
   const choice = resp.data?.choices?.[0]
-  //兼容：如果没有 message 但有 delta（流式错误返回）或 content 直接在顶层
-  let text = ''
-  if (choice?.message?.content) text = choice.message.content
-  else if (choice?.delta?.content) text = choice.delta.content
-  else if (typeof resp.data?.content === 'string') text = resp.data.content
+  // 兼容：content 可能是字符串，也可能是多模态数组 [{type:'text',text:'...'}]；
+  // 也兼容 delta（流式错误返回）或 content 直接在顶层。统一收敛为字符串，杜绝
+  // 「输出为空」时把数组/空白当作有效 text 传给下游导致后续字符串操作崩溃。
+  let text = contentToText(choice?.message?.content)
+  if (!text) text = contentToText(choice?.delta?.content)
+  if (!text) text = contentToText(resp.data?.content)
+  // 内容被安全策略拦截（content_filter）或仅有推理而无正文 → 说明输出为空，
+  // 记一条日志便于排查，text 保持空串由上层给出友好提示。
+  if (!text && choice?.finish_reason === 'content_filter') {
+    safeLogger.warn(`[ai0-plugin] LLM 输出被内容安全策略拦截(content_filter)，请调整提示词重试`)
+  }
 
   // 提取深度思考内容（DeepSeek-R1 / Qwen3 thinking 等）
   const reasoning = extractReasoning(choice)
@@ -619,6 +625,29 @@ export async function chatCompletions(messages, {
     usage,
     modelName: m.name || m.model || modelCfgKey
   }
+}
+
+/**
+ * 把模型返回的 content 收敛成纯字符串。
+ * 兼容三种形态：字符串；多模态数组 [{type:'text',text:'...'}, ...]；
+ * 以及 whitespace/空。始终返回非 null 字符串（可能为 ''），杜绝把数组传给下游。
+ */
+export function contentToText(content) {
+  if (content == null) return ''
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    // 多模态：仅拼接 text 段，跳过 image_url 等非文本块
+    const parts = []
+    for (const seg of content) {
+      if (typeof seg === 'string') { parts.push(seg); continue }
+      if (seg && typeof seg === 'object') {
+        if (typeof seg.text === 'string') parts.push(seg.text)
+        else if (seg.type === 'text' && typeof seg.content === 'string') parts.push(seg.content)
+      }
+    }
+    return parts.join('\n')
+  }
+  return ''
 }
 
 /**
@@ -700,9 +729,8 @@ export async function transcribeImage(dataUrl) {
   }
 
   const choice = resp.data?.choices?.[0]
-  let text = ''
-  if (choice?.message?.content) text = choice.message.content
-  else if (typeof resp.data?.content === 'string') text = resp.data.content
+  let text = contentToText(choice?.message?.content)
+  if (!text) text = contentToText(resp.data?.content)
   return String(text || '')
 }
 
