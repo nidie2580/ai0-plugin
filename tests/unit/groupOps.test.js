@@ -243,6 +243,44 @@ describe('INFO: 群成员列表获取是信息类操作，不需要权限', () =
   })
 })
 
+describe('member_list 权限策略 allowMemberListFor', () => {
+  const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+  const backupExists = fs.existsSync(CONFIG_PATH)
+  const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
+
+  after(() => {
+    if (backupExists) fs.writeFileSync(CONFIG_PATH, backupContent, 'utf-8')
+    else if (fs.existsSync(CONFIG_PATH)) fs.unlinkSync(CONFIG_PATH)
+    cfg.setForceLoad(false)
+  })
+
+  it('allowMemberListFor=admin: 普通成员被拒，管理员可查', async () => {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ groupOps: { allowMemberListFor: 'admin' } }), 'utf-8')
+    cfg.setForceLoad(true)
+    // 普通群员请求
+    const m1 = setupMockBot({ botRole: 'owner', requesterRole: 'member' })
+    const e1 = makeEvent(m1.gid, m1.requesterUid)
+    const r1 = await groupOps.parseAndExecuteActions('[action:member_list:]', m1.gid, e1)
+    assert.equal(r1.results[0].ok, false)
+    assert.match(r1.results[0].msg, /管理员/)
+    // 管理员请求
+    const m2 = setupMockBot({ botRole: 'owner', requesterRole: 'admin' })
+    const e2 = makeEvent(m2.gid, m2.requesterUid)
+    const r2 = await groupOps.parseAndExecuteActions('[action:member_list:]', m2.gid, e2)
+    assert.equal(r2.results[0].ok, true)
+  })
+
+  it('allowMemberListFor=master: 仅机器人主人可查', async () => {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ groupOps: { allowMemberListFor: 'master' } }), 'utf-8')
+    cfg.setForceLoad(true)
+    // 主人（bot owner 即 master 场景）：owner 角色请求
+    const m = setupMockBot({ botRole: 'owner', requesterRole: 'owner' })
+    const e = makeEvent(m.gid, m.requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:member_list:]', m.gid, e)
+    assert.equal(r.results[0].ok, false, 'owner 角色不一定等于机器人主人(master)，应仍受 master 门禁约束')
+  })
+})
+
 describe('M: isPrivateIpv6 补点分形式 IPv4-compatible', () => {
   const { isPrivateIpv6 } = sec.__test__
 

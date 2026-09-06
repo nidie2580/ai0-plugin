@@ -200,6 +200,15 @@ groupOps:
   allowLevelTitle: true
   # 允许撤回消息（recall：消息id制/引用制；撤自己/机器人消息无需权限，撤他人消息需群管理权限）
   allowRecall: true
+  # 群成员列表查询权限（member_list）：member=任何成员(默认) admin=仅管理员/主人 master=仅机器人主人
+  allowMemberListFor: member
+
+# 安全审计日志设置
+securityLog:
+  # 日志轮转阈值（字节），达阈值后把 security.log 改名归档并保留最近若干份（默认 10MB）
+  maxBytes: 10485760
+  # 轮转后保留的归档文件数（默认 5 份）
+  maxFiles: 5
 
 # 图片生成设置
 imageGen:
