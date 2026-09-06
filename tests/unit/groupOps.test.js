@@ -1,5 +1,7 @@
-import { describe, it } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import * as cfg from '../../config/index.js'
 
 /**
  * 第二轮修复回归测试
@@ -8,6 +10,8 @@ import assert from 'node:assert/strict'
  *  - F-2：blacklist 指令格式统一为 [action:blacklist:QQ:add|remove]
  *  - U1：parseAndExecuteActions 返回 { cleanText, results } 对象，命令层须用 allActionsOk 判断
  *  - M：isPrivateIpv6 补点分形式 IPv4-compatible（::127.0.0.1 等）
+ *  - RECALL：撤回消息（recall）—— 消息id制/引用制、自撤/机器人消息免权限、他人消息需群管理、
+ *            受保护目标拦截、发送者不可查 fail-closed、适配器能力探测、allowRecall 开关。
  *
  * 这些测试不依赖真实 bot —— 通过 mock global.Bot 模拟适配器。
  */
@@ -288,5 +292,174 @@ describe('F-2 提示词格式回归：buildGroupContext 应输出新格式', () 
     assert.match(ctx, /\[action:blacklist:目标QQ:remove\]/, '提示词应为 [action:blacklist:目标QQ:remove]')
     // 旧格式不应再出现
     assert.doesNotMatch(ctx, /\[action:blacklist:add:目标QQ\]/, '旧格式 [action:blacklist:add:目标QQ] 不应再出现')
+  })
+
+  it('allowRecall=true 时提示词含撤回消息用法', async () => {
+    const { gid, requesterUid } = setupMockBot()
+    const e = makeEvent(gid, requesterUid)
+    const ctx = await groupOps.buildGroupContext(e)
+    assert.ok(ctx)
+    assert.match(ctx, /撤回消息（按消息id）：\[action:recall:消息id\]/, '应提示消息id制撤回')
+    assert.match(ctx, /撤回消息（引用\/回复的这条）：\[action:recall:引用\]/, '应提示引用制撤回')
+  })
+})
+
+// ========== RECALL：撤回消息 ==========
+// setupRecallBot：在基础 mock 上扩展 发送者查询(getMsg) 与 撤回执行(recallMsg)
+function setupRecallBot({ botRole = 'owner', requesterRole = 'owner', senders = {} } = {}) {
+  const base = setupMockBot({ botRole, requesterRole })
+  const { gid, requesterUid, calls, group } = base
+  group.getMsg = async (msgId) => {
+    const s = senders[String(msgId)]
+    if (!s) return null
+    calls.push({ type: 'getMsg', msgId: String(msgId) })
+    return { user_id: s }
+  }
+  group.recallMsg = async (msgId) => {
+    calls.push({ type: 'recallMsg', msgId: String(msgId) })
+    return true
+  }
+  return base
+}
+
+describe('RECALL: 撤回消息（recall）', () => {
+  it('请求者撤回自己的消息 → 放行（普通成员无需管理权限）', async () => {
+    const { gid, requesterUid, calls } = setupRecallBot({ botRole: 'member', requesterRole: 'member', senders: { '111222': '10001' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:111222]', gid, e)
+    assert.equal(r.results[0].ok, true, '撤回自己的消息应成功')
+    assert.ok(calls.some((c) => c.type === 'recallMsg' && c.msgId === '111222'), '应调用 recallMsg(111222)')
+  })
+
+  it('撤回机器人自己的消息 → 放行（普通成员可代撤）', async () => {
+    const { gid, requesterUid, calls } = setupRecallBot({ botRole: 'member', requesterRole: 'member', senders: { '333444': '88888' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:333444]', gid, e)
+    assert.equal(r.results[0].ok, true, '机器人自己的消息任何成员可请求撤回')
+    assert.ok(calls.some((c) => c.type === 'recallMsg' && c.msgId === '333444'))
+  })
+
+  it('请求者(群主)撤他人普通成员消息且机器人为群主 → 放行', async () => {
+    const { gid, requesterUid, calls } = setupRecallBot({ botRole: 'owner', requesterRole: 'owner', senders: { '555666': '66666' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:555666]', gid, e)
+    assert.equal(r.results[0].ok, true, '群主撤普通成员消息应成功')
+    assert.ok(calls.some((c) => c.type === 'recallMsg' && c.msgId === '555666'))
+  })
+
+  it('请求者是普通成员撤他人消息 → 拒绝', async () => {
+    const { gid, requesterUid } = setupRecallBot({ botRole: 'owner', requesterRole: 'member', senders: { '555666': '66666' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:555666]', gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /撤回他人消息需要群主\/管理员\/机器人主人权限/)
+  })
+
+  it('请求者是群主但机器人不是管理员 → 拒绝撤他人消息', async () => {
+    const { gid, requesterUid } = setupRecallBot({ botRole: 'member', requesterRole: 'owner', senders: { '555666': '66666' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:555666]', gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /机器人不是群主或管理员/)
+  })
+
+  it('目标为管理员(77777)的消息 → 受保护拒绝', async () => {
+    const { gid, requesterUid } = setupRecallBot({ botRole: 'owner', requesterRole: 'owner', senders: { '777888': '77777' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:777888]', gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /受保护/)
+  })
+
+  it('目标消息发送者不可查（无 getMsg 能力）→ fail-closed 拒绝', async () => {
+    const { gid, requesterUid } = setupMockBot() // 无 getMsg
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:123123]', gid, e)
+    assert.equal(r.results[0].ok, false, '查不到发送者应拒绝而非静默放行')
+    assert.match(r.results[0].msg, /无法确认发送者/)
+  })
+
+  it('引用制：撤回本条请求引用的消息（[action:recall:引用]）', async () => {
+    const { gid, requesterUid, calls } = setupRecallBot({ botRole: 'member', requesterRole: 'member', senders: { '999000': '10001' } })
+    const e = makeEvent(gid, requesterUid)
+    e.message = [{ type: 'reply', id: '999000', data: { id: '999000' } }]
+    const r = await groupOps.parseAndExecuteActions('[action:recall:引用]', gid, e)
+    assert.equal(r.results[0].ok, true, '引用制撤回自己消息应成功')
+    assert.ok(calls.some((c) => c.type === 'recallMsg' && c.msgId === '999000'), '应撤回引用对应的 999000')
+  })
+
+  it('引用制但本条消息无引用 → 拒绝并提示改用消息id', async () => {
+    const { gid, requesterUid } = setupRecallBot({ botRole: 'member', requesterRole: 'member' })
+    const e = makeEvent(gid, requesterUid) // message 为空，无引用
+    const r = await groupOps.parseAndExecuteActions('[action:recall:引用]', gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /未检测到引用/)
+  })
+
+  it('多消息id（逗号分隔）逐个撤回', async () => {
+    const { gid, requesterUid, calls } = setupRecallBot({ botRole: 'member', requesterRole: 'member', senders: { '1': '10001', '2': '10001' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:1,2]', gid, e)
+    assert.equal(r.results[0].ok, true, '两条都应是自己的消息，可撤回')
+    const recalled = calls.filter((c) => c.type === 'recallMsg')
+    assert.equal(recalled.length, 2, '应逐个调用 recallMsg')
+    assert.match(r.results[0].msg, /已撤回 2 条/)
+  })
+
+  it('多消息id混合权限（含他人消息）→ 整体拒绝', async () => {
+    const { gid, requesterUid } = setupRecallBot({ botRole: 'member', requesterRole: 'member', senders: { '1': '10001', '2': '66666' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:1,2]', gid, e)
+    assert.equal(r.results[0].ok, false, '任一目标越权应整体拒绝（fail-closed）')
+  })
+
+  it('id 格式无效（非纯数字）→ 拒绝', async () => {
+    const { gid, requesterUid } = setupRecallBot()
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:abc]', gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /消息id格式无效/)
+  })
+
+  it('超过 10 条消息 → 拒绝', async () => {
+    const { gid, requesterUid } = setupRecallBot()
+    const e = makeEvent(gid, requesterUid)
+    const ids = Array.from({ length: 11 }, (_, i) => String(i + 1)).join(',')
+    const r = await groupOps.parseAndExecuteActions(`[action:recall:${ids}]`, gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /最多撤回10条/)
+  })
+
+  it('适配器无撤回方法 → 明确报错不静默', async () => {
+    const { gid, requesterUid, group } = setupMockBot() // 无 recallMsg
+    group.getMsg = async () => ({ user_id: requesterUid })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:123456]', gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /撤回失败|不支持撤回消息/)
+  })
+})
+
+describe('RECALL 开关：allowRecall=false 时拒绝', () => {
+  const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+  const backupExists = fs.existsSync(CONFIG_PATH)
+  const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
+
+  before(() => {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ groupOps: { allowRecall: false } }), 'utf-8')
+    cfg.setForceLoad(true)
+  })
+  after(() => {
+    if (backupExists) fs.writeFileSync(CONFIG_PATH, backupContent, 'utf-8')
+    else if (fs.existsSync(CONFIG_PATH)) fs.unlinkSync(CONFIG_PATH)
+    cfg.setForceLoad(false)
+  })
+
+  it('allowRecall=false → 撤回功能未启用', async () => {
+    const { gid, requesterUid } = setupRecallBot({ botRole: 'member', requesterRole: 'member', senders: { '111222': '10001' } })
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:recall:111222]', gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /撤回功能未启用/)
   })
 })

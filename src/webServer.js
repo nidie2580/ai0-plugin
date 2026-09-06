@@ -844,12 +844,37 @@ export function createApp() {
         if (mm.groupConfirm != null && typeof mm.groupConfirm !== 'boolean') {
           return res.json({ ok: false, msg: 'chat.multiModel.groupConfirm 必须为布尔值' })
         }
+        if (mm.deliberate != null && typeof mm.deliberate !== 'boolean') {
+          return res.json({ ok: false, msg: 'chat.multiModel.deliberate 必须为布尔值' })
+        }
+        if (mm.maxRounds != null && (typeof mm.maxRounds !== 'number' || !Number.isInteger(mm.maxRounds) || mm.maxRounds < 2 || mm.maxRounds > 8)) {
+          return res.json({ ok: false, msg: 'chat.multiModel.maxRounds 必须为 2-8 之间的整数' })
+        }
+      }
+      // 点歌（chat.music）
+      const mc = chat.music
+      if (mc) {
+        if (mc.enabled != null && typeof mc.enabled !== 'boolean') {
+          return res.json({ ok: false, msg: 'chat.music.enabled 必须为布尔值' })
+        }
+        if (mc.source != null && mc.source !== 'qq' && mc.source !== 'netease') {
+          return res.json({ ok: false, msg: 'chat.music.source 只能为 qq 或 netease' })
+        }
+        if (mc.maxResults != null && (typeof mc.maxResults !== 'number' || !Number.isInteger(mc.maxResults) || mc.maxResults < 1 || mc.maxResults > 5)) {
+          return res.json({ ok: false, msg: 'chat.music.maxResults 必须为 1-5 之间的整数' })
+        }
+        if (mc.tryPlayUrl != null && typeof mc.tryPlayUrl !== 'boolean') {
+          return res.json({ ok: false, msg: 'chat.music.tryPlayUrl 必须为布尔值' })
+        }
       }
     }
     const g = config.groupOps
     if (g) {
       if (g.defaultMuteDuration != null && (typeof g.defaultMuteDuration !== 'number' || g.defaultMuteDuration < 1 || g.defaultMuteDuration > 2592000)) {
         return res.json({ ok: false, msg: 'groupOps.defaultMuteDuration 必须为 1-2592000 秒' })
+      }
+      if (g.allowRecall != null && typeof g.allowRecall !== 'boolean') {
+        return res.json({ ok: false, msg: 'groupOps.allowRecall 必须为布尔值' })
       }
     }
     const img = config.imageGen
@@ -1100,12 +1125,15 @@ export function createApp() {
     res.json({ ok: true, identity: getWebIdentity(req) })
   })
   app.post('/api/multi-chat', requireAuth, requireCsrf, async (req, res) => {
-    let { question = '', modelKeys = null, multiChat = null, clear = false } = req.body || {}
+    let { question = '', modelKeys = null, multiChat = null, deliberate = null, clear = false } = req.body || {}
     const identity = getWebIdentity(req)
     const userId = identity || multiChatService.resolveUserLabel(null, null)
     if (clear) {
       multiChatService.clearWebConversation(userId)
       return res.json({ ok: true, cleared: true })
+    }
+    if (deliberate != null && typeof deliberate !== 'boolean') {
+      return res.json({ ok: false, msg: 'deliberate 必须为布尔值' })
     }
     if (typeof question !== 'string' || !question.trim()) {
       return res.json({ ok: false, msg: '问题不能为空' })
@@ -1122,6 +1150,7 @@ export function createApp() {
       question: String(question),
       modelKeys: Array.isArray(modelKeys) ? modelKeys : null,
       multiChat,
+      deliberate,
     })
     // 返回登录者身份到前端，用于聊天界面显示"以谁的身份发言"
     res.json({ ...result, identity })

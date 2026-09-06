@@ -386,11 +386,21 @@ if (route === 'dashboard') {
     $('#chat_multiModel_multiChat').value = String(mmCfg.multiChat ?? false)
     $('#chat_multiModel_groupConfirm').value = String(mmCfg.groupConfirm ?? true)
     $('#chat_multiModel_atModel').value = String(mmCfg.atModel ?? true)
+    $('#chat_multiModel_deliberate').value = String(mmCfg.deliberate ?? false)
+    $('#chat_multiModel_maxRounds').value = mmCfg.maxRounds ?? 3
     const lgCfg = resp.config.chat?.loopGuard || {}
     $('#chat_loopGuard_enabled').value = String(lgCfg.enabled ?? true)
     $('#chat_loopGuard_windowMs').value = lgCfg.windowMs ?? 20000
     $('#chat_loopGuard_maxReplies').value = lgCfg.maxReplies ?? 4
     $('#chat_loopGuard_cooldownMs').value = lgCfg.cooldownMs ?? 60000
+
+    const muCfg = resp.config.chat?.music || {}
+    $('#chat_music_enabled').value = String(muCfg.enabled ?? false)
+    $('#chat_music_source').value = muCfg.source === 'netease' ? 'netease' : 'qq'
+    $('#chat_music_maxResults').value = muCfg.maxResults ?? 3
+    $('#chat_music_tryPlayUrl').value = String(muCfg.tryPlayUrl !== false)
+    $('#chat_music_qq_cookie').value = muCfg.qq?.cookie || ''
+    $('#chat_music_netease_cookie').value = muCfg.netease?.cookie || ''
 
     $('#system_prompt').value = resp.config.system?.prompt || ''
     $('#agent_maxRounds').value = resp.config.agent?.maxRounds ?? 5
@@ -495,7 +505,13 @@ if (route === 'dashboard') {
     c.model[newKey] = { ...(c.model[newKey] || {}), ...obj }
     if (c.model.default === oldKey && oldKey !== newKey) c.model.default = newKey
 
+    // chat 对象做浅合并：UI 未覆盖的扩展键（chat.music、multiModel.judgeModel 等）不会因保存被抹掉
+    const prevChat = c.chat || {}
+    const prevMM = prevChat.multiModel || {}
+    let delibRounds = parseInt($('#chat_multiModel_maxRounds').value, 10)
+    if (!Number.isInteger(delibRounds) || delibRounds < 2 || delibRounds > 8) delibRounds = 3
     c.chat = {
+      ...prevChat,
       groupAtReply: $('#chat_groupAtReply').value === 'true',
       privateReply: $('#chat_privateReply').value === 'true',
       contextSize: parseInt($('#chat_contextSize').value, 10) || 10,
@@ -503,16 +519,27 @@ if (route === 'dashboard') {
       triggerPrefix: splitCsv($('#chat_triggerPrefix').value),
       sessionTimeout: parseInt($('#chat_sessionTimeout').value, 10) || -1,
       multiModel: {
+        ...prevMM,
         enabled: $('#chat_multiModel_enabled').value === 'true',
         multiChat: $('#chat_multiModel_multiChat').value === 'true',
         groupConfirm: $('#chat_multiModel_groupConfirm').value === 'true',
-        atModel: $('#chat_multiModel_atModel').value === 'true'
+        atModel: $('#chat_multiModel_atModel').value === 'true',
+        deliberate: $('#chat_multiModel_deliberate').value === 'true',
+        maxRounds: delibRounds
       },
       loopGuard: {
         enabled: $('#chat_loopGuard_enabled').value === 'true',
         windowMs: parseInt($('#chat_loopGuard_windowMs').value, 10) || 20000,
         maxReplies: parseInt($('#chat_loopGuard_maxReplies').value, 10) || 4,
         cooldownMs: parseInt($('#chat_loopGuard_cooldownMs').value, 10) || 60000
+      },
+      music: {
+        enabled: $('#chat_music_enabled').value === 'true',
+        source: $('#chat_music_source').value === 'netease' ? 'netease' : 'qq',
+        maxResults: Math.min(5, Math.max(1, parseInt($('#chat_music_maxResults').value, 10) || 3)),
+        tryPlayUrl: $('#chat_music_tryPlayUrl').value !== 'false',
+        qq: { cookie: $('#chat_music_qq_cookie').value.trim() },
+        netease: { cookie: $('#chat_music_netease_cookie').value.trim() }
       }
     }
     c.system = { prompt: $('#system_prompt').value }
@@ -685,6 +712,7 @@ if (route === 'dashboard') {
   let micInitDone = false
   let chatHistory = []              // 内存中的聊天消息（用于渲染当前聊天框）
   let micBusy = false
+  let micDeliberateDefault = false  // 页面载入时从配置读取的协同开关默认值
   const micModelIndex = new Map()   // key → { key, name }
 
   function initChatAcrossApp() {
@@ -730,6 +758,10 @@ if (route === 'dashboard') {
       }
       if (!html) { wrap.innerHTML = '<span class="hint">暂无模型配置。</span>'; return }
       wrap.innerHTML = html
+      const mm = (resp.config && resp.config.chat && resp.config.chat.multiModel) || {}
+      micDeliberateDefault = mm.deliberate === true
+      const dbToggle = $('#micDeliberate')
+      if (dbToggle) dbToggle.checked = micDeliberateDefault
     } catch (e) {
       wrap.innerHTML = '<span class="hint">模型列表加载失败</span>'
     }
@@ -808,7 +840,12 @@ if (route === 'dashboard') {
     setMicBusy(true, '模型互聊中，请稍候…')
 
     try {
-      const r = await api('/api/multi-chat', { method: 'POST', body: { question, modelKeys: keys } })
+      const dbToggle = $('#micDeliberate')
+      const want = dbToggle ? dbToggle.checked : micDeliberateDefault
+      const body = { question, modelKeys: keys }
+      // 与配置一致则不传(由后端按配置走)；与配置相反则显式传，实现"本次覆盖"
+      if (want !== micDeliberateDefault) body.deliberate = want
+      const r = await api('/api/multi-chat', { method: 'POST', body })
       if (!r.ok) {
         setMicBusy(false, '互聊失败：' + (r.msg || '未知错误'))
         chatHistory.push({ role: 'bot', html: `<div class="mic-bubble bot-bubble">⚠️ ${escapeHtml(r.msg || '互聊失败')}</div>` })
@@ -819,9 +856,22 @@ if (route === 'dashboard') {
       const best = r.best
       const replies = r.replies || []
       let botHtml = ''
-      for (const rep of replies) {
-        const isBest = best && rep.model === best.model && rep.text === best.text
-        botHtml += `<div class="mic-bubble bot-bubble${isBest ? ' best' : ''}"><div class="mic-model">🤖 ${escapeHtml(rep.model)}${isBest ? ' ✅ 最优' : ''}</div><div class="mic-text">${escapeHtml(rep.text).replace(/\n/g, '<br>')}</div></div>`
+      if (r.deliberate) {
+        // 协同模式：讨论过程按轮小气泡平铺，最后高亮"统一结论"
+        for (const rep of replies) {
+          if (!rep.text) continue
+          botHtml += `<div class="mic-bubble bot-bubble"><div class="mic-model">💬 [第${rep.round}轮] ${escapeHtml(rep.model)}</div><div class="mic-text">${escapeHtml(rep.text).replace(/\n/g, '<br>')}</div></div>`
+        }
+        const finalText = (r.final || (best && best.text) || '').trim()
+        const mark = r.converged ? '✅ 多模型协同结论（达成共识）' : '🧭 多模型协同结论（主持人综合）'
+        if (finalText) {
+          botHtml += `<div class="mic-bubble bot-bubble best"><div class="mic-model">${mark}</div><div class="mic-text">${escapeHtml(finalText).replace(/\n/g, '<br>')}</div></div>`
+        }
+      } else {
+        for (const rep of replies) {
+          const isBest = best && rep.model === best.model && rep.text === best.text
+          botHtml += `<div class="mic-bubble bot-bubble${isBest ? ' best' : ''}"><div class="mic-model">🤖 ${escapeHtml(rep.model)}${isBest ? ' ✅ 最优' : ''}</div><div class="mic-text">${escapeHtml(rep.text).replace(/\n/g, '<br>')}</div></div>`
+        }
       }
       chatHistory.push({ role: 'bot', html: botHtml || '<div class="mic-bubble bot-bubble">(无回答)</div>' })
       renderChatHistory()

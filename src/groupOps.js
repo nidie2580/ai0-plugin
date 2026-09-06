@@ -830,6 +830,7 @@ export async function buildGroupContext(e) {
   const allowBlacklist = cfg.get('groupOps.allowBlacklist', true) !== false
   const allowCustomTitle = cfg.get('groupOps.allowCustomTitle', true) !== false
   const allowLevelTitle = cfg.get('groupOps.allowLevelTitle', true) !== false
+  const allowRecall = cfg.get('groupOps.allowRecall', true) !== false
   if (allowGroupName && botCanManage) {
     lines.push('  - 改群名：需要请求者是群主/管理员/机器人主人，机器人必须是群主/管理员。')
   }
@@ -857,6 +858,10 @@ export async function buildGroupContext(e) {
   if (allowLevelTitle && botInferred === 'owner') {
     lines.push('  - 等级头衔：根据等级自定义头衔。需要请求者是群主/管理员/机器人主人，机器人必须是群主。')
   }
+  if (allowRecall) {
+    lines.push('  - 撤回消息：撤回自己或机器人发的消息无需权限；撤他人消息需请求者是群主/管理员/机器人主人（机器人需为群主/管理员）。')
+    lines.push('    群主/管理员/机器人主人发的消息受保护，不能撤（除非是自己发的）。被撤回的消息需在 2 分钟内且发送者须在群内，具体以协议端能力为准。')
+  }
 
   lines.push('', '【操作输出格式】')
   lines.push('如果你判断请求合法且需要执行群操作，请在回复末尾另起一行，用以下格式输出操作指令（用户不会看到这行，系统会解析并执行）：')
@@ -879,6 +884,11 @@ export async function buildGroupContext(e) {
   lines.push('  解除拉黑：[action:blacklist:目标QQ:remove]')
   lines.push('  自定义头衔：[action:custom_title:目标QQ:头衔文字]（目标必须是发送者自己）')
   lines.push('  等级头衔：[action:level_title:目标QQ:等级:头衔文字]')
+  if (allowRecall) {
+    lines.push('  撤回消息（按消息id）：[action:recall:消息id]   （多条用逗号分隔：[action:recall:id1,id2]）')
+    lines.push('  撤回消息（引用/回复的这条）：[action:recall:引用]')
+    lines.push('    —— 消息id一般由请求者在对话中给出（如引用消息时的系统显示 id）。引用制适用于用户"回复/引用了某条消息并要撤回它"。')
+  }
   lines.push('示例：用户说"禁言一下@123 10分钟"，你的回复可以是：')
   lines.push('  好的，我来帮你禁言该成员10分钟。')
   lines.push('  [action:mute:123:600]')
@@ -1127,7 +1137,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
 
   // 非群操作指令：交由其它解析器处理（如 [action:image:...]、[action:agent:...]）。
   // 必须在"移除指令"前先跳过，否则会被当成群操作吞掉并误报"目标QQ号格式无效"（BUG-1）
-  const NON_GROUP_ACTIONS = new Set(['image', 'agent'])
+  const NON_GROUP_ACTIONS = new Set(['image', 'agent', 'music'])
 
   // 移除操作指令，得到干净文本
   // C1: 使用 replaceAll 防止 AI 回复含两处相同 [action:...] 时只替换第一处，导致指令透出到回复
@@ -1162,6 +1172,7 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
 
   // 无目标操作集合：这些操作的 args[0] 不是目标 QQ，而是开关值/内容字符串
   // 必须同时：① 跳过 QQ 号正则校验；② targetUid 置 null 跳过目标保护检查；③ 取参改为 args[0]
+  // 注：recall（撤回消息）也是非QQ目标操作，但因权限依赖目标消息发送者，已在上面单独处理（不入此集合）。
   const TARGETLESS_OPS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search', 'member_list'])
 
   // —— 信息获取类操作：只读、不产生群内变更，跳过权限硬验证与目标保护 ——
@@ -1174,6 +1185,21 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
     try {
       // 非群操作指令跳过，不报错也不清除文本（交由其它解析器）
       if (NON_GROUP_ACTIONS.has(type)) continue
+
+      // 撤回消息（recall）：目标是"消息id/引用消息"，不是 QQ 号，且权限依赖目标消息的发送者
+      // （自己/机器人的消息普通成员也能撤回；他人消息才要求群管理权限 + 受保护拦截）。
+      // 因此不走通用 4 条件硬验证（目标QQ）与 targetless 分支，单独处理。
+      if (type === 'recall') {
+        const rr = await handleRecallAction({
+          args, groupId, e,
+          requesterUid, requesterRole, requesterElevated, requesterIsMaster,
+          botRole, ownerUin: ownerUinForAction,
+        })
+        if (rr?.ok) safeLogger.info(`[ai0-plugin] 群操作: recall 群${groupId} 目标=${rr.detail || '-'} 请求者${requesterUid}`)
+        results.push({ type, ok: !!rr?.ok, msg: rr?.msg || '撤回失败' })
+        continue
+      }
+
       const isTargetless = TARGETLESS_OPS.has(type)
       // 无目标操作：targetUid 置 null，跳过目标保护检查（避免 getMemberInfo 查 '1'/'0'/'新群名' 等假值导致 fail-closed 拒绝）
       const targetUid = isTargetless ? null : args[0]
@@ -1530,6 +1556,227 @@ async function executeLevelTitle(groupId, userId, level, title) {
   else if (typeof group.setGroupLevelTitle === 'function') await group.setGroupLevelTitle(userId, level, title)
   else if (typeof group.setTitleByLevel === 'function') await group.setTitleByLevel(userId, level, title)
   else throw new Error('当前适配器不支持设置等级头衔')
+}
+
+/* ————————————————————————————————————————————————
+ * 撤回消息（recall）
+ *
+ * 目标形态（由 AI 在指令里给出，消息 id 一般来自用户对话）：
+ *   - 消息id制：[action:recall:消息id]（一个或多个，逗号/顿号/空格分隔）
+ *   - 引用制  ：[action:recall:引用] —— 撤回"本条请求所引用/回复的那条消息"，
+ *               目标消息 id 从事件 e 的 reply/quote/reference 段解析。
+ *
+ * 权限语义（与"群管理"一致，但自撤/撤机器人消息放行给普通成员）：
+ *   目标消息发送者 = 机器人自己 或 请求者本人 → 任何群成员都可请求撤回（无需群管理权限）。
+ *   目标消息发送者 = 其他成员 → 需请求者是群主/管理员/机器人主人，且机器人是群主/管理员。
+ *   目标消息发送者 = 群主/管理员/机器人主人（受保护）→ 一律拒绝（本人自撤除外）。
+ *
+ * 安全兜底：无法确认目标消息发送者（协议适配器不支持按消息id查询）→ 拒绝并说明原因，
+ * 不静默放行（fail-closed），避免误撤受保护成员的消息。
+ * ———————————————————————————————————————————————— */
+
+// 引用制关键字：arg 为空或等于这些词时，表示"撤回本条请求引用的那条消息"
+const RECALL_QUOTE_KEYWORDS = new Set(['引用', '本条', '这条', '该条', '本条引用', '引用消息', '引用本条', '引用的消息', '引用该消息', 'quote', 'quoted'])
+
+/** 消息 id 词法校验：QQ 消息 id 常见为（可为负的）长整型；过宽松会引入跨 id 误撤风险 */
+function isRecallIdToken(token) {
+  return /^-?\d{1,30}$/.test(String(token).trim())
+}
+
+/** 从事件 e 中提取"被引用/回复消息"的消息 id（reply/quote/reference/source 段及顶层字段兜底） */
+function extractQuotedMessageId(e) {
+  if (!e) return null
+  const segs = Array.isArray(e?.message) ? e.message : []
+  const pick = (obj) => {
+    if (!obj || typeof obj !== 'object') return null
+    const cand = obj.message_id ?? obj.msg_id ?? obj.id ?? obj.seq ?? obj.data?.message_id ?? obj.data?.id ?? obj.data?.seq ?? null
+    return cand != null && cand !== '' ? String(cand).trim() : null
+  }
+  // 1) 段：reply/quote/reference/source
+  for (const seg of segs) {
+    if (!seg || typeof seg !== 'object') continue
+    const t = seg.type ?? seg.msg_type ?? seg.post_type
+    if (t === 'reply' || t === 'quote' || t === 'reference' || t === 'source') {
+      const id = pick(seg)
+      if (id && id !== '') return id
+    }
+  }
+  // 2) 顶层引用字段
+  for (const key of ['quote', 'replyMessage', 'reply_message', 'reference', 'quoted', 'raw_message_ref', 'source']) {
+    const v = e[key]
+    if (v == null) continue
+    const id = pick(typeof v === 'object' ? v : null)
+    if (id && id !== '') return id
+  }
+  return null
+}
+
+/** 尽力按消息 id 查询发送者（协议适配器能力不足时返回 null，调用方 fail-closed 拒绝） */
+async function fetchMessageSenderUid(groupId, msgId) {
+  if (!groupId || msgId == null) return null
+  const params = { groupId: String(groupId), msgId: String(msgId) }
+  const readSender = (v) => {
+    if (!v || typeof v !== 'object') return null
+    const s = v.user_id ?? v.uin ?? v.qq ?? v.senderId ?? v.from_user ?? v.sender?.user_id ?? v.sender?.uin ?? v.sender?.qq ?? v.data?.user_id ?? v.data?.uin ?? v.author?.user_id ?? null
+    return s != null ? String(s).trim() : null
+  }
+  try {
+    const bot = global.Bot || global.bot
+    if (!bot) return null
+    const group = resolveGroup(groupId)
+    // 1) group 级消息查询
+    if (group) {
+      for (const fn of ['getMsg', 'getMessage', 'getMsgInfo', 'getMessageInfo', 'fetchMessage', 'getGroupMsg', 'getGroupMessage']) {
+        if (typeof group[fn] !== 'function') continue
+        const r = await qqCandidate(`group.${fn}`, params, () => group[fn](msgId))
+        if (r === QQ_CALL_TIMED_OUT) return null
+        const s = readSender(r.value)
+        if (s) return s
+      }
+    }
+    // 2) bot 级消息查询（(groupId, msgId) 签名）
+    for (const fn of ['getMsg', 'getMessage', 'getMsgInfo', 'getMessageInfo', 'getGroupMsg', 'getGroupMessage']) {
+      if (typeof bot[fn] !== 'function') continue
+      const r = await qqCandidate(`bot.${fn}`, params, () => bot[fn](groupId, msgId))
+      if (r === QQ_CALL_TIMED_OUT) return null
+      const s = readSender(r.value)
+      if (s) return s
+    }
+  } catch (_) {}
+  return null
+}
+
+/** 撤回单条消息：探测适配器支持的撤回方法（群级 / bot 级均可能），失败抛明确原因 */
+async function executeRecall(groupId, msgId) {
+  const group = resolveGroup(groupId)
+  if (!group) throw new Error('无法获取群信息')
+  const id = String(msgId ?? '').trim()
+  if (!id) throw new Error('未指定消息id')
+  const params = { groupId: String(groupId), msgId: id }
+  // 1) group 级撤回方法（单参 = 消息id）
+  for (const fn of ['recallMsg', 'recallMessage', 'recall', 'deleteMsg', 'deleteMessage', 'withdrawMessage', 'withdraw', 'delete']) {
+    if (typeof group[fn] === 'function') {
+      await callQQ(`group.${fn}`, params, () => group[fn](id))
+      return
+    }
+  }
+  // 2) bot 级撤回方法（(groupId, msgId) 签名）
+  const bot = global.Bot || global.bot
+  if (bot) {
+    for (const fn of ['recallMsg', 'recallMessage', 'recall', 'deleteMsg', 'deleteMessage', 'deleteGroupMsg', 'recallGroupMsg']) {
+      if (typeof bot[fn] === 'function') {
+        await callQQ(`bot.${fn}`, params, () => bot[fn](groupId, id))
+        return
+      }
+    }
+  }
+  throw new Error('当前协议适配器不支持撤回消息（未检测到 recallMsg/deleteMsg 等方法）')
+}
+
+/**
+ * 撤回消息统一入口（含开关/目标解析/发送者确认/权限/受保护拦截/执行）。
+ * @returns {Promise<{ok:boolean, msg:string, detail?:string}>}
+ */
+async function handleRecallAction({ args, groupId, e, requesterUid, requesterElevated, requesterIsMaster, botRole, ownerUin }) {
+  const notOk = (msg) => ({ ok: false, msg })
+  if (cfg.get('groupOps.allowRecall', true) === false) return notOk('撤回功能未启用')
+  if (!groupId) return notOk('撤回仅限群聊环境')
+  if (requesterUid == null) return notOk('无法获取发送者身份')
+
+  const rawArg = String((args || []).join(':') || '').trim()
+  const targets = []
+  // —— 解析目标消息 ——
+  if (rawArg === '' || RECALL_QUOTE_KEYWORDS.has(rawArg)) {
+    // 引用制：撤回本条请求所引用的消息
+    const quotedId = extractQuotedMessageId(e)
+    if (!quotedId) return notOk('未检测到引用/回复的消息（无法确定要撤回哪条），请让 AI 改用消息id制')
+    let quoteSender = null
+    try {
+      const pc = helper.parseMessageWithContext(e)
+      quoteSender = pc?.quote?.user_id != null ? String(pc.quote.user_id) : null
+    } catch (_) {}
+    targets.push({ id: quotedId, knownSender: quoteSender })
+  } else {
+    // 消息id制：支持逗号/顿号/分号/空白分隔多个 id
+    const tokens = rawArg.split(/[，,、;；\s]+/).map((t) => t.trim()).filter(Boolean)
+    if (!tokens.length) return notOk('未指定要撤回的消息id')
+    if (tokens.length > 10) return notOk('一次最多撤回10条消息')
+    for (const token of tokens) {
+      if (!isRecallIdToken(token)) return notOk(`消息id格式无效：${token}`)
+    }
+    for (const token of tokens) targets.push({ id: token, knownSender: null })
+  }
+
+  // —— 逐目标确认发送者 + 权限判定（任一条不过则整体取消，fail-closed）——
+  const masters = helper.listMasters()
+  const botSelfUin = getBotSelf().uin
+  const requesterUidStr = String(requesterUid)
+  const failures = []
+
+  for (const t of targets) {
+    // 1) 发送者：优先用引用消息里已知发送者；否则查消息详情。查不到 → 拒绝。
+    let senderUid = t.knownSender
+    if (senderUid == null) {
+      senderUid = await fetchMessageSenderUid(groupId, t.id)
+      if (senderUid == null) {
+        failures.push(`消息 ${t.id}：无法确认发送者（协议适配器不支持按消息id查询），已拒绝`)
+        continue
+      }
+    }
+    t.senderUid = String(senderUid)
+
+    // 2) 自撤 / 撤机器人自己的消息 → 任何群成员都可请求
+    const isBotOwn = botSelfUin != null && t.senderUid === botSelfUin
+    const isSelf = t.senderUid === requesterUidStr
+    if (isBotOwn || isSelf) continue
+
+    // 3) 受保护目标（群主/管理员/机器人主人）的消息 → 拒绝（本人自撤已在上面放行）
+    const isMasterTarget = masters.includes(t.senderUid)
+    let targetRole = null
+    if (!isMasterTarget) {
+      try {
+        const info = await getMemberInfo(groupId, t.senderUid)
+        targetRole = _roleOf(info)
+      } catch (_) {}
+    }
+    const isProtected =
+      isMasterTarget || targetRole === 'owner' || targetRole === 'admin' ||
+      (ownerUin != null && t.senderUid === String(ownerUin))
+    if (isProtected) {
+      failures.push(`消息 ${t.id}：发送者(${t.senderUid})受保护（群主/管理员/机器人主人），不可撤回`)
+      continue
+    }
+
+    // 4) 他人消息 → 群管理操作：请求者 elevated + 机器人群主/管理员
+    if (!requesterElevated) {
+      failures.push(`消息 ${t.id}：撤回他人消息需要群主/管理员/机器人主人权限`)
+      continue
+    }
+    if (botRole !== 'owner' && botRole !== 'admin') {
+      failures.push(`消息 ${t.id}：机器人不是群主或管理员，无法撤回他人消息`)
+      continue
+    }
+  }
+  if (failures.length) return notOk(failures.join('；'))
+
+  // —— 执行撤回（逐条；部分失败时明确报告成功/失败）——
+  const okIds = []
+  const errMsgs = []
+  for (const t of targets) {
+    try {
+      await executeRecall(groupId, t.id)
+      okIds.push(t.id)
+    } catch (err) {
+      errMsgs.push(`消息 ${t.id} 撤回失败：${sanitizeLog(err?.message || String(err))}`)
+    }
+  }
+  if (errMsgs.length) {
+    const prefix = okIds.length ? `已撤回 ${okIds.length} 条；` : ''
+    return { ok: false, msg: prefix + errMsgs.join('；'), detail: okIds.join(',') }
+  }
+  const detail = targets.map((t) => t.id).join(',')
+  const msg = targets.length > 1 ? `已撤回 ${targets.length} 条消息` : `已撤回该消息`
+  return { ok: true, msg, detail }
 }
 
 /* ————————————————————————————————————————————————

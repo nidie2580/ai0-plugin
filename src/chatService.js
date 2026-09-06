@@ -9,6 +9,8 @@ import * as imageGen from './imageGen.js'
 import * as agent from './agent.js'
 import * as chatLog from './chatLog.js'
 import * as groupConfirm from './groupConfirm.js'
+import * as deliberate from './deliberate.js'
+import * as musicService from './musicService.js'
 import { INJECT_BEGIN, INJECT_END } from './helper.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
@@ -794,6 +796,14 @@ export async function handleChat(e) {
     safeLogger.warn(`[ai0-plugin] 构建图片上下文失败: ${err.message}`)
   }
 
+  // 注入点歌能力上下文（群聊/私聊通用；chat.music.enabled=false 时不注入，AI 不知道可点歌）
+  let musicContext = null
+  try {
+    musicContext = musicService.buildMusicContext()
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 构建点歌上下文失败: ${err.message}`)
+  }
+
   // 注入 Agent 能力上下文（仅主人会话且启用时；命令执行权限高，非主人一律不注入）
   let agentContext = null
   try {
@@ -807,7 +817,7 @@ export async function handleChat(e) {
   // 合并所有上下文到 system prompt（身份信息放最前面，让 AI 优先记住真实数据）
   // 动态变量在"发送前的最终 prompt"处替换：Web 后台保存的原始模板保持不变
   const basePrompt = resolvePromptVars(sysPrompt, e)
-  const extraContext = [identityContext, groupContext, imageContext, agentContext].filter(Boolean).join('\n\n')
+  const extraContext = [identityContext, groupContext, imageContext, musicContext, agentContext].filter(Boolean).join('\n\n')
   let finalSysPrompt = (extraContext ? basePrompt + '\n\n' + extraContext : basePrompt)
 
   // 多模型互聊：给所有参与模型注入"机器人消息 [*] 标记协议"，让它们能辨认并选择回应/忽略彼此发言。
@@ -923,52 +933,73 @@ export async function handleChat(e) {
       }
     }
 
-    // 从已持久化 history 中提取"其他模型的 [*] 发言"，聚合成"本轮用户消息之外"的对话背景。
-    // 这样开启 multiChat 后，模型在下一轮就能看到彼此此前说过的话 → 形成可持续的多轮 AI 聊天。
-    const archiveReplies = collectArchiveReplies(reqHistory)
-
-    // 并行调用所有目标模型。每个模型彼此独立，失败互不影响；互聊时注入其他模型的 [*] 历史发言。
-    const tasks = activeModelKeys.map(async (k) => {
-      const modelReq = buildMultiChatRequest({
-        reqHistory,
-        archiveReplies,
-        modelKey: k,
-        modelDisplay,
-        multiChatEnabled
+    // 多模型协同（先商量→统一回复）：取代"各自作答+拼接"，群聊只发收敛后的一条最终回复。
+    // 触发：multiModel.enabled 且 deliberate=true 且 >=2 个参与模型，且本轮不是"/模型"艾特单点。
+    const deliberationOn = multiModelEnabled && mmCfg.deliberate === true && activeModelKeys.length >= 2 && !atUserText
+    if (deliberationOn) {
+      const priorHistory = Array.isArray(reqHistory) && reqHistory.length ? reqHistory.slice(0, -1) : []
+      const delib = await deliberate.runDeliberation({
+        question: pureText,
+        modelKeys: activeModelKeys,
+        maxRounds: Number.isInteger(Number(mmCfg.maxRounds)) ? Number(mmCfg.maxRounds) : undefined,
+        judgeKey: mmCfg.judgeModel || undefined,
+        history: priorHistory,
+        signal: ac.signal,
+        llmCall: (msgs, o) => llm.chatCompletions(msgs, { ...o, signal: ac.signal }),
       })
-      const res = await llm.chatCompletions(modelReq, { modelKey: k, signal: ac.signal })
-      return { modelKey: k, text: res?.text || '', modelName: res?.modelName || k, reasoning: res?.reasoning }
-    })
-    const results = await Promise.allSettled(tasks)
-    const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value)
-    const failed = results.filter((r) => r.status === 'rejected').map((r) => r.reason)
+      // 协同模式历史只保留最终一条（不注入各模型 [*] 发言，避免污染下一轮上下文）
+      multiModelReplies = []
+      replyText = delib.ok ? delib.finalText : `(多模型协同失败：${delib.msg || '未知错误'})`
+      modelName = activeModelKeys.map((k) => modelDisplay(k)).join('、')
+      safeLogger.info(`[ai0-plugin] 多模型协同完成：收敛=${delib.converged} 轮次=${delib.rounds.length} 模型=${activeModelKeys.length}`)
+    } else {
+      // 从已持久化 history 中提取"其他模型的 [*] 发言"，聚合成"本轮用户消息之外"的对话背景。
+      // 这样开启 multiChat 后，模型在下一轮就能看到彼此此前说过的话 → 形成可持续的多轮 AI 聊天。
+      const archiveReplies = collectArchiveReplies(reqHistory)
 
-    if (multiModelEnabled) {
-      // 多模型模式：各模型各自成段，由用户自行对照。回答以 [*] 前缀记入 multiModelReplies，
-      //   落历史时逐条保存，下一轮模型便能通过注入段"看到"彼此的旧发言，形成持续的多轮 AI 聊天。
-      multiModelReplies = ok.map((r) => ({ modelKey: r.modelKey, text: r.text, modelName: r.modelName ?? r.modelKey, reasoning: r.reasoning }))
-      replyText = ok.length
-        ? ok.map((r) => `【${modelDisplay(r.modelKey)}】${r.text}`).join('\n\n')
-        : `(所有模型均调用出错：${userFacingLLMError(failed[0]?.message)})`
-      modelName = ok.map((r) => modelDisplay(r.modelKey)).join('、')
-      // 多模型模式的深度思考：分别发送各模型思考过程
-      if (cfg.get('response.showReasoning', true) !== false) {
-        for (const r of ok) {
-          if (r.reasoning) {
-            try { await helper.replyReasoningAsChat(e, r.reasoning) } catch (_) {}
+      // 并行调用所有目标模型。每个模型彼此独立，失败互不影响；互聊时注入其他模型的 [*] 历史发言。
+      const tasks = activeModelKeys.map(async (k) => {
+        const modelReq = buildMultiChatRequest({
+          reqHistory,
+          archiveReplies,
+          modelKey: k,
+          modelDisplay,
+          multiChatEnabled
+        })
+        const res = await llm.chatCompletions(modelReq, { modelKey: k, signal: ac.signal })
+        return { modelKey: k, text: res?.text || '', modelName: res?.modelName || k, reasoning: res?.reasoning }
+      })
+      const results = await Promise.allSettled(tasks)
+      const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value)
+      const failed = results.filter((r) => r.status === 'rejected').map((r) => r.reason)
+
+      if (multiModelEnabled) {
+        // 多模型模式：各模型各自成段，由用户自行对照。回答以 [*] 前缀记入 multiModelReplies，
+        //   落历史时逐条保存，下一轮模型便能通过注入段"看到"彼此的旧发言，形成持续的多轮 AI 聊天。
+        multiModelReplies = ok.map((r) => ({ modelKey: r.modelKey, text: r.text, modelName: r.modelName ?? r.modelKey, reasoning: r.reasoning }))
+        replyText = ok.length
+          ? ok.map((r) => `【${modelDisplay(r.modelKey)}】${r.text}`).join('\n\n')
+          : `(所有模型均调用出错：${userFacingLLMError(failed[0]?.message)})`
+        modelName = ok.map((r) => modelDisplay(r.modelKey)).join('、')
+        // 多模型模式的深度思考：分别发送各模型思考过程
+        if (cfg.get('response.showReasoning', true) !== false) {
+          for (const r of ok) {
+            if (r.reasoning) {
+              try { await helper.replyReasoningAsChat(e, r.reasoning) } catch (_) {}
+            }
           }
         }
-      }
-    } else {
-      // 单模型：原有行为
-      const res = ok[0]
-      replyText = res ? res.text : `(模型调用出错：${userFacingLLMError(failed[0]?.message)})`
-      modelName = res?.modelName || ''
-      if (res?.reasoning && cfg.get('response.showReasoning', true) !== false) {
-        try {
-          await helper.replyReasoningAsChat(e, res.reasoning)
-        } catch (err) {
-          safeLogger.warn(`[ai0-plugin] 发送深度思考过程失败: ${err?.message || err}`)
+      } else {
+        // 单模型：原有行为
+        const res = ok[0]
+        replyText = res ? res.text : `(模型调用出错：${userFacingLLMError(failed[0]?.message)})`
+        modelName = res?.modelName || ''
+        if (res?.reasoning && cfg.get('response.showReasoning', true) !== false) {
+          try {
+            await helper.replyReasoningAsChat(e, res.reasoning)
+          } catch (err) {
+            safeLogger.warn(`[ai0-plugin] 发送深度思考过程失败: ${err?.message || err}`)
+          }
         }
       }
     }
@@ -998,7 +1029,7 @@ export async function handleChat(e) {
     if (isGroup && groupContext) {
       try {
         // 群操作同行评审（多模型一致确认，仅 multiChat 开启且 >=2 模型时生效）。
-        // 任一评审模型否决/出错/未明确 → 该操作取消，不进入执行链路。
+        // 参与评审模型需全部明确同意才放行；否决/能回复但读不出 y/n → 取消；调用异常模型排除出票。
         let execText = replyText
         let cancelReport = ''
         if (groupConfirm.isGroupReviewEnabled()) {
@@ -1065,6 +1096,31 @@ export async function handleChat(e) {
         }
       } catch (err) {
         safeLogger.error(`[ai0-plugin] 图片生成执行异常: ${err.message}`)
+      }
+    }
+
+    // 解析点歌指令并执行（[action:music:关键词]；仅当已注入点歌能力上下文时）
+    if (musicContext && /\[action:music:/i.test(replyText)) {
+      try {
+        const musicResult = await parseAndExecuteMusicAction(replyText, e)
+        if (musicResult) {
+          replyText = musicResult.cleanText
+          if (musicResult.ok) {
+            // 先发送 AI 正文（若有）；卡片/降级文本已在 parseAndExecuteMusicAction 内部发送
+            if (replyText.trim()) {
+              await helper.replyText(e, replyText)
+            }
+            const tag = musicResult.cardSent ? '已发送音乐卡片' : (musicResult.sentText ? '已为你点歌（文本分享）' : '已为你点歌')
+            const base = historyText.trim()
+            history.push({ role: 'assistant', content: (base ? base + '\n' : '') + `[${tag}]` })
+            llm.saveHistory(userId, sessionId, history)
+            return true
+          } else {
+            replyText = replyText + '\n\n❌ 点歌失败：' + musicResult.error
+          }
+        }
+      } catch (err) {
+        safeLogger.error(`[ai0-plugin] 点歌执行异常: ${err.message}`)
       }
     }
 
@@ -1215,4 +1271,26 @@ async function parseAndExecuteImageAction(replyText, userId) {
   }
 
   return { cleanText, ok: true, imageBuffer }
+}
+
+/**
+ * 从 AI 回复中解析点歌指令 [action:music:关键词] 并执行（搜索→发卡片/文本降级）。
+ * 返回 null 表示没有点歌指令；否则返回 { cleanText, ok, error?, cardSent?, sentText? }
+ */
+async function parseAndExecuteMusicAction(replyText, e) {
+  const re = /\[action:music:([^\]]+)\]/i
+  const m = String(replyText || '').match(re)
+  if (!m) return null
+  const keyword = m[1].trim().slice(0, 120)
+  const cleanText = String(replyText).replace(m[0], '').trim()
+  if (!keyword) {
+    return { cleanText, ok: false, error: '点歌关键词为空' }
+  }
+  safeLogger.info(`[ai0-plugin] 解析到点歌指令，关键词：${keyword.slice(0, 80)}`)
+  const res = await musicService.searchSongs({ keyword })
+  if (!res.ok) {
+    return { cleanText, ok: false, error: res.msg || '音乐搜索失败' }
+  }
+  const sent = await musicService.sendSongsResult(e, res.songs, { source: res.source })
+  return { cleanText, ok: sent.ok, cardSent: sent.sentCard, sentText: sent.text || '' }
 }

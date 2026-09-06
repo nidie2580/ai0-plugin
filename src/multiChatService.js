@@ -16,6 +16,7 @@ import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
 import * as chatLog from './chatLog.js'
 import * as chatService from './chatService.js'
+import * as deliberate from './deliberate.js'
 import { safeLogger } from './globals.js'
 
 const DEFAULT_SYSTEM_PROMPT = [
@@ -127,11 +128,13 @@ async function pickBestAnswer({ question, replies, modelDisplay }) {
  *   question:string,
  *   modelKeys?:string[],          // 选中的模型 key；缺省=全部已配置模型
  *   multiChat?:boolean,           // 是否让模型彼此看到历史发言
+ *   deliberate?:boolean|null,     // true=走"多模型协同"（先讨论再收敛成统一回复）；null/undefined=按配置
  * }} opts
  * @returns {Promise<{ok:boolean, replies:Array<{modelKey:string,model:string,text:string}>,
- *   best?:{model:string,text:string}|null, msg?:string}>}
+ *   best?:{model:string,text:string}|null,
+ *   deliberate?:boolean, final?:string, converged?:boolean, msg?:string}>}
  */
-export async function runWebMultiChat({ userId, userLabel, question, modelKeys, multiChat }) {
+export async function runWebMultiChat({ userId, userLabel, question, modelKeys, multiChat, deliberate: wantDeliberate }) {
   try {
     const cfgMM = cfg.get('chat.multiModel', {}) || {}
     const multiChatEnabled = cfgMM.multiChat !== false && multiChat !== false
@@ -148,6 +151,59 @@ export async function runWebMultiChat({ userId, userLabel, question, modelKeys, 
     const display = (k) => modelDisplayName(k)
     const questionStr = String(question || '').trim()
     if (!questionStr) return { ok: false, msg: '问题不能为空' }
+
+    // —— 多模型协同（讨论收敛）优先：至少 2 个模型且（配置开启 或 页面显式勾选） ——
+    const deliberateOn = chosen.length >= 2 && (wantDeliberate === true || (wantDeliberate == null && cfgMM.deliberate === true))
+    if (deliberateOn) {
+      const prior = getConversation(userId)
+      const delib = await deliberate.runDeliberation({
+        question: questionStr,
+        modelKeys: chosen,
+        maxRounds: Number.isInteger(Number(cfgMM.maxRounds)) ? Number(cfgMM.maxRounds) : undefined,
+        judgeKey: cfgMM.judgeModel || undefined,
+        history: prior,
+      })
+      if (!delib.ok) {
+        return { ok: false, msg: `多模型协同执行失败：${delib.msg || '未知错误'}` }
+      }
+      // 讨论过程平铺为气泡（供展示），最终收敛答案单独放在 final
+      const bubbleReplies = []
+      for (const round of delib.rounds) {
+        for (const en of round.entries) {
+          const txt = String(en.text || '').trim()
+          if (!txt) continue
+          bubbleReplies.push({ modelKey: en.modelKey, model: display(en.modelKey), text: txt, round: round.round })
+        }
+      }
+      // 写入内存会话：只存用户问题 + 统一最终答案（协同模式不把各模型 [*] 发言灌回上下文）
+      pushMessages(userId, [
+        { role: 'user', content: questionStr },
+        { role: 'assistant', content: delib.finalText },
+      ])
+      try {
+        if (bubbleReplies.length) {
+          chatLog.appendChatLog({
+            userId,
+            sessionId: 'web:' + userId,
+            question: questionStr.slice(0, 4000),
+            replies: [
+              ...bubbleReplies.map((r) => ({ model: `[轮${r.round}] ${r.model}`, text: r.text.slice(0, 8000) })),
+              { model: '多模型协同结论', text: delib.finalText.slice(0, 8000) },
+            ],
+          })
+        }
+      } catch (logErr) {
+        safeLogger.warn(`[ai0-plugin] 网页协同写日志失败: ${logErr?.message || logErr}`)
+      }
+      return {
+        ok: true,
+        deliberate: true,
+        converged: delib.converged,
+        final: delib.finalText,
+        replies: bubbleReplies,
+        best: { model: '多模型协同结论', text: delib.finalText },
+      }
+    }
 
     // —— 组装请求历史：system + 内存会话历史 + 本轮用户消息 ——
     const sysPrompt = getSystemPrompt()

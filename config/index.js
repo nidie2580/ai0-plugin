@@ -108,6 +108,51 @@ chat:
   # 全局AI模式下忽略的消息前缀（以这些开头的消息不触发AI回复，比如命令）
   globalAIIgnorePrefix: ['#', '/', '！']
 
+  # --- 点歌能力（AI 对话内点歌） ---
+  # @机器人说"点歌 XXX / 来首歌 / 推荐首歌" → AI 输出 [action:music:关键词] →
+  # 系统搜索 QQ音乐/网易云并发卡片；拿不到可播直链时自动降级为文本分享（歌名-歌手-来源页链接）。
+  music:
+    # 总开关：false 时 AI 完全不知道有点歌能力
+    enabled: false
+    # 搜索源：qq（QQ音乐） | netease（网易云音乐）
+    source: qq
+    # 一次点歌最多展示条数（1-5）
+    maxResults: 3
+    # 是否尝试为 QQ 音乐换取可播直链再发卡片（部分出口 IP 被风控会失败，自动降级文本）
+    tryPlayUrl: true
+    # QQ 音乐源可选 Cookie（部分风控环境需要：浏览器登录 https://y.qq.com 后复制整段 Cookie）
+    qq:
+      cookie: ""
+    # 网易云源可选 Cookie（网易云公开搜索接口风控较严，建议填入登录 Cookie 提升可用性）
+    netease:
+      cookie: ""
+
+  # --- 多模型协同（先商量、再统一回复）+ 多模型互聊 ---
+  # multiModel.enabled 开启后，配合 deliberate 让多个模型先互相讨论，收敛成一条统一回复，
+  # 而不是各自作答刷屏（QQ 群聊只发最终一条；网页互聊页展示讨论过程与最终结论）。
+  multiModel:
+    # 总开关
+    enabled: false
+    # 模型间是否互看历史发言（多模型"AI 群聊"）
+    multiChat: false
+    # 群操作同行评审：执行前让其他模型一致确认（安全门，建议保持 true）
+    groupConfirm: true
+    # 是否允许 "/<模型名>" 艾特单独追问某模型
+    atModel: true
+    # —— 协同讨论收敛 ——
+    # true → 各模型多轮讨论后输出一条统一回复（QQ 群聊只发最终一条）。
+    deliberate: false
+    # 讨论最多轮数（2-8，默认 3；达到上限未收敛由裁判模型综合）
+    maxRounds: 3
+
+  # --- 防 AI 互聊无限循环 ---
+  # 群里若存在多个机器人互相 @ 会形成自激循环，以下参数自动打断：
+  loopGuard:
+    enabled: true
+    windowMs: 20000
+    maxReplies: 4
+    cooldownMs: 60000
+
 # 群操作设置（踢出/禁言/设置管理员/授头衔）
 groupOps:
   # 总开关
@@ -153,6 +198,8 @@ groupOps:
   allowCustomTitle: true
   # 允许等级头衔
   allowLevelTitle: true
+  # 允许撤回消息（recall：消息id制/引用制；撤自己/机器人消息无需权限，撤他人消息需群管理权限）
+  allowRecall: true
 
 # 图片生成设置
 imageGen:
