@@ -270,6 +270,7 @@ if (route === 'dashboard') {
     const mmCfg = resp.config.chat?.multiModel || {}
     $('#chat_multiModel_enabled').value = String(mmCfg.enabled ?? false)
     $('#chat_multiModel_multiChat').value = String(mmCfg.multiChat ?? false)
+    $('#chat_multiModel_groupConfirm').value = String(mmCfg.groupConfirm ?? true)
     $('#chat_multiModel_atModel').value = String(mmCfg.atModel ?? true)
     const lgCfg = resp.config.chat?.loopGuard || {}
     $('#chat_loopGuard_enabled').value = String(lgCfg.enabled ?? true)
@@ -390,6 +391,7 @@ if (route === 'dashboard') {
       multiModel: {
         enabled: $('#chat_multiModel_enabled').value === 'true',
         multiChat: $('#chat_multiModel_multiChat').value === 'true',
+        groupConfirm: $('#chat_multiModel_groupConfirm').value === 'true',
         atModel: $('#chat_multiModel_atModel').value === 'true'
       },
       loopGuard: {

@@ -841,6 +841,9 @@ export function createApp() {
         if (mm.atModel != null && typeof mm.atModel !== 'boolean') {
           return res.json({ ok: false, msg: 'chat.multiModel.atModel 必须为布尔值' })
         }
+        if (mm.groupConfirm != null && typeof mm.groupConfirm !== 'boolean') {
+          return res.json({ ok: false, msg: 'chat.multiModel.groupConfirm 必须为布尔值' })
+        }
       }
     }
     const g = config.groupOps
