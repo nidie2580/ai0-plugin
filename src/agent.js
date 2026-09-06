@@ -266,6 +266,94 @@ function firstCommand(seg) {
   return m ? m[0] : ''
 }
 
+// —— 引号感知 token 化，但保留引号内文本（用于解析命令的路径参数） ——
+// 与 hasDangerousRm 的分词不同：这里把 'a b' / "a b" 当作一个完整参数值保留。
+function tokenizeKeepQuoted(seg) {
+  const tokens = []
+  let cur = ''
+  let i = 0
+  const push = (c) => { if (c) tokens.push(c); cur = '' }
+  while (i < seg.length) {
+    const ch = seg[i]
+    if (ch === '"' || ch === "'") {
+      const q = ch
+      i++
+      while (i < seg.length && seg[i] !== q) { cur += seg[i]; i++ }
+      i++ // 跳过闭合引号
+      push(cur)
+      continue
+    }
+    if (ch === '\\' && i + 1 < seg.length) { cur += seg[i + 1]; i += 2; continue }
+    if (/\s/.test(ch)) { push(cur); i++; continue }
+    cur += ch
+    i++
+  }
+  push(cur)
+  return tokens
+}
+
+// —— 文件路径参数 realpath 边界：防止经软链 / /proc 等逃逸出工作区 ——
+// 白名单命令本身含 ln，且 cwd 已 realpath 锁定，但命令参数（尤其是 ln -s 的目标、
+// cat/head/tail/cp/mv/rm 等的文件参数）若不校验，攻击者可「软链到 /proc/self/environ 再读取」
+// 或直接 cat 工作区外的非敏感目录名单内路径（如 /proc）。这里对"文件类命令"的每个非选项参数
+// 做 realpath 解析，最终必须落在 workspace 内；文件不存在时回退校验父目录 realpath。
+const FILE_PATH_COMMANDS = new Set([
+  'cat', 'head', 'tail', 'wc', 'stat', 'file', 'du', 'diff', 'cmp', 'cp', 'mv', 'rm',
+  'chmod', 'touch', 'ln', 'gzip', 'gunzip', 'tar', 'unzip', 'zip', 'readlink', 'rg', 'fd',
+])
+
+function assertFileArgsInWorkspace(cmd) {
+  let realRoot = null
+  try { realRoot = fs.realpathSync.native(WORKSPACE) } catch (_) { return { ok: true } } // workspace 缺失不拦
+  const segs = splitSegments(cmd)
+  for (const seg of segs) {
+    const c0 = firstCommand(seg)
+    if (!FILE_PATH_COMMANDS.has(c0)) continue
+    const tokens = tokenizeKeepQuoted(seg).slice(1) // 去掉命令本身
+    for (const tk of tokens) {
+      if (!tk) continue
+      if (tk.startsWith('-')) continue
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(tk)) continue // URL，非本地路径
+      const abs = path.isAbsolute(tk) ? tk : path.resolve(WORKSPACE, tk)
+      let real = null
+      try { real = fs.realpathSync.native(abs) } catch (_) {
+        try { real = fs.realpathSync.native(path.dirname(abs)) } catch (_2) { real = null }
+      }
+      if (real == null) continue // 父目录也不存在，交由上层命令自然失败，不硬拦
+      if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+        return { ok: false, reason: `参数路径超出工作区沙箱：${tk}` }
+      }
+    }
+  }
+  return { ok: true }
+}
+
+// —— 解释器纵深防御：即使管理员在 extraAllowedCommands 放开了 node/python/npm 等解释器，
+// 也禁止用 -c / -e / -p / --eval / --print 等"内联代码求值"参数（解释器可执行任意代码、
+// 读写任意文件、发起任意网络请求，天然绕过白名单/黑名单）。禁止管道把解释器输出喂给 shell。
+const INTERPRETER_COMMANDS = new Set([
+  'node', 'nodejs', 'python', 'python3', 'python2', 'pythonw', 'ruby', 'perl', 'php', 'lua',
+  'deno', 'bun', 'npm', 'npx', 'yarn', 'pnpm', 'pip', 'pip3', 'coffee', 'ts-node',
+])
+const INTERPRETER_INLINE_CODE_RE = /(?:^|[\s])-(?:c|e|p)(?![a-zA-Z])|--eval\b|--print\b|--execute\b/
+
+function assertNoInlineInterpreterCode(cmd) {
+  const segs = splitSegments(cmd)
+  for (const seg of segs) {
+    const c0 = firstCommand(seg)
+    if (!INTERPRETER_COMMANDS.has(c0)) continue
+    // 解释器出现了 → 无论是否被白名单放开，一律禁止内联代码参数
+    if (INTERPRETER_INLINE_CODE_RE.test(seg)) {
+      return { ok: false, reason: `解释器禁止内联代码参数（-c/-e/--eval 等）: ${c0}` }
+    }
+    // 解释器输出管道到 shell 也禁止（防 webshell 链）
+    if (/\|\s*(?:ba|z|f|da)?sh\b/.test(seg) || /\|\s*(?:python|python3|perl|ruby|node)\b/.test(seg)) {
+      return { ok: false, reason: '解释器禁止作为管道到 shell/解释器执行' }
+    }
+  }
+  return { ok: true }
+}
+
 /**
  * 校验一条命令是否允许执行。
  * @returns {{ ok: boolean, reason?: string, cmd?: string }}
@@ -302,6 +390,9 @@ export function checkCommand(rawCmd, opts = {}) {
   if (/(?:^|\s)\.\.(?:\/|\\|$|\s)/.test(cmd)) return { ok: false, reason: '路径穿越：禁止访问工作区之外的目录（..）' }
   // 3d) 全局：进程替换 <( ) 和 >( ) — 绕过白名单执行任意命令
   if (/[<>]\(/.test(cmd)) return { ok: false, reason: '禁止进程替换 <( 和 >(' }
+  // 3e) 解释器纵深防御：禁 -c/-e/--eval 内联代码与管道到 shell（对已进 extraAllowed 的解释器同样生效）
+  const interpCheck = assertNoInlineInterpreterCode(cmd)
+  if (!interpCheck.ok) return { ok: false, reason: interpCheck.reason }
 
   // 4) 引号感知拆分，逐段校验首命令白名单
   const segs = splitSegments(cmd)
@@ -312,6 +403,10 @@ export function checkCommand(rawCmd, opts = {}) {
     if (c0.includes('/')) return { ok: false, reason: `不允许路径形式命令: ${c0}` }
     if (!allowed.has(c0)) return { ok: false, reason: `命令不在白名单: ${c0}` }
   }
+
+  // 5) 文件路径参数 realpath 边界（防软链 / /proc / .. 逃逸出工作区）
+  const pathCheck = assertFileArgsInWorkspace(cmd)
+  if (!pathCheck.ok) return { ok: false, reason: pathCheck.reason }
 
   return { ok: true, cmd }
 }

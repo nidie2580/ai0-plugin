@@ -177,3 +177,64 @@ describe('agent: workspace 初始化', () => {
     }
   })
 })
+
+describe('agent: B4 文件路径参数 realpath 边界', () => {
+  test('白名单文件类命令访问工作区外路径被拒绝', async () => {
+    const cfg = await import('../../config/index.js')
+    const agent = await import('../../src/agent.js')
+    const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+    const fs = await import('node:fs')
+    agent.initWorkspaceFiles() // 确保 WORKSPACE 存在，realpath 边界才生效
+    const backupExists = fs.existsSync(CONFIG_PATH)
+    const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
+    // agent.enabled 需 true 才走真实 WORKSPACE 分支，但 checkCommand 不依赖 enabled；这里只注入最少配置
+    cfg.setForceLoad(true)
+    try {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ agent: { maxRounds: 5 } }), 'utf-8')
+      // /proc 体系文件（常见渗透目标）应被拦截
+      assert.equal(checkCommand('cat /proc/self/environ').ok, false)
+      assert.equal(checkCommand('cat /etc/passwd').ok, false)
+      // ln -s 指向工作区外同样拦截
+      assert.equal(checkCommand('ln -s /etc/shadow ./l').ok, false)
+    } finally {
+      if (backupExists) fs.writeFileSync(CONFIG_PATH, backupContent, 'utf-8')
+      else if (fs.existsSync(CONFIG_PATH)) fs.unlinkSync(CONFIG_PATH)
+      cfg.setForceLoad(false)
+    }
+  })
+
+  test('工作区内路径、URL、非路径参数不误伤', () => {
+    assert.equal(checkCommand('cat ./a.txt').ok, true)
+    assert.equal(checkCommand('grep foo ./src/x.js').ok, true)
+    assert.equal(checkCommand('curl -s https://example.com').ok, true)
+    assert.equal(checkCommand('grep foo -r ./src').ok, true)
+  })
+})
+
+describe('agent: 解释器纵深防御（extraAllowed 放开后仍禁内联代码）', () => {
+  test('node/python 被 extraAllowed 放开时，-c/-e/--eval 仍拒绝', async () => {
+    const cfg = await import('../../config/index.js')
+    const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+    const fs = await import('node:fs')
+    const backupExists = fs.existsSync(CONFIG_PATH)
+    const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
+    cfg.setForceLoad(true)
+    try {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ agent: { extraAllowedCommands: ['node', 'python3'] } }), 'utf-8')
+      // 正常脚本文件放行
+      assert.equal(checkCommand('node ./script.js').ok, true)
+      assert.equal(checkCommand('python3 ./main.py').ok, true)
+      // 内联代码参数一律拦截（纵深防御）
+      assert.equal(checkCommand('node -e "process.exit(1)"').ok, false)
+      assert.equal(checkCommand('node -e1').ok, false)
+      assert.equal(checkCommand('python3 -c "print(1)"').ok, false)
+      assert.equal(checkCommand('python3 --eval "print(1)"').ok, false)
+      // 解释器管道到 shell 拦截
+      assert.equal(checkCommand('node -v | bash').ok, false)
+    } finally {
+      if (backupExists) fs.writeFileSync(CONFIG_PATH, backupContent, 'utf-8')
+      else if (fs.existsSync(CONFIG_PATH)) fs.unlinkSync(CONFIG_PATH)
+      cfg.setForceLoad(false)
+    }
+  })
+})

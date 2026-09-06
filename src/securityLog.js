@@ -13,6 +13,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import * as cfg from '../config/index.js'
 import { safeLogger, sanitizeLog } from './globals.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -21,6 +22,40 @@ const PLUGIN_ROOT = path.join(__dirname, '..')
 const HISTORY_DIR = path.join(PLUGIN_ROOT, 'data', 'history')
 const SECURITY_LOG_DIR = path.join(PLUGIN_ROOT, 'logs', 'security')
 const SECURITY_LOG_FILE = path.join(SECURITY_LOG_DIR, 'security.log')
+
+// —— 安全审计日志轮转：security.log 按大小滚动，保留最近 N 份，防止持续失败请求把磁盘灌爆 ——
+function logRotateConfig() {
+  const c = cfg.get('securityLog', {}) || {}
+  const maxBytes = Number(c.maxBytes)
+  const maxFiles = Number(c.maxFiles)
+  return {
+    // 默认 10MB，允许配置覆盖（最小 1KB 便于测试，最大 1GB）
+    maxBytes: Number.isFinite(maxBytes) && maxBytes >= 1024 ? Math.min(maxBytes, 1024 * 1024 * 1024) : 10 * 1024 * 1024,
+    // 默认保留 5 份，允许配置（1~50）
+    maxFiles: Number.isInteger(maxFiles) && maxFiles >= 1 ? Math.min(maxFiles, 50) : 5,
+  }
+}
+
+function rotateSecurityLogIfNeeded() {
+  try {
+    if (!fs.existsSync(SECURITY_LOG_FILE)) return
+    const { maxBytes, maxFiles } = logRotateConfig()
+    const st = fs.statSync(SECURITY_LOG_FILE)
+    if (st.size < maxBytes) return
+    const ts = new Date().toISOString().replace(/[:.]/g, '-')
+    const dest = path.join(SECURITY_LOG_DIR, `security.${ts}.log`)
+    fs.renameSync(SECURITY_LOG_FILE, dest)
+    // 清理最旧的，仅保留 maxFiles 份
+    const files = fs.readdirSync(SECURITY_LOG_DIR)
+      .filter((f) => /^security\..+\.log$/.test(f))
+      .map((f) => ({ f, m: fs.statSync(path.join(SECURITY_LOG_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.m - a.m)
+    for (const x of files.slice(maxFiles)) {
+      try { fs.unlinkSync(path.join(SECURITY_LOG_DIR, x.f)) } catch (_) {}
+    }
+    safeLogger.warn(`[ai0-plugin] 安全审计日志已轮转 -> ${dest}（保留 ${maxFiles} 份）`)
+  } catch (_) {}
+}
 
 /** 各事件 kind 对应的风险标签（用于会话列表标注）；不在映射里的不算风险 */
 const RISK_LABELS = {
@@ -87,9 +122,10 @@ export function recordSecurityEvent(ev = {}) {
     reason: ev.reason ? sanitizeLog(ev.reason).slice(0, 300) : undefined,
     detail: ev.detail ? sanitizeLog(ev.detail).slice(0, 500) : undefined,
   }
-  // 1) 审计日志流（JSONL）
+  // 1) 审计日志流（JSONL）—— 写入前先做大小轮转
   try {
     ensureDir(SECURITY_LOG_DIR)
+    rotateSecurityLogIfNeeded()
     fs.appendFileSync(SECURITY_LOG_FILE, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 })
   } catch (err) {
     safeLogger.error(`[ai0-plugin] 安全审计日志写入失败: ${err?.message || err}`)

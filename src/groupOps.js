@@ -893,10 +893,12 @@ export async function buildGroupContext(e) {
   lines.push('  好的，我来帮你禁言该成员10分钟。')
   lines.push('  [action:mute:123:600]')
   lines.push('')
-  lines.push('【信息获取类操作（只读，无需权限）】')
-  lines.push('这类操作只是读取群内信息，不产生任何群变更，任何群成员请求均可执行。输出格式同上：')
+  const listPolicy = cfg.get('groupOps.allowMemberListFor', 'member')
+  const listWho = listPolicy === 'master' ? '仅机器人主人可查询' : (listPolicy === 'admin' ? '管理员/机器人主人可查询' : '任何群成员均可查询')
+  lines.push(`【信息获取类操作（只读）】`)
+  lines.push(`这类操作只是读取群内信息，不产生任何群变更。成员列表查询权限：${listWho}（只有请求者符合该身份时才应输出指令）。输出格式同上：`)
   lines.push('  查群成员列表（可选关键词，如输入 @某人昵称）:[action:member_list:关键词]   —— 不写关键词（写成 [action:member_list:]）即返回全体成员')
-  lines.push('  例：用户问"群里都有谁/查一下小明的QQ"，你可输出 [action:member_list:小明] 获取结果后再按实际需求回复用户。')
+  lines.push('  例：用户问"群里都有谁/查一下小明的QQ"，你可输出 [action:member_list:小明] 获取结果后再按实际需求回复用户。描述成员列表时注意：仅在请求者有权查询时，才泄露具体成员；无权时只说明"无权限"。')
   lines.push('')
   lines.push('重要规则：')
   lines.push('  1) 你必须先判断请求者是否有权限、目标是否受保护，如果无权或受保护，拒绝并说明原因，不要输出操作指令。')
@@ -1215,8 +1217,16 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
       }
 
       // —— 4 条硬验证（本地判定，不依赖 AI）——
-      // 信息获取类操作只读，不校验群主/管理员权限（任何群成员请求获取群信息都合法）
-      if (!INFO_ACTIONS.has(type)) {
+      if (type === 'member_list') {
+        // member_list：只读信息获取，但"谁可查"按配置收敛。
+        //   allowMemberListFor = 'member'(默认历史行为：任何成员) | 'admin'(仅管理员/主人) | 'master'(仅机器人主人)
+        const listPolicy = cfg.get('groupOps.allowMemberListFor', 'member')
+        if (listPolicy === 'admin' && !requesterElevated) {
+          results.push({ type, ok: false, msg: '仅管理员/机器人主人可查询群成员列表' }); continue
+        } else if (listPolicy === 'master' && !requesterIsMaster) {
+          results.push({ type, ok: false, msg: '仅机器人主人可查询群成员列表' }); continue
+        }
+      } else if (!INFO_ACTIONS.has(type)) {
         const perm = await verifyGroupOpPermission(type, groupId, targetUid, e)
         if (!perm.ok) {
           results.push({ type, ok: false, msg: perm.reason })
