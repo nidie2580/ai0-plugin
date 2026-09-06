@@ -868,6 +868,8 @@ export async function handleChat(e) {
   let replyText = ''
   let modelName = ''
   let multiModelReplies = []   // 多模型模式下各模型的回答（含 modelKey/text/modelName），供落历史时以 [*] 前缀标记
+  let groupOpConsensus = false // 多模型协同收敛出的回复=参与模型已达成的统一意见；其内群操作无需再做同行评审 y/n
+  let mmExpectedResponders = 0 // 本轮多模型并行应返回的模型数（判断"是否全部模型都给出了回复"）
 
   // 并发控制：同一用户同一会话的新请求 → 取消正在飞的旧请求（防止"先发后到"的串上下文）
   // 再做一层超时保险：AbortController 配合 axios 的 signal，同时给 model timeout 留余地
@@ -949,10 +951,19 @@ export async function handleChat(e) {
       })
       // 协同模式历史只保留最终一条（不注入各模型 [*] 发言，避免污染下一轮上下文）
       multiModelReplies = []
+      mmExpectedResponders = 0
       replyText = delib.ok ? delib.finalText : `(多模型协同失败：${delib.msg || '未知错误'})`
       modelName = activeModelKeys.map((k) => modelDisplay(k)).join('、')
+      // 达成收敛 = 参与模型已就同一版本互相表态过半同意，回复中的群操作即团队已认可：
+      // 后续只需校验权限合法性并执行，不再二次发起同行评审 y/n。
+      if (delib.ok && delib.converged) {
+        groupOpConsensus = true
+        safeLogger.info(`[ai0-plugin] 多模型协同已收敛：其内群操作视为全员同意，跳过同行评审二次确认`)
+      }
       safeLogger.info(`[ai0-plugin] 多模型协同完成：收敛=${delib.converged} 轮次=${delib.rounds.length} 模型=${activeModelKeys.length}`)
     } else {
+      // 并行模式：记录本轮应参与的模型数，用于判定"全部模型是否都输出了同一个群操作指令"
+      mmExpectedResponders = activeModelKeys.length
       // 从已持久化 history 中提取"其他模型的 [*] 发言"，聚合成"本轮用户消息之外"的对话背景。
       // 这样开启 multiChat 后，模型在下一轮就能看到彼此此前说过的话 → 形成可持续的多轮 AI 聊天。
       const archiveReplies = collectArchiveReplies(reqHistory)
@@ -1030,9 +1041,20 @@ export async function handleChat(e) {
       try {
         // 群操作同行评审（多模型一致确认，仅 multiChat 开启且 >=2 模型时生效）。
         // 参与评审模型需全部明确同意才放行；否决/能回复但读不出 y/n → 取消；调用异常模型排除出票。
+        // 特例：回复来自"多模型协同讨论"且已收敛(groupOpConsensus)——收敛本身已让参与模型就同一版本
+        // 表态过半同意，其内群操作即团队认可，不再重复发起 y/n 评审，直接走权限校验与执行。
+        // 并行模式同理：全部参与模型都输出了同一条操作指令(unanimousOp) = 大家已一致认可该操作。
         let execText = replyText
         let cancelReport = ''
-        if (groupConfirm.isGroupReviewEnabled()) {
+        let unanimousOp = false
+        if (!groupOpConsensus && mmExpectedResponders > 0 && multiModelReplies.length === mmExpectedResponders) {
+          const tagRe = /\[action:[^\]]*\]/g
+          const tags = [...new Set(String(replyText).match(tagRe) || [])]
+          if (tags.length) {
+            unanimousOp = tags.every((tag) => multiModelReplies.every((r) => String(r.text || '').includes(tag)))
+          }
+        }
+        if (!groupOpConsensus && !unanimousOp && groupConfirm.isGroupReviewEnabled()) {
           const { verdicts } = await groupConfirm.reviewGroupActions({
             replyText, groupId, e, userText: pureText
           })
