@@ -79,8 +79,10 @@
         <label>模型间互聊 <select id="chat_multiModel_multiChat"><option value="false">关闭</option><option value="true">开启</option></select></label>
         <label>群操一致性确认 <select id="chat_multiModel_groupConfirm"><option value="true">开启</option><option value="false">关闭</option></select></label>
         <label>艾特指定模型 <select id="chat_multiModel_atModel"><option value="true">开启</option><option value="false">关闭</option></select></label>
+        <label>多模型协同讨论 <select id="chat_multiModel_deliberate"><option value="false">关闭</option><option value="true">开启</option></select></label>
+        <label>协同最大讨论轮数 <input id="chat_multiModel_maxRounds" type="number" min="2" max="8"/></label>
       </div>
-      <p class="hint">多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。「艾特指定模型」允许用 /模型名 把消息单独转给某个模型。「群操一致性确认」：互聊开启时，AI 回复里带出的群操作会先转发给其他模型确认，任一否决则取消。注意：并行回答会成倍增加模型 API 调用次数。</p>
+      <p class="hint">多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。「艾特指定模型」允许用 /模型名 把消息单独转给某个模型。「群操一致性确认」：互聊开启时，AI 回复里带出的群操作会先转发给其他模型确认，任一否决则取消。「多模型协同讨论」：≥2 个模型先互相商量（各自输出立场→可同意他人版本→本地判定收敛），达成过半共识即输出一份统一回复；达最大轮数未收敛则由裁判模型综合。开启后群聊只发最终一条结论，不再逐个刷屏。注意：并行回答会成倍增加模型 API 调用次数。</p>
 
       <hr>
       <h3>防 AI 互聊循环</h3>
@@ -91,6 +93,18 @@
         <label>冷却时长(ms) <input id="chat_loopGuard_cooldownMs" type="number" min="1000" max="3600000"/></label>
       </div>
       <p class="hint">群里同时存在多个机器人时，它们可能互相 @ 形成无限互答烧 token。此机制在「同群同账号短窗口内连续回复达上限」时判定为疑似循环，进入冷却静默。正常人类间歇聊天几乎不会误判。关闭总开关即停用该保护。</p>
+
+      <hr>
+      <h3>点歌设置</h3>
+      <div class="grid-2">
+        <label>点歌开关 <select id="chat_music_enabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
+        <label>默认音源 <select id="chat_music_source"><option value="qq">QQ音乐</option><option value="netease">网易云音乐</option></select></label>
+        <label>最大返回条数 <input id="chat_music_maxResults" type="number" min="1" max="5"/></label>
+        <label>尝试获取可播直链 <select id="chat_music_tryPlayUrl"><option value="true">开启</option><option value="false">关闭</option></select></label>
+        <label>QQ音乐 Cookie <input id="chat_music_qq_cookie" placeholder="可选，遇风控时填写"/></label>
+        <label>网易云 Cookie <input id="chat_music_netease_cookie" placeholder="可选，遇风控时填写"/></label>
+      </div>
+      <p class="hint">开启后，AI 对话内识别到点歌/推荐歌意图即自动搜索并发送音乐卡片；拿不到可播直链时自动降级为文本链接。Cookie 仅用于搜索接口提权，请勿填入包含敏感信息的长 Cookie；若不确定可留空使用匿名搜索。</p>
 
       <hr>
       <h3>Agent 配置</h3>
@@ -222,6 +236,11 @@
           <strong>参与模型：</strong>
           <div id="micModelList" class="chips">加载中…</div>
         </div>
+
+        <label class="inline-toggle" style="margin:4px 0 10px" title="开启后所有参与模型先互相商量，再输出一份统一回复；勾选状态保存于本页">
+          <input type="checkbox" id="micDeliberate"/>
+          协同讨论（先商量，输出一份统一回复）
+        </label>
 
         <div class="mic-chat" id="micChatBox">
           <p class="empty">选择模型并发送消息开始互聊。</p>

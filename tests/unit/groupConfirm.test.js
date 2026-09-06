@@ -5,11 +5,13 @@ import * as cfg from '../../config/index.js'
 
 // 群操作「同行评审」（多模型一致确认）回归测试
 // 覆盖点：
-//  - G1：parseGroupActions —— 只提取群操作 [action:*]，跳过 image/agent 等非群操作。
+//  - G1：parseGroupActions —— 只提取群操作 [action:*]，跳过 image/agent/member_list 等非评审操作；
+//        recall（撤回消息）目标是无QQ目标类型，targetUid=null。
 //  - G2：isGroupReviewEnabled —— 需 multiModel.enabled && multiChat!==false 且可用模型>=2 才开启。
 //  - G3：评测模型不足 2 个 → 全部取消（安全优先，无真正"其他模型"可确认）。
-//  - G4：任一评审模型否决/无法解析/出错 → 该操作取消。
-//  - G5：全部评审模型一致同意 → ok。无目标操作 targetUid=null。
+//  - G4：参与评审模型否决(n) / 能回复但读不出 y/n(unknown) → 该操作取消。
+//  - G5：全部参与评审模型一致同意(y) → ok（调用异常模型已排除，不计入投票集）。
+//  - G6：评审模型调用异常 → 排除出票；仅剩的参与模型一致同意时放行；无任何参与者 → 取消。
 
 const svc = await import('../../src/groupConfirm.js')
 
@@ -68,6 +70,14 @@ describe('群操作同行评审', () => {
       const out = svc.parseGroupActions('[action:mute_all:10]')
       assert.equal(out[0].targetUid, null)
     })
+
+    it('recall（撤回消息）属于无目标类型，targetUid 为 null 且可被评审解析', () => {
+      const out = svc.parseGroupActions('撤回它 [action:recall:889988998899]')
+      assert.equal(out.length, 1)
+      assert.equal(out[0].type, 'recall')
+      assert.equal(out[0].targetUid, null)
+      assert.equal(out[0].args.join(':'), '889988998899')
+    })
   })
 
   describe('G2: isGroupReviewEnabled', () => {
@@ -117,12 +127,6 @@ describe('群操作同行评审', () => {
       assert.match(r.verdicts[0].reasons.join(';'), /未明确/)
     })
 
-    it('评审模型调用出错 → 取消', async () => {
-      writeConfig({ chat: { multiModel: { enabled: true, multiChat: true } } })
-      const boom = async () => { throw new Error('boom') }
-      const r = await svc.reviewGroupActions({ replyText: '[action:ban:123:60]', groupId: '1', userText: 'hi', judgeFn: boom })
-      assert.equal(r.verdicts[0].ok, false)
-    })
   })
 
   describe('G5: 全部一致同意 → ok', () => {
@@ -132,6 +136,47 @@ describe('群操作同行评审', () => {
       assert.equal(r.verdicts.length, 1)
       assert.equal(r.verdicts[0].ok, true)
       assert.match(r.verdicts[0].reasons.join(';'), /一致同意/)
+    })
+  })
+
+  describe('G6: 评审模型调用异常 → 排除出票', () => {
+    // judgeFn 通过 opts.modelKey 区分模型：deepseek 抛异常，openai-compatible 正常投票
+    const partialBoom = (replies) => async (msgs, opts) => {
+      if (opts?.modelKey === 'deepseek') throw new Error('boom')
+      const prompt = msgs.find((m) => m.role === 'user')?.content || ''
+      const m = prompt.match(/\[action:(\w+):([^\]]*)\]/)
+      return { text: replies[m ? m[0] : ''] ?? 'y', ok: true }
+    }
+
+    it('部分模型异常 + 剩余模型全部 y → 放行（排除出票不计票）', async () => {
+      writeConfig({ chat: { multiModel: { enabled: true, multiChat: true } } })
+      const r = await svc.reviewGroupActions({ replyText: '[action:ban:123:60]', groupId: '1', userText: 'hi', judgeFn: partialBoom({ '[action:ban:123:60]': 'y' }) })
+      assert.equal(r.verdicts[0].ok, true)
+      assert.match(r.verdicts[0].reasons.join(';'), /一致同意/)
+      assert.match(r.verdicts[0].reasons.join(';'), /1 个调用异常模型已排除出票/)
+    })
+
+    it('部分模型异常 + 剩余模型否决 → 取消', async () => {
+      writeConfig({ chat: { multiModel: { enabled: true, multiChat: true } } })
+      const r = await svc.reviewGroupActions({ replyText: '[action:ban:123:60]', groupId: '1', userText: 'hi', judgeFn: partialBoom({ '[action:ban:123:60]': 'n' }) })
+      assert.equal(r.verdicts[0].ok, false)
+      assert.match(r.verdicts[0].reasons.join(';'), /否决/)
+      assert.match(r.verdicts[0].reasons.join(';'), /已排除出票/)
+    })
+
+    it('全部模型调用异常（无参与者）→ 取消', async () => {
+      writeConfig({ chat: { multiModel: { enabled: true, multiChat: true } } })
+      const boom = async () => { throw new Error('boom') }
+      const r = await svc.reviewGroupActions({ replyText: '[action:ban:123:60]', groupId: '1', userText: 'hi', judgeFn: boom })
+      assert.equal(r.verdicts[0].ok, false)
+      assert.match(r.verdicts[0].reasons.join(';'), /全部调用异常，无参与者可确认/)
+    })
+
+    it('recall 操作同样参与评审（异常排除、参与需全 y）', async () => {
+      writeConfig({ chat: { multiModel: { enabled: true, multiChat: true } } })
+      const r = await svc.reviewGroupActions({ replyText: '[action:recall:889988998899]', groupId: '1', userText: '撤回那条', judgeFn: makeJudgeFn({ '[action:recall:889988998899]': 'y' }) })
+      assert.equal(r.verdicts[0].type, 'recall')
+      assert.equal(r.verdicts[0].ok, true)
     })
   })
 })

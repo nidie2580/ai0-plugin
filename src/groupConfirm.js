@@ -6,10 +6,12 @@
  * 模型误判要封禁/踢出管理员"一类风险。因此：在执行前，把该操作连同用户消息、上下文，
  * 转发给【其他模型】做合理性确认（y/n）。
  *
- * 规则（与需求一致）：
+ * 规则（与需求一致，2026-09 修订）：
  *  1) 仅在多模型互聊开启（multiChat=true）且存在其他可用模型时生效。
- *  2) 任一确认模型否决(n) / 出错 / 未回应 / 无法解析 → 该操作按取消处理（安全优先）。
- *  3) 只有全部确认模型一致同意(y)且随后权限校验通过，才真正执行。
+ *  2) 调用异常（超时/网络错/接口失败）的评审模型「排除出票」，不计入投票集；
+ *     已参与评审的模型必须全部明确同意(y) 才放行。
+ *  3) 能正常回复但读不出 y/n 的评审模型，视为否决 → 该操作按取消处理（安全优先）。
+ *     所有评审模型均调用异常（无任何参与者）时也无法确认 → 取消。
  *  4) 评审确认是"前置门"，独立于 groupOps 的 4 条硬验证与权限校验。
  *
  * 全程吞异常：评审失败不抛错，只影响"该操作是否放行"。
@@ -20,9 +22,10 @@ import { safeLogger } from './globals.js'
 
 // 群操作指令匹配（与 groupOps 一致：非群操作 image/agent 跳过）
 const ACTION_RE = /\[action:(\w+):([^\]]*)\]/g
-const NON_GROUP_ACTIONS = new Set(['image', 'agent', 'member_list'])
+const NON_GROUP_ACTIONS = new Set(['image', 'agent', 'member_list', 'music'])
 // 无目标型群操作：targetUid 取空。
-const NO_TARGET_ACTIONS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search', 'member_list'])
+// recall（撤回消息）：目标是消息 id，不是 QQ 号，同样按无目标处理（targetUid=null）。
+const NO_TARGET_ACTIONS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search', 'member_list', 'recall'])
 
 /**
  * 判断当前是否启用「群操作同行评审」：
@@ -90,27 +93,33 @@ function parseYorN(text) {
 
 /**
  * 让单个评审模型对全部待评审操作做一次判定。可用 judgeFn 注入以测试。
+ * 判定值约定（对应评审聚合规则）：
+ *   'y'       → 明确同意
+ *   'n'       → 明确否决
+ *   'unknown' → 模型正常响应，但读不出 y/n（视为否决，安全优先）
+ *   'error'   → 模型调用异常（超时/网络错等），排除出票，不计入投票集
  * @param {{judgeKey:string, actions:Array, userText:string, requesterUid:string,
  *   groupId:string, groupContextText:string, judgeFn?:Function}} opts
- * @returns {Promise<Map<string,string>>} full → 'y' | 'n' | 'unknown'
+ * @returns {Promise<Map<string,string>>} full → 'y' | 'n' | 'unknown' | 'error'
  */
 async function askSingleModel({ judgeKey, actions, userText, requesterUid, groupId, groupContextText, judgeFn }) {
   const result = new Map()
   const callJudge = judgeFn || ((msgs, o) => llm.chatCompletions(msgs, o))
-  try {
-    for (const a of actions) {
+  for (const a of actions) {
+    try {
       const prompt = buildReviewPrompt({ action: a, userText, requesterUid, targetUid: a.targetUid, groupId, groupContextText })
       const msgs = [
         { role: 'system', content: '你是群管理安全评审，只输出 y 或 n。' },
         { role: 'user', content: prompt },
       ]
       const res = await callJudge(msgs, { modelKey: judgeKey, temperature: 0, overrideMaxTokens: 16 })
+      // 无异常=正常参与评审。能回复但解析不出 y/n → 记 unknown（视为否决）。
       result.set(a.full, parseYorN(res?.text) || 'unknown')
+    } catch (err) {
+      // 调用异常（超时/网络错/接口失败）= 该模型未参与评审，排除出票（不视为否决，也不放行依据）
+      safeLogger.warn(`[ai0-plugin] 群操作评审模型 ${judgeKey} 调用失败(排除出票): ${err?.message || err}`)
+      result.set(a.full, 'error')
     }
-  } catch (err) {
-    // 出错则该模型评审整体不可信 → 全部 unknown（会触发取消）
-    safeLogger.warn(`[ai0-plugin] 群操作评审模型 ${judgeKey} 调用失败: ${err?.message || err}`)
-    for (const a of actions) result.set(a.full, 'unknown')
   }
   return result
 }
@@ -123,7 +132,8 @@ async function askSingleModel({ judgeKey, actions, userText, requesterUid, group
  *   judgeFn?:Function         // 评审模型调用函数（测试注入），缺省用 llm.chatCompletions
  * }} opts
  * @returns {Promise<{actions:Array, verdicts:Array<{full,type,ok:boolean,reasons:string[]}>}>}
- *   判定结果：ok=true 表示全部评审模型一致同意；ok=false 表示被取消（有人否决/出错/无法解析）。
+ *   判定结果：ok=true 表示全部参与评审模型一致同意（调用异常模型已排除，不计入）；
+ *   ok=false 表示被取消（有参与模型否决 / 能回复但读不出 y/n 视为否决 / 全部模型均异常无参与者）。
  *   评审模型不足 2 个（无真正"其他模型"可确认）→ 全部取消（安全优先）。
  */
 export async function reviewGroupActions({ replyText, groupId, e, userText, judgeModelKeys, judgeFn } = {}) {
@@ -155,17 +165,33 @@ export async function reviewGroupActions({ replyText, groupId, e, userText, judg
       judgeKeys.map((k) => askSingleModel({ judgeKey: k, actions, userText, requesterUid, groupId, groupContextText, judgeFn }))
     )
 
-    // 汇总：对每个操作，凡任一模型为 n / unknown → 取消
+    // 汇总（2026-09 修订）：异常模型排除出票，不参与判定；
+    // 参与模型需全部 y 才放行；n / unknown（能回复但读不出 y/n）→ 取消。
     const verdicts = actions.map((a) => {
       const votes = perModel.map((map) => map.get(a.full))
-      const reasons = []
-      if (votes.every((v) => v === 'y')) {
-        reasons.push('全部评审模型一致同意')
-        return { full: a.full, type: a.type, ok: true, reasons }
+      const participating = votes.filter((v) => v !== 'error')
+      const excludedCount = votes.length - participating.length
+
+      if (participating.length === 0) {
+        // 无任何参与者：全部评审模型都调用异常，无法确认 → 取消
+        return { full: a.full, type: a.type, ok: false, reasons: ['评审模型全部调用异常，无参与者可确认，操作取消'] }
       }
+
+      if (participating.every((v) => v === 'y')) {
+        const base = '全部参与评审模型一致同意'
+        return {
+          full: a.full,
+          type: a.type,
+          ok: true,
+          reasons: excludedCount > 0 ? [`${base}（${excludedCount} 个调用异常模型已排除出票）`] : [base],
+        }
+      }
+
+      const reasons = []
       votes.forEach((v, i) => {
         if (v === 'n') reasons.push(`模型${i + 1}否决`)
-        else if (v === 'unknown') reasons.push(`模型${i + 1}未明确(y/n)或出错`)
+        else if (v === 'unknown') reasons.push(`模型${i + 1}能回复但未明确同意(y/n)，视为否决`)
+        else if (v === 'error') reasons.push(`模型${i + 1}调用异常，已排除出票`)
       })
       if (!reasons.length) reasons.push('未获一致同意')
       return { full: a.full, type: a.type, ok: false, reasons }
