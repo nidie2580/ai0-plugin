@@ -20,10 +20,9 @@ import { safeLogger } from './globals.js'
 
 // 群操作指令匹配（与 groupOps 一致：非群操作 image/agent 跳过）
 const ACTION_RE = /\[action:(\w+):([^\]]*)\]/g
-const NON_GROUP_ACTIONS = new Set(['image', 'agent'])
-
-/** 无目标型群操作：targetUid 取空。 */
-const NO_TARGET_ACTIONS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search'])
+const NON_GROUP_ACTIONS = new Set(['image', 'agent', 'member_list'])
+// 无目标型群操作：targetUid 取空。
+const NO_TARGET_ACTIONS = new Set(['mute_all', 'title_display', 'set_group_name', 'set_notice', 'group_search', 'member_list'])
 
 /**
  * 判断当前是否启用「群操作同行评审」：

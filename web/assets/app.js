@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260905b'
+window.__AI0_BUILD__ = '20260906a'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -171,6 +171,7 @@ if (route === 'dashboard') {
       else stopChatlogTimer()
       if (a.dataset.view === 'image') loadImageConfig()
       if (a.dataset.view === 'providers') loadProviders()
+      if (a.dataset.view === 'home') loadHome()
       if (a.dataset.view === 'about') loadAbout()
     })
   })
@@ -223,11 +224,124 @@ if (route === 'dashboard') {
     window.addEventListener('beforeunload', () => { closing = true })
   })()
 
+  // ---- Home（首页模型详情）----
+  // 展示所有已配置模型的连通状态；点击任一模型卡片跳转到「多API平台」对应配置页。
+  let homeData = null
+  function goView(name) {
+    $$('.nav-item').forEach(x => x.classList.toggle('active', x.dataset.view === name))
+    $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name))
+    if (name === 'sessions') loadSessions()
+    else if (name === 'chatlog') { loadChatlog(); startChatlogTimerIfNeeded(); initChatAcrossApp() }
+    else if (name === 'image') loadImageConfig()
+    else if (name === 'providers') loadProviders()
+    else if (name === 'home') loadHome()
+    else if (name === 'about') loadAbout()
+  }
+
+  function statusLabel(m) {
+    if (m.status === 'ok') return '✅ 正常'
+    if (m.status === 'unconfigured') return '⚠️ 未配置'
+    return '❌ 异常'
+  }
+  function statusClass(m) {
+    if (m.status === 'ok') return 'ok'
+    if (m.status === 'unconfigured') return 'warn'
+    return 'err'
+  }
+
+  async function loadHome() {
+    const listEl = $('#homeModelList')
+    const sumEl = $('#homeSummary')
+    const tag = $('#homeTag')
+    if (tag) tag.textContent = '加载中…'
+    if (!listEl) return
+    let r
+    try {
+      r = await api('/api/models/status', { timeout: 20000 })
+    } catch (e) {
+      listEl.innerHTML = '<p class="empty">模型状态加载失败</p>'
+      if (tag) tag.textContent = '加载失败'
+      return
+    }
+    if (!r.ok) {
+      listEl.innerHTML = `<p class="empty">${escapeHtml(r.msg || '模型状态加载失败')}</p>`
+      if (tag) tag.textContent = '加载失败'
+      return
+    }
+    homeData = r
+    const { total, okCount, errorCount, models } = r
+    const envTag = `${total} 个模型`
+    if (tag) tag.textContent = envTag
+
+    // 汇总横幅：全部正常 → 一切正常；否则 n 个异常
+    sumEl.innerHTML = errorCount === 0
+      ? `<div class="home-banner ok"><span class="home-banner-icon">🎉</span>一切正常 · 共 ${total} 个模型全部可用</div>`
+      : `<div class="home-banner err"><span class="home-banner-icon">⚠️</span>${errorCount} 个异常 · 共 ${total} 个模型</div>`
+
+    if (!models.length) {
+      listEl.innerHTML = '<p class="empty">暂无已配置的模型。请到「多API平台」添加。</p>'
+      return
+    }
+
+    listEl.innerHTML = ''
+    const frag = document.createDocumentFragment()
+    for (const m of models) {
+      const card = document.createElement('div')
+      card.className = 'home-model ' + statusClass(m)
+      card.dataset.key = m.key
+      card.dataset.view = m.key
+      const name = m.name || m.key
+      card.innerHTML = `
+        <div class="home-model-head">
+          <span class="home-model-name">${escapeHtml(name)}</span>
+          <span class="home-model-status">${statusLabel(m)}</span>
+        </div>
+        <div class="home-model-meta">
+          <span class="k">key</span><span class="v">${escapeHtml(m.key)}</span>
+          <span class="k">模型</span><span class="v">${escapeHtml(m.model || '-')}</span>
+          <span class="k">延迟</span><span class="v">${m.latencyMs != null ? m.latencyMs + ' ms' : '-'}</span>
+          <span class="k">可用</span><span class="v">${m.modelCount != null ? m.modelCount + ' 个' : '-'}</span>
+        </div>
+        <div class="home-model-note">${m.error ? escapeHtml(m.error) : (m.status === 'ok' ? '接口可达' : (m.status === 'unconfigured' ? '请填写 API Base / Key' : ''))}</div>
+        <div class="home-model-action">点击编辑该模型配置 ›</div>
+      `
+      card.addEventListener('click', () => jumpToProvider(m.key))
+      frag.appendChild(card)
+    }
+    listEl.appendChild(frag)
+  }
+
+  // 跳到「多API平台」并把对应 provider 卡片高亮 + 滚动到可视区
+  async function jumpToProvider(key) {
+    goView('providers')
+    // 等待 providers 渲染完成后再定位（loadProviders 是 async）
+    await new Promise(res => setTimeout(res, 150))
+    const idx = providersList.findIndex(p => p.key === key)
+    if (idx >= 0) {
+      // 高亮卡片：用输入框反查父卡片
+      const input = $(`#providersList input[data-idx="${idx}"][data-field="key"]`)
+      const cardEl = input?.closest('.provider-card')
+      if (cardEl) {
+        $$('.provider-card').forEach(c => c.classList.remove('flash'))
+        cardEl.classList.add('flash')
+        cardEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        const keyInput = $(`#providersList input[data-idx="${idx}"][data-field="key"]`)
+        keyInput?.focus()
+        keyInput?.select()
+        setTimeout(() => cardEl.classList.remove('flash'), 2500)
+      }
+    }
+  }
+
+  {
+    const el = $('#homeRefresh')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', loadHome)
+  }
+
   // ---- Config ----
   let currentConfig = null
   let currentModelKey = null
   const saveMsg = $('#saveMsg')
-
   {
     const el = $('#saveCfg')
     if (el && typeof el.addEventListener === 'function') el.addEventListener('click', saveConfig)
@@ -1289,5 +1403,11 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   } catch (e) {
     console.error('[ai0] 控制台初始化异常（已尝试继续加载配置）：', e)
     loadConfig().catch(err => console.error('[ai0] 配置加载失败：', err))
+  }
+  // 默认展示「首页」模型健康一览，同时填充配置视图供后续导航使用
+  try {
+    loadHome()
+  } catch (e) {
+    console.error('[ai0] 首页模型状态加载异常：', e)
   }
 }

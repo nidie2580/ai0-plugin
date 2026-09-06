@@ -1005,6 +1005,57 @@ export function createApp() {
     }
   })
 
+  // ---- 首页模型详情：统计所有已配置模型的健康状态 ----
+  // 每个模型做一次轻量 /models 可达性探测（并发，单模型 15s 超时），返回：
+  //   { ok, total, okCount, errorCount, models: [{key,name,model,apiBase,configured,status,latencyMs,modelCount,error}] }
+  // status: ok(可达) / error(不可达或未配置) / unconfigured(缺 apiBase 或 apiKey)
+  app.get('/api/models/status', requireAuth, async (_req, res) => {
+    try {
+      const c = cfg.loadConfig()
+      const modelCfg = c.model || {}
+      const defaultKey = modelCfg.default || ''
+      const keys = Object.keys(modelCfg).filter(k =>
+        k !== 'default' && modelCfg[k] && typeof modelCfg[k] === 'object'
+      )
+      if (!keys.length) {
+        return res.json({ ok: true, total: 0, okCount: 0, errorCount: 0, models: [] })
+      }
+      const results = await Promise.all(keys.map(async (key) => {
+        const m = modelCfg[key] || {}
+        const apiBase = String(m.apiBase || '').trim()
+        const apiKey = String(m.apiKey || '').trim()
+        const base = { key, name: m.name || m.model || key, model: m.model || '', apiBase }
+        // 未配置 apiBase/apiKey → 视为 unconfigured
+        if (!apiBase || !apiKey) {
+          return { ...base, configured: false, status: 'unconfigured', latencyMs: null, modelCount: 0, error: '未配置 apiBase 或 apiKey' }
+        }
+        const t0 = Date.now()
+        try {
+          const info = await llm.listAvailableModels({ modelKey: key })
+          const latencyMs = Date.now() - t0
+          if (info.ok) {
+            return { ...base, configured: true, status: 'ok', latencyMs, modelCount: info.count || 0, error: null }
+          }
+          return { ...base, configured: true, status: 'error', latencyMs, modelCount: 0, error: info.error || `HTTP ${info.status}` }
+        } catch (e) {
+          return { ...base, configured: true, status: 'error', latencyMs: Date.now() - t0, modelCount: 0, error: e.message || String(e) }
+        }
+      }))
+      const okCount = results.filter((r) => r.status === 'ok').length
+      res.json({
+        ok: true,
+        total: results.length,
+        okCount,
+        errorCount: results.length - okCount,
+        defaultKey,
+        models: results
+      })
+    } catch (e) {
+      safeLogger.error(`[ai0-plugin] 模型状态统计失败: ${e.message}`)
+      res.json({ ok: false, msg: '模型状态统计失败，请稍后重试' })
+    }
+  })
+
   app.post('/api/test-model', requireAuth, requireCsrf, async (req, res) => {
     let { message = '请用一句话介绍你自己', modelKey = null } = req.body || {}
     if (typeof message !== 'string') message = String(message)

@@ -10,7 +10,8 @@ import {
   saveHistory,
   loadHistory,
   cleanupOldSessions,
-  extractReasoning
+  extractReasoning,
+  contentToText
 } from '../../src/llm.js'
 
 // llm.js 引用 Yunzai 全局 logger；测试环境注入 mock
@@ -211,5 +212,34 @@ describe('llm: extractReasoning 深度思考内容提取', () => {
   test('优先级：reasoning_content > reasoning > thinking', () => {
     const choice = { message: { reasoning_content: 'a', reasoning: 'b', thinking: 'c' } }
     assert.equal(extractReasoning(choice), 'a')
+  })
+})
+
+describe('llm: contentToText 模型输出收敛（修复输出为空/数组问题）', () => {
+  test('字符串原样返回', () => {
+    assert.equal(contentToText('你好'), '你好')
+  })
+
+  test('多模态数组仅拼接 text，跳过 image_url', () => {
+    const c = [
+      { type: 'text', text: '第一段' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } },
+      { type: 'text', text: '第二段' },
+    ]
+    assert.equal(contentToText(c), '第一段\n第二段')
+  })
+
+  test('空数组返回空串（而非 Non-string 值传给下游）', () => {
+    assert.equal(contentToText([]), '')
+  })
+
+  test('null/undefined/对象均返回空串', () => {
+    assert.equal(contentToText(null), '')
+    assert.equal(contentToText(undefined), '')
+    assert.equal(contentToText({ foo: 'bar' }), '')
+  })
+
+  test('纯空白字符串返回原字符（由上层 trim 处理）', () => {
+    assert.equal(contentToText('   '), '   ')
   })
 })
