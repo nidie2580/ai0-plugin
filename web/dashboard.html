@@ -98,13 +98,11 @@
       <h3>点歌设置</h3>
       <div class="grid-2">
         <label>点歌开关 <select id="chat_music_enabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
-        <label>默认音源 <select id="chat_music_source"><option value="qq">QQ音乐</option><option value="netease">网易云音乐</option></select></label>
+        <label>默认音源 <select id="chat_music_source"><option value="netease">网易云音乐</option><option value="qq">QQ音乐</option></select></label>
         <label>最大返回条数 <input id="chat_music_maxResults" type="number" min="1" max="5"/></label>
         <label>尝试获取可播直链 <select id="chat_music_tryPlayUrl"><option value="true">开启</option><option value="false">关闭</option></select></label>
-        <label>QQ音乐 Cookie <input id="chat_music_qq_cookie" placeholder="可选，遇风控时填写"/></label>
-        <label>网易云 Cookie <input id="chat_music_netease_cookie" placeholder="可选，遇风控时填写"/></label>
       </div>
-      <p class="hint">开启后，AI 对话内识别到点歌/推荐歌意图即自动搜索并发送音乐卡片；拿不到可播直链时自动降级为文本链接。Cookie 仅用于搜索接口提权，请勿填入包含敏感信息的长 Cookie；若不确定可留空使用匿名搜索。</p>
+      <p class="hint">开启后，AI 对话内识别到点歌/推荐歌意图即自动搜索并发送音乐卡片；拿不到可播直链时自动降级为文本链接。点歌使用网易云/QQ音乐公开接口+歌曲页元数据爬虫，不依赖任何个人登录 Cookie，无需额外配置。</p>
 
       <hr>
       <h3>Agent 配置</h3>
@@ -141,6 +139,8 @@
         <label>转发阈值(字) <input id="resp_forwardThreshold" type="number"/></label>
         <label>显示模型标签 <select id="resp_showModelTag"><option value="true">开启</option><option value="false">关闭</option></select></label>
         <label>打字延迟(ms) <input id="resp_typingDelay" type="number"/></label>
+        <label>深度思考(全局) <select id="resp_deepThink"><option value="false">关闭</option><option value="true">开启</option></select></label>
+        <label>深度思考超时(ms) <input id="resp_deepThinkTimeout" type="number"/></label>
         <label>网页后台端口 <input id="web_port" type="number"/></label>
         <label>网页后台绑定地址 <input id="web_host" placeholder="127.0.0.1 / 0.0.0.0"/></label>
       </div>

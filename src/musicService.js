@@ -1,15 +1,16 @@
 /**
  * 点歌服务（AI 对话内点歌 → 在线搜索 → 发送音乐卡片/文本降级）
  *
- * 支持源：
- *   - qq     QQ 音乐：c.y.qq.com 公开搜索接口（匿名可用；播放直链需换 vkey，视出口风控而定）
- *   - netease 网易云音乐：music.163.com 搜索接口（风控较严，可在配置填 Cookie 提升可用性）
+ * 支持源（全部零 Cookie，不依赖用户私人登录态）：
+ *   - qq     QQ 音乐：c.y.qq.com 搜索接口（匿名，部分出口 IP 会被风控返回 500，失败自动回退网易云）
+ *   - netease 网易云音乐（默认）：先走 POST /api/v1/search/get 匿名搜索（稳定 code 200），
+ *            拿不到封面时再用「移动端歌曲页」og: 元数据爬取兜底。
  *
  * 发送策略：
  *   1) 拿得到可播直链(playUrl) → 构造 OneBot music(custom) 段发卡片；
  *   2) 否则降级为文本（歌名-歌手-来源详情页链接，可点开），绝不让用户空手而归。
  *
- * 纯解析/构造函数与网络隔离，便于注入 httpFn 做单元测试。
+ * 纯解析/构造函数与网络隔离，便于注入 httpFn/httpPostFn/httpPageFn 做单元测试。
  */
 import * as cfg from '../config/index.js'
 import { safeLogger } from './globals.js'
@@ -23,10 +24,9 @@ export function getMusicConfig() {
   const m = cfg.get('chat.music', {}) || {}
   return {
     enabled: m.enabled === true,
-    source: m.source === 'netease' ? 'netease' : 'qq',
+    // 网易云接口匿名可用且更稳，默认音源改为网易云；QQ 在风控下失败会自动回退网易云
+    source: m.source === 'qq' ? 'qq' : 'netease',
     maxResults: Number.isFinite(Number(m.maxResults)) ? Math.min(5, Math.max(1, Number(m.maxResults))) : 3,
-    qqCookie: String(m.qq?.cookie || ''),
-    neteaseCookie: String(m.netease?.cookie || ''),
     tryPlayUrl: m.tryPlayUrl !== false,
   }
 }
@@ -77,7 +77,12 @@ export function parseQQSearchList(json) {
   return out
 }
 
-/** 归一化网易云搜索结果 JSON → 歌曲列表 */
+/**
+ * 归一化网易云搜索结果 JSON → 歌曲列表。
+ * 兼容两种响应形态：
+ *   - 旧 /api/search/get（result.songs[*].album 为对象，duration 毫秒）
+ *   - v1 /api/v1/search/get（result.songs[*].album 可能为字符串；cover 取 album.picUrl 或歌手头像兜底）
+ */
 export function parseNeteaseSearchList(json) {
   const list = json?.result?.songs
   if (!Array.isArray(list)) return []
@@ -90,15 +95,17 @@ export function parseNeteaseSearchList(json) {
     const artist = Array.isArray(s.artists)
       ? s.artists.map((x) => String(x?.name || '')).filter(Boolean).join('、')
       : String(s.artist || '')
-    const cover = s.album?.picUrl || s.picUrl || ''
+    const album = typeof s.album === 'object' && s.album ? s.album : null
+    const cover = album?.picUrl || album?.blurPicUrl
+      || (Array.isArray(s.artists) && s.artists[0]?.img1v1Url) || ''
     out.push({
       source: 'netease',
       id,
       songmid: id,
       title,
       artist,
-      album: String(s.album?.name || ''),
-      cover: cover.startsWith('http') ? cover : '',
+      album: String(album ? (album.name || '') : (typeof s.album === 'string' ? s.album : '')),
+      cover: String(cover).startsWith('http') ? cover : '',
       pageUrl: `https://music.163.com/#/song?id=${id}`,
       // 网易云 outer/url 需服务端配合，未必可播；仅当后续 vkey 探测失败时给文本降级兜底
       playUrl: `https://music.163.com/song/media/outer/url?id=${id}.mp3`,
@@ -106,6 +113,55 @@ export function parseNeteaseSearchList(json) {
     })
   }
   return out
+}
+
+/** 单个网易云歌曲 id 的移动端详情页（服务端渲染），用于爬取 og: 元数据做封面/歌名兜底 */
+const MUSIC_OG_CONSTANTS = {
+  page: (id) => `https://music.163.com/m/song?id=${id}`,
+  referer: 'https://music.163.com/',
+}
+
+/**
+ * 爬取网易云移动端歌曲页，提取 og:title / og:image 作为元数据兜底。
+ * 搜索接口无封面或异常时调用，返回 { title, artist, cover } 或 null。绝不抛异常。
+ */
+export async function neteaseCrawlSongPage(id, opts = {}) {
+  try {
+    if (!id) return null
+    const httpPageFn = opts.httpPageFn || (async (u, h) => {
+      const resp = await safeAxiosRequest('get', u, null, {
+        headers: { 'User-Agent': MUSIC_UA, Referer: MUSIC_OG_CONSTANTS.referer },
+        timeout: HTTP_TIMEOUT_MS,
+      }, 5)
+      return typeof resp?.data === 'string' ? resp.data : String(resp?.data || '')
+    })
+    const html = await httpPageFn(MUSIC_OG_CONSTANTS.page(id), MUSIC_OG_CONSTANTS.referer)
+    if (!html || typeof html !== 'string') return null
+    // og:title 如 "晴天（Sunny Day） - 周杰伦 - 单曲 - 网易云音乐"
+    const titleM = html.match(/og:title[^>]*content=["']([^"']+)/i)
+    const imgM = html.match(/og:image[^>]*content=["']([^"']+)/i)
+    const descM = html.match(/name=["']description["'][^>]*content=["']([^"']+)/i)
+    const ogTitle = titleM ? titleM[1].replace(/\s*-\s*网易云音乐\s*$/i, '') : ''
+    const raw = ogTitle || (descM ? descM[1] : '')
+    // 歌名优先取《》；否则取 - 之前段（去掉别名括号）
+    let title = ''
+    const bkm = raw.match(/《([^》]+)》/)
+    if (bkm) {
+      title = bkm[1]
+    } else {
+      const seg = raw.split(/\s*[-—–]\s*/)[0].trim()
+      title = seg.replace(/（[^）]*）/g, '').trim()
+    }
+    // 歌手：取第一个 - 之后到第二个 - 之前段；去掉别名括号
+    let artist = ''
+    const parts = raw.split(/\s*[-—–]\s*/).filter(Boolean)
+    if (parts.length >= 2) artist = parts[1].replace(/（[^）]*）/g, '').trim()
+    const cover = imgM ? imgM[1].replace(/^http:/, 'https:') : ''
+    return { title, artist, cover }
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 网易云歌曲页爬取失败(id=${id}): ${err?.message || err}`)
+    return null
+  }
 }
 
 /**
@@ -152,20 +208,50 @@ export async function qqFetchPlayUrl(item, opts = {}) {
 }
 
 /**
- * 按关键词搜索歌曲。
- * @param {{keyword:string, source?:'qq'|'netease', httpFn?:Function, httpPostFn?:Function}} opts
+ * 网易云搜索：POST /api/v1/search/get（匿名稳定，code 200）。返回歌曲列表（可能含空列表）。
+ * 注入 httpPostFn 便于测试；默认用 safeAxiosRequest。
+ * @returns {Promise<{ok:boolean, songs:Array, msg?:string}>}
+ */
+export async function neteaseV1Search({ keyword, limit = 3, httpPostFn } = {}) {
+  const body = new URLSearchParams({ s: keyword, type: '1', offset: '0', limit: String(limit) })
+  const url = 'https://music.163.com/api/v1/search/get'
+  const headers = { Referer: 'https://music.163.com/', 'Content-Type': 'application/x-www-form-urlencoded' }
+  let data = null
+  if (httpPostFn) {
+    data = await httpPostFn(url, body.toString(), headers).catch(() => null)
+  } else {
+    const resp = await safeAxiosRequest('post', url, body.toString(), {
+      headers: { 'User-Agent': MUSIC_UA, ...headers },
+      timeout: HTTP_TIMEOUT_MS,
+    })
+    data = resp?.data
+  }
+  if (data == null) return { ok: false, songs: [], msg: '网易云搜索接口返回空' }
+  if (typeof data.code !== 'undefined' && data.code !== 200) {
+    return { ok: false, songs: [], msg: `网易云搜索被风控或失败(code=${data.code})` }
+  }
+  return { ok: true, songs: parseNeteaseSearchList(data) }
+}
+
+/**
+ * 按关键词搜索歌曲（零 Cookie）。
+ * 若 source=qq 被风控/空结果，自动回退网易云（见 OPTION: 默认网易云）。封面缺失时用歌曲页 og: 元数据爬取兜底。
+ * @param {{keyword:string, source?:'qq'|'netease', httpFn?:Function, httpPostFn?:Function, httpPageFn?:Function}} opts
  * @returns {Promise<{ok:boolean, songs:Array, source:string, msg?:string, playable?:boolean}>}
  */
-export async function searchSongs({ keyword, source, httpFn, httpPostFn } = {}) {
+export async function searchSongs({ keyword, source, httpFn, httpPostFn, httpPageFn } = {}) {
   const cfgObj = getMusicConfig()
   const kw = String(keyword || '').trim()
   if (!kw) return { ok: false, songs: [], source: source || cfgObj.source, msg: '搜索关键词为空' }
   if (kw.length > 100) return { ok: false, songs: [], source: source || cfgObj.source, msg: '搜索关键词过长' }
-  const src = source === 'netease' ? 'netease' : (source === 'qq' ? 'qq' : cfgObj.source)
+  const want = source === 'qq' ? 'qq' : (source === 'netease' ? 'netease' : cfgObj.source)
+  const src = want === 'qq' ? 'qq' : 'netease' // 最终实际用于降级展示的源
 
   try {
     let songs = []
+
     if (src === 'qq') {
+      // QQ 匿名搜索（可能被风控返回 500 -> httpGetJson 抛错，走 catch 后回退）
       const u = new URL('https://c.y.qq.com/soso/fcgi-bin/client_search_cp')
       u.searchParams.set('format', 'json')
       u.searchParams.set('w', kw)
@@ -173,32 +259,51 @@ export async function searchSongs({ keyword, source, httpFn, httpPostFn } = {}) 
       u.searchParams.set('cr', '1')
       u.searchParams.set('t', '0')
       const headers = { Referer: 'https://y.qq.com/' }
-      if (cfgObj.qqCookie) headers.Cookie = cfgObj.qqCookie
       const json = await httpGetJson(u.toString(), headers, httpFn)
       songs = parseQQSearchList(json)
-    } else {
-      const u = new URL('https://music.163.com/api/search/get')
-      u.searchParams.set('s', kw)
-      u.searchParams.set('type', '1')
-      u.searchParams.set('limit', String(cfgObj.maxResults))
-      u.searchParams.set('offset', '0')
-      const headers = { Referer: 'https://music.163.com/', Cookie: cfgObj.neteaseCookie || 'os=pc' }
-      const json = await httpGetJson(u.toString(), headers, httpFn)
-      if (json && typeof json.code !== 'undefined' && json.code !== 200) {
-        return { ok: false, songs: [], source: src, msg: `网易云搜索被风控(code=${json.code})，可尝试在 chat.music.netease.cookie 填入登录 Cookie` }
+      if (songs.length) {
+        // 只为排第一的候选换直链，决定"卡片 or 文本"降级
+        if (cfgObj.tryPlayUrl) {
+          const top = songs[0]
+          const playUrl = await qqFetchPlayUrl(top, { httpFn, httpPostFn }).catch(() => null)
+          if (playUrl) top.playUrl = playUrl
+        }
+        return { ok: true, songs, source: src }
       }
-      songs = parseNeteaseSearchList(json)
+      // QQ 空结果 → 回退网易云（语义：默认源为网易云，QQ 仅尝试）
+      safeLogger.warn('[ai0-plugin] QQ 点歌空结果/风控，回退网易云搜索')
     }
 
-    if (!songs.length) return { ok: false, songs: [], source: src, msg: `没有找到与「${kw}」相关的歌曲` }
-    if (cfgObj.tryPlayUrl && src === 'qq') {
-      // 只为排第一的候选换直链，决定"卡片 or 文本"降级
-      const top = songs[0]
-      const playUrl = await qqFetchPlayUrl(top, { httpFn, httpPostFn }).catch(() => null)
-      if (playUrl) top.playUrl = playUrl
+    // 网易云搜索（默认源，稳定匿名）。走到这里即实际用网易云
+    const nres = await neteaseV1Search({ keyword: kw, limit: cfgObj.maxResults, httpPostFn })
+    if (!nres.ok) return { ok: false, songs: [], source: 'netease', msg: nres.msg || '网易云搜索失败' }
+    songs = nres.songs
+    if (!songs.length) return { ok: false, songs: [], source: 'netease', msg: `没有找到与「${kw}」相关的歌曲` }
+
+    // 封面补齐：搜索 JSON 常无 album.picUrl，用移动端歌曲页 og:image 兜底（只补缺封面前几条）
+    for (const s of songs.slice(0, 3)) {
+      if (s.cover) continue
+      const og = await neteaseCrawlSongPage(s.id, { httpPageFn })
+      if (og) {
+        if (og.cover) s.cover = og.cover
+        // 若歌名/歌手在搜索里缺失，用 og 补
+        if (!s.title && og.title) s.title = og.title
+        if (!s.artist && og.artist) s.artist = og.artist
+      }
     }
-    return { ok: true, songs, source: src }
+    return { ok: true, songs, source: 'netease' }
   } catch (err) {
+    // QQ 源请求抛错（风控/500）→ 回退网易云
+    if (src === 'qq') {
+      safeLogger.warn(`[ai0-plugin] 点歌搜索失败(${src})，回退网易云: ${err?.message || err}`)
+      try {
+        const nres = await neteaseV1Search({ keyword: kw, limit: cfgObj.maxResults, httpPostFn })
+        if (nres.ok && nres.songs.length) return { ok: true, songs: nres.songs, source: 'netease' }
+        return { ok: false, songs: [], source: 'netease', msg: nres.msg || `没有找到与「${kw}」相关的歌曲` }
+      } catch (err2) {
+        return { ok: false, songs: [], source: 'netease', msg: `音乐搜索失败（QQ 与网易云均不可用）：${err2?.message || err2}` }
+      }
+    }
     safeLogger.warn(`[ai0-plugin] 点歌搜索失败(${src}): ${err?.message || err}`)
     return { ok: false, songs: [], source: src, msg: `音乐搜索接口请求失败：${err?.message || err}` }
   }

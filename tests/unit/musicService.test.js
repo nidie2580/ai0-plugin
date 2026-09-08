@@ -19,7 +19,7 @@ const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathnam
 const backupExists = fs.existsSync(CONFIG_PATH)
 const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
 
-function writeConfig(tryPlayUrl = false) {
+function writeConfig(tryPlayUrl = false, source = 'netease') {
   const base = {
     model: {
       default: 'a',
@@ -28,11 +28,9 @@ function writeConfig(tryPlayUrl = false) {
     chat: {
       music: {
         enabled: true,
-        source: 'qq',
+        source,
         maxResults: 3,
         tryPlayUrl,
-        qq: { cookie: '' },
-        netease: { cookie: '' },
       },
     },
   }
@@ -64,7 +62,6 @@ const qqSongJson = () => ({
     },
   },
 })
-
 const neteaseSongJson = () => ({
   result: {
     songs: [
@@ -74,6 +71,22 @@ const neteaseSongJson = () => ({
         artists: [{ name: '周杰伦' }],
         album: { name: '叶惠美', picUrl: 'https://p1.music.126.net/x/cover.jpg' },
         duration: 269000,
+      },
+    ],
+  },
+})
+
+// v1 /api/v1/search/get：album 为字符串、无 picUrl、时长毫秒
+const neteaseV1Json = () => ({
+  code: 200,
+  result: {
+    songs: [
+      {
+        id: 2652820720,
+        name: '晴天(深情版)',
+        artists: [{ name: 'Lucky小爱', img1v1Url: 'https://p2.music.126.net/y/artist.jpg' }],
+        album: '晴天(深情版)',
+        duration: 278961,
       },
     ],
   },
@@ -114,6 +127,17 @@ describe('parse*SearchList', () => {
     assert.match(songs[0].cover, /^https:/)
   })
 
+  it('M1d：v1 搜索结果归一化（album 字符串、无 album.picUrl，封面用歌手头像兜底）', () => {
+    const songs = music.parseNeteaseSearchList(neteaseV1Json())
+    assert.equal(songs.length, 1)
+    assert.equal(songs[0].id, '2652820720')
+    assert.equal(songs[0].title, '晴天(深情版)')
+    assert.equal(songs[0].album, '晴天(深情版)')
+    assert.equal(songs[0].durationSec, 279)
+    assert.equal(songs[0].cover, 'https://p2.music.126.net/y/artist.jpg')
+    assert.match(songs[0].playUrl, /outer\/url\?id=2652820720/)
+  })
+
   it('M1c：空/异常结构返回空数组不抛错', () => {
     assert.deepEqual(music.parseQQSearchList({}), [])
     assert.deepEqual(music.parseNeteaseSearchList(null), [])
@@ -121,35 +145,58 @@ describe('parse*SearchList', () => {
 })
 
 describe('searchSongs', () => {
-  it('M2a：QQ 源注入 httpFn，无 tryPlayUrl 时直接返回列表', async () => {
+  it('M2a：默认网易云源，注入 httpPostFn 走 v1/search/get 返回列表', async () => {
     writeConfig(false)
-    const res = await music.searchSongs({ keyword: '晴天 周杰伦', httpFn: async () => qqSongJson() })
+    const res = await music.searchSongs({ keyword: '晴天', httpPostFn: async () => neteaseV1Json() })
     assert.equal(res.ok, true)
-    assert.equal(res.source, 'qq')
-    assert.equal(res.songs[0].title, '晴天')
-    assert.equal(res.songs[0].playUrl, '')
+    assert.equal(res.source, 'netease')
+    assert.equal(res.songs[0].title, '晴天(深情版)')
   })
 
-  it('M2b：tryPlayUrl 开启且 vkey 返回直链 → 首条填充 playUrl（可发卡片）', async () => {
-    writeConfig(true)
+  it('M2b：网易云封面粉缺失时用歌曲页 og:image 爬虫兜底', async () => {
+    writeConfig(false)
     const res = await music.searchSongs({
       keyword: '晴天',
-      httpFn: async () => qqSongJson(),
-      httpPostFn: async () => vkeyOkJson(),
+      httpPostFn: async () => ({ code: 200, result: { songs: [{ id: 186016, name: '晴天', artists: [{ name: '周杰伦' }], album: '叶惠美', duration: 269000 }] } }),
+      httpPageFn: async () => '<meta property="og:title" content="晴天（Sunny Day） - 周杰伦 - 单曲 - 网易云音乐"><meta property="og:image" content="https://p1.music.126.net/x/cover.jpg">',
     })
     assert.equal(res.ok, true)
-    assert.match(res.songs[0].playUrl, /^https:\/\/dl\.stream\.qqmusic\.qq\.com\/C4000000\.m4a/)
+    assert.equal(res.songs[0].cover, 'https://p1.music.126.net/x/cover.jpg')
   })
 
-  it('M2c：网易云源注入风控返回 → ok=false 且提示填 Cookie', async () => {
+  it('M2d：QQ 源被 500 风控 → 自动回退网易云成功', async () => {
     writeConfig(false)
     const res = await music.searchSongs({
       keyword: '晴天',
-      source: 'netease',
-      httpFn: async () => ({ code: -462 }),
+      source: 'qq',
+      httpFn: async () => { throw new Error('500') },
+      httpPostFn: async () => neteaseV1Json(),
+    })
+    assert.equal(res.ok, true)
+    assert.equal(res.source, 'netease')
+    assert.equal(res.songs[0].title, '晴天(深情版)')
+  })
+
+  it('M2e：QQ 源空结果 → 自动回退网易云', async () => {
+    writeConfig(false)
+    const res = await music.searchSongs({
+      keyword: '晴天',
+      source: 'qq',
+      httpFn: async () => ({ data: { song: { list: [] } } }),
+      httpPostFn: async () => neteaseV1Json(),
+    })
+    assert.equal(res.ok, true)
+    assert.equal(res.source, 'netease')
+  })
+
+  it('M2c：网易云源风控 code≠200 → ok=false 且提示风控（不再让填 Cookie）', async () => {
+    writeConfig(false)
+    const res = await music.searchSongs({
+      keyword: '晴天',
+      httpPostFn: async () => ({ code: -462 }),
     })
     assert.equal(res.ok, false)
-    assert.match(res.msg, /风控/)
+    assert.match(res.msg, /风控|失败/)
   })
 
   it('M4a：关键词为空/超长直接拒绝', async () => {
@@ -163,9 +210,25 @@ describe('searchSongs', () => {
 
   it('M4b：搜索无结果给友好提示', async () => {
     writeConfig(false)
-    const res = await music.searchSongs({ keyword: '不存在的歌', httpFn: async () => ({ data: { song: { list: [] } } }) })
+    const res = await music.searchSongs({ keyword: '不存在的歌', httpPostFn: async () => ({ code: 200, result: { songs: [] } }) })
     assert.equal(res.ok, false)
     assert.match(res.msg, /没有找到/)
+  })
+})
+
+describe('neteaseCrawlSongPage（歌曲页 og: 元数据爬虫）', () => {
+  it('og:title / og:image 解析出歌名、歌手、封面', async () => {
+    const httpPageFn = async () => `<html><meta property="og:title" content="晴天（Sunny Day） - 周杰伦 - 单曲 - 网易云音乐"><meta property="og:image" content="http://p1.music.126.net/x/cover.jpg"></html>`
+    const og = await music.neteaseCrawlSongPage('186016', { httpPageFn })
+    assert.equal(og.title, '晴天')
+    assert.equal(og.artist, '周杰伦')
+    assert.equal(og.cover, 'https://p1.music.126.net/x/cover.jpg')
+  })
+
+  it('空 id / 页面异常返回 null 不抛错', async () => {
+    assert.equal(await music.neteaseCrawlSongPage('', {}), null)
+    const httpPageFn = async () => { throw new Error('net') }
+    assert.equal(await music.neteaseCrawlSongPage('1', { httpPageFn }), null)
   })
 })
 

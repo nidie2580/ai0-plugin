@@ -396,11 +396,9 @@ if (route === 'dashboard') {
 
     const muCfg = resp.config.chat?.music || {}
     $('#chat_music_enabled').value = String(muCfg.enabled ?? false)
-    $('#chat_music_source').value = muCfg.source === 'netease' ? 'netease' : 'qq'
+    $('#chat_music_source').value = muCfg.source === 'qq' ? 'qq' : 'netease'
     $('#chat_music_maxResults').value = muCfg.maxResults ?? 3
     $('#chat_music_tryPlayUrl').value = String(muCfg.tryPlayUrl !== false)
-    $('#chat_music_qq_cookie').value = muCfg.qq?.cookie || ''
-    $('#chat_music_netease_cookie').value = muCfg.netease?.cookie || ''
 
     $('#system_prompt').value = resp.config.system?.prompt || ''
     $('#agent_maxRounds').value = resp.config.agent?.maxRounds ?? 5
@@ -417,6 +415,8 @@ if (route === 'dashboard') {
     $('#resp_forwardThreshold').value = resp.config.response?.forwardThreshold ?? 500
     $('#resp_showModelTag').value = String(resp.config.response?.showModelTag ?? true)
     $('#resp_typingDelay').value = resp.config.response?.typingDelay ?? 500
+    $('#resp_deepThink').value = String(resp.config.response?.deepThink ?? false)
+    $('#resp_deepThinkTimeout').value = resp.config.response?.deepThinkTimeout ?? 300000
     $('#web_port').value = resp.config.web?.port ?? 12580
     $('#web_host').value = resp.config.web?.host ?? '127.0.0.1'
     $('#web_trustProxy').checked = !!resp.config.web?.trustProxy
@@ -452,9 +452,6 @@ if (route === 'dashboard') {
       <label>温度 (temperature)<input id="m_temperature" type="number" step="0.1" min="0" max="2" value="${model.temperature ?? 0.8}"/></label>
       <label>Max Tokens<input id="m_maxTokens" type="number" min="1" value="${model.maxTokens ?? 2000}"/></label>
       <label>超时 (ms)<input id="m_timeout" type="number" min="1000" value="${model.timeout ?? 60000}"/></label>
-      <label>深度思考 (thinking)
-        <select id="m_thinking"><option value="false">关闭</option><option value="true">开启</option></select>
-      </label>
       <label>支持图片输入 (vision)
         <select id="m_vision"><option value="false">关闭</option><option value="true">开启</option></select>
       </label>
@@ -462,7 +459,6 @@ if (route === 'dashboard') {
         <select id="m_web"><option value="false">关闭</option><option value="true">开启</option></select>
       </label>
     `
-    $('#m_thinking').value = String(model.thinking ?? false)
     $('#m_vision').value = String(model.vision ?? false)
     $('#m_web').value = String(model.web ?? false)
   }
@@ -481,9 +477,8 @@ if (route === 'dashboard') {
     if (!Number.isNaN(temperature)) obj.temperature = temperature
     if (!Number.isNaN(maxTokens)) obj.maxTokens = maxTokens
     if (!Number.isNaN(timeout)) obj.timeout = timeout
-    // 布尔开关：读取 select 真假
+    // 布尔开关：读取 select 真假（深度思考已改为全局 response.deepThink，不再按模型单独配置）
     const boolOf = (id) => document.getElementById('m_' + id)?.value === 'true'
-    obj.thinking = boolOf('thinking')
     obj.vision = boolOf('vision')
     obj.web = boolOf('web')
     return { oldKey, newKey, obj }
@@ -535,11 +530,9 @@ if (route === 'dashboard') {
       },
       music: {
         enabled: $('#chat_music_enabled').value === 'true',
-        source: $('#chat_music_source').value === 'netease' ? 'netease' : 'qq',
+        source: $('#chat_music_source').value === 'qq' ? 'qq' : 'netease',
         maxResults: Math.min(5, Math.max(1, parseInt($('#chat_music_maxResults').value, 10) || 3)),
-        tryPlayUrl: $('#chat_music_tryPlayUrl').value !== 'false',
-        qq: { cookie: $('#chat_music_qq_cookie').value.trim() },
-        netease: { cookie: $('#chat_music_netease_cookie').value.trim() }
+        tryPlayUrl: $('#chat_music_tryPlayUrl').value !== 'false'
       }
     }
     c.system = { prompt: $('#system_prompt').value }
@@ -569,7 +562,9 @@ if (route === 'dashboard') {
       useForwardMsg: $('#resp_useForwardMsg').value === 'true',
       forwardThreshold: parseInt($('#resp_forwardThreshold').value, 10) || 500,
       showModelTag: $('#resp_showModelTag').value === 'true',
-      typingDelay: parseInt($('#resp_typingDelay').value, 10) || 0
+      typingDelay: parseInt($('#resp_typingDelay').value, 10) || 0,
+      deepThink: $('#resp_deepThink').value === 'true',
+      deepThinkTimeout: parseInt($('#resp_deepThinkTimeout').value, 10) || 300000
     }
     c.web = {
       port: parseInt($('#web_port').value, 10) || 12580,

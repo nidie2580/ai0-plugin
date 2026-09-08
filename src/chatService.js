@@ -877,8 +877,9 @@ export async function handleChat(e) {
   const rawTimeout = Number(modelCfg2.timeout)
   // Agent 多轮循环期间的"最终兜底"硬超时：改为 10 分钟，防止死锁的同时不至于把长思考切断
   const AGENT_HARD_TIMEOUT_MS = 600_000
-  // 深度思考模型（model.xxx.thinking=true）单次响应可能思考 1~3 分钟，硬超时需放宽，避免思考被切断
-  const isThinkingModel = modelCfg2.thinking === true
+  // 深度思考模型（全局 response.deepThink，未配回退旧 model.xxx.thinking）单次响应可能思考 1~3 分钟，
+  // 硬超时需放宽，避免思考被切断
+  const isThinkingModel = cfg.getDeepThinkConfig(defaultKey).enabled
   const hardTimeout = isThinkingModel
     ? Math.min((Number.isFinite(rawTimeout) && rawTimeout > 500 ? rawTimeout : 90_000) * 2 + 30_000, 600_000)
     : (Number.isFinite(rawTimeout) && rawTimeout > 500 ? Math.min(rawTimeout * 1.3 + 5000, 180_000) : 90_000)
