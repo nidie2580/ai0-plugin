@@ -396,11 +396,9 @@ if (route === 'dashboard') {
 
     const muCfg = resp.config.chat?.music || {}
     $('#chat_music_enabled').value = String(muCfg.enabled ?? false)
-    $('#chat_music_source').value = muCfg.source === 'netease' ? 'netease' : 'qq'
+    $('#chat_music_source').value = muCfg.source === 'qq' ? 'qq' : 'netease'
     $('#chat_music_maxResults').value = muCfg.maxResults ?? 3
     $('#chat_music_tryPlayUrl').value = String(muCfg.tryPlayUrl !== false)
-    $('#chat_music_qq_cookie').value = muCfg.qq?.cookie || ''
-    $('#chat_music_netease_cookie').value = muCfg.netease?.cookie || ''
 
     $('#system_prompt').value = resp.config.system?.prompt || ''
     $('#agent_maxRounds').value = resp.config.agent?.maxRounds ?? 5
@@ -535,11 +533,9 @@ if (route === 'dashboard') {
       },
       music: {
         enabled: $('#chat_music_enabled').value === 'true',
-        source: $('#chat_music_source').value === 'netease' ? 'netease' : 'qq',
+        source: $('#chat_music_source').value === 'qq' ? 'qq' : 'netease',
         maxResults: Math.min(5, Math.max(1, parseInt($('#chat_music_maxResults').value, 10) || 3)),
-        tryPlayUrl: $('#chat_music_tryPlayUrl').value !== 'false',
-        qq: { cookie: $('#chat_music_qq_cookie').value.trim() },
-        netease: { cookie: $('#chat_music_netease_cookie').value.trim() }
+        tryPlayUrl: $('#chat_music_tryPlayUrl').value !== 'false'
       }
     }
     c.system = { prompt: $('#system_prompt').value }
