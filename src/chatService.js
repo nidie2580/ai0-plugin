@@ -1249,18 +1249,19 @@ export async function handleChat(e) {
  * 返回 null 表示没有图片指令；否则返回 { cleanText, ok, imageBuffer?, error? }
  */
 async function parseAndExecuteImageAction(replyText, userId) {
-  const re = /\[action:image:([^\]]+)\]/i
-  const m = replyText.match(re)
-  if (!m) return null
+  const re = /\[action:image:([^\]]+)\]/gi
+  const matches = [...String(replyText || '').matchAll(re)]
+  if (!matches.length) return null
+  const first = matches[0]
 
   // P3-7: 图片提示词长度限制（与 /api/test-image 的 4000 字符保持一致）
   // 过长 prompt 可能被当作 LLM 输出的"指令注入"，还会把大段上下文塞到生图 API
   // 消耗大量 token 并触发计费异常，同时可能被 SSRF payload 嵌入。
   const PROMPT_MAX_LEN = 4000
-  const raw = m[1].trim()
+  const raw = first[1].trim()
   const prompt = raw.length > PROMPT_MAX_LEN ? raw.slice(0, PROMPT_MAX_LEN) : raw
-  const full = m[0]
-  const cleanText = replyText.replace(full, '').trim()
+  // 一次回复里可能有多条 [action:image:...]（多模型并行输出），全部剥离，只保留正文与首条提示词。
+  const cleanText = replyText.replace(re, '').trim()
 
   if (!prompt) {
     return { cleanText, ok: false, error: '图片提示词为空' }
@@ -1301,14 +1302,18 @@ async function parseAndExecuteImageAction(replyText, userId) {
  * 返回 null 表示没有点歌指令；否则返回 { cleanText, ok, error?, cardSent?, sentText? }
  */
 async function parseAndExecuteMusicAction(replyText, e) {
-  const re = /\[action:music:([^\]]+)\]/i
-  const m = String(replyText || '').match(re)
-  if (!m) return null
-  const keyword = m[1].trim().slice(0, 120)
-  const cleanText = String(replyText).replace(m[0], '').trim()
-  if (!keyword) {
+  // 允许一次回复里有多个 [action:music:...]（多模型并行输出时各模型都可能带一条），
+  // 用全局正则把所有指令从展示文本中剥离，避免残留给用户看到。
+  const re = /\[action:music:([^\]]+)\]/gi
+  const matches = [...String(replyText || '').matchAll(re)]
+  if (!matches.length) return null
+  const keywords = [...new Set(matches.map((m) => m[1].trim()).filter(Boolean).map((k) => k.slice(0, 120)))]
+  const cleanText = String(replyText).replace(re, '').trim()
+  if (!keywords.length) {
     return { cleanText, ok: false, error: '点歌关键词为空' }
   }
+  // 多模型并行时各模型通常点同一首歌，去重后只播第一首，避免同一轮重复弹多张卡片。
+  const keyword = keywords[0]
   safeLogger.info(`[ai0-plugin] 解析到点歌指令，关键词：${keyword.slice(0, 80)}`)
   const res = await musicService.searchSongs({ keyword })
   if (!res.ok) {
