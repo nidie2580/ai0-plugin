@@ -39,11 +39,11 @@ model:
     #   true  → 用户发图片时直接把图片以 image_url 形式发给该模型（如 gpt-4o / qwen-vl / glm-4v / 通义VL 等）。
     #   false → 不看图，收到图片时改用 imageInput.ocr 里配置的视觉模型把图片转成文字，再把文字发给本模型。
     vision: false
-    # 是否深度思考模型（如 DeepSeek-R1 / Qwen3 thinking 等）：
-    #   true 时① 思考过程会以"聊天记录"形式发送（可关 response.showReasoning）
-    #       ② 单次请求超时放宽到 thinkingTimeout（未配则用 timeout，兜底 180s），避免思考被切断
+    # ⚠️ 已废弃（仅作向后兼容兜底）：深度思考请用全局 response.deepThink 开关。
+    #   全局 response.deepThink 明确配置时对所有模型生效；仅当全局开关未配置时才回退读本模型
+    #   thinking 字段（true 视为该模型为深度思考模型）。
     thinking: false
-    # 深度思考模型单次请求超时（毫秒，可选，仅在 thinking:true 时生效）
+    # ⚠️ 已废弃（仅作向后兼容兜底）：深度思考超时请用全局 response.deepThinkTimeout。
     thinkingTimeout: 300000
 
 # 对话设置
@@ -306,6 +306,14 @@ response:
   showModelTag: false
   # 是否把深度思考模型的思考过程以"聊天记录"（合并转发）形式发送。默认开启
   showReasoning: true
+  # 深度思考全局开关（作用于所有模型，如 DeepSeek-R1 / Qwen3 thinking 等）：
+  #   true  → ① 思考过程会以"聊天记录"形式发送（可关 response.showReasoning）
+  #          ② 所有模型的单次请求超时放宽到 deepThinkTimeout（见下），避免思考被切断
+  #   false → 所有模型均不按深度思考处理（可用来强制关掉旧 per-model thinking 遗留配置）
+  #   （未配置时回退读旧版 model.xxx.thinking 字段）
+  deepThink: false
+  # 深度思考模型单次请求超时（毫秒，可选，仅在 deepThink:true 时生效，兜底 300s）
+  deepThinkTimeout: 300000
 
 # 网页管理后台
 web:
@@ -520,6 +528,38 @@ export function get(key, defaultValue) {
     curr = curr[k]
   }
   return curr === undefined ? defaultValue : curr
+}
+
+/**
+ * 解析"深度思考"是否对指定模型生效（全局优先，旧字段兜底）：
+ * - response.deepThink === true  → 对所有模型生效（全局开启）
+ * - response.deepThink === false → 对所有模型关闭（强制覆盖旧 per-model thinking 配置）
+ * - response.deepThink 未配置    → 回退读旧版 model.<modelKey>.thinking（向后兼容）
+ * 返回 { enabled, timeout }：
+ *   - enabled：是否是深度思考模型（决定放宽超时）
+ *   - timeout：深度思考单次请求超时（毫秒，未配则兜底 180_000ms）
+ */
+export function getDeepThinkConfig(modelKey) {
+  const config = loadConfig()
+  const globalFlag = config.response?.deepThink
+
+  // 已废弃兜底：旧版 per-model 字段
+  const perModel = config.model?.[modelKey] || {}
+  const legacyEnabled = perModel.thinking === true
+
+  let enabled
+  if (globalFlag === true) enabled = true
+  else if (globalFlag === false) enabled = false
+  else enabled = legacyEnabled
+
+  // 超时解析：全局 deepThinkTimeout 优先；未配置时用 per-model thinkingTimeout；
+  // 都没配则用 per-model timeout，最后兜底 180_000ms（且确保不低于 180s，避免思考被切断）
+  const baseMs = Number(config.response?.deepThinkTimeout)
+    || Number(perModel.thinkingTimeout)
+    || Number(perModel.timeout)
+    || 180_000
+  const timeout = Math.max(baseMs, 180_000)
+  return { enabled, timeout }
 }
 
 /**
