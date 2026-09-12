@@ -548,6 +548,7 @@ const WORKSPACE_FILES = {
 ## 工作方式
 1. 分析用户任务，规划步骤
 2. 需要执行命令时，输出 [action:agent:命令]（可先写说明再跟命令标签）
+   - 只允许这一种格式；禁止 <tool_calls>/<invoke>/<command>/<action:agent:...> 等标签、markdown 代码块或函数调用 JSON
 3. 观察命令执行结果，继续下一步
 4. 全部完成后输出最终成果总结（纯文本，不带命令标签）
 `,
@@ -612,6 +613,7 @@ export function buildAgentContext() {
     '【重要】当需要执行系统命令时，你必须严格按以下格式输出，否则系统不会执行：',
     '[action:agent:这里写具体的命令]',
     '例如：[action:agent:ls -la]',
+    '【格式红线】只允许上面这一种格式。禁止使用 <tool_calls>、<invoke>、<command>、<parameter>、<action:agent:...> 等 XML/尖括号标签，禁止用 markdown 代码块包裹命令，禁止输出函数调用 JSON。',
     '命令执行结果会作为后续上下文返回，你可以根据结果继续操作，直到任务完成。',
     `单次任务最多执行 ${maxRounds} 轮命令，完成后输出最终成果总结。`,
     '支持 git / curl / wget / ls / cat / grep / find / sed / awk / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令（node/python 等解释器默认禁用）。',
@@ -698,6 +700,121 @@ function formatResult(r) {
   return `${head}\n${r.detail}`
 }
 
+// —— Agent 指令标记解析：兼容官方格式与模型"跑偏"的常见格式 ——
+// 官方格式：  [action:agent:命令]
+// 兼容格式（模型常照搬通用 tool_call 模板，若不兼容会导致 Agent 完全不执行）：
+//   1) 尖括号伪标签：<action:agent:命令> / <action:agent:命令</action:agent:任意>
+//                    <action:agent>命令</action:agent>
+//   2) 类工具调用：<tool_calls><invoke name="Bash"><command>命令</command></invoke></tool_calls>
+//                  <invoke ...><parameter name="command">命令</parameter></invoke>
+//                  <tool_call>{"name":"Bash","arguments":{"command":"命令"}}</tool_call>
+// 返回 { commands, ranges }：commands 为按出现顺序提取的全部命令；ranges 为需从展示文本剥离的区间。
+
+/** 解码模型可能输出的 HTML 实体，避免命令被 &amp; / &lt; 等污染 */
+function decodeAgentEntities(s) {
+  return String(s || '')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/&#x0*27;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, '&')
+}
+
+/** 从一段 tool_call/invoke 片段中提取全部命令（command/cmd/parameter/JSON） */
+function extractCommandsFromToolMarkup(inner) {
+  const cmds = []
+  const push = (re) => {
+    const r = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
+    let m
+    while ((m = r.exec(inner))) {
+      const c = decodeAgentEntities(m[1]).trim()
+      if (c) cmds.push(c)
+      if (m.index === r.lastIndex) r.lastIndex++
+    }
+  }
+  push(/<command\b[^>]*>([\s\S]*?)<\/command>/gi)
+  push(/<cmd\b[^>]*>([\s\S]*?)<\/cmd>/gi)
+  push(/<parameter\s+name\s*=\s*["']?(?:command|cmd)["']?[^>]*>([\s\S]*?)<\/parameter>/gi)
+  if (!cmds.length) {
+    // JSON 形式：arguments 可能是对象，也可能是被转义的字符串
+    const flat = inner.replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\\//g, '/')
+    const jm = flat.match(/["']?command["']?\s*:\s*["']([^"']*)["']/i)
+    if (jm && jm[1].trim()) cmds.push(jm[1].trim())
+  }
+  return cmds.filter(Boolean)
+}
+
+function parseAgentActionMarks(text) {
+  const src = String(text || '')
+  const candidates = []
+  const collect = (re, extractor) => {
+    const r = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g')
+    let m
+    while ((m = r.exec(src))) {
+      const cmds = extractor(m)
+      if (cmds.length) candidates.push({ index: m.index, end: m.index + m[0].length, cmds })
+      if (m.index === r.lastIndex) r.lastIndex++
+    }
+  }
+
+  // 工具调用大块 / 单个 invoke（raw 覆盖整块，便于整体从展示文本剥离）
+  collect(/<(?:tool_calls|tool_call|function_calls?|invoke_set)\b[^>]*>([\s\S]*?)<\/(?:tool_calls|tool_call|function_calls?|invoke_set)>/gi,
+    (m) => extractCommandsFromToolMarkup(m[1]))
+  collect(/<invoke\b[^>]*>([\s\S]*?)<\/invoke>/gi,
+    (m) => extractCommandsFromToolMarkup(m[1]))
+  // 兜底：模型未用 invoke 包裹，直接输出 <command>/<cmd>/<parameter name="command">
+  collect(/<command\b[^>]*>([\s\S]*?)<\/command>/gi, (m) => [decodeAgentEntities(m[1]).trim()].filter(Boolean))
+  collect(/<cmd\b[^>]*>([\s\S]*?)<\/cmd>/gi, (m) => [decodeAgentEntities(m[1]).trim()].filter(Boolean))
+  collect(/<parameter\s+name\s*=\s*["']?(?:command|cmd)["']?[^>]*>([\s\S]*?)<\/parameter>/gi, (m) => [decodeAgentEntities(m[1]).trim()].filter(Boolean))
+  // 尖括号 action 标签：闭合标签可能被模型写成 </action:agent:命令首词>，故用 [^>]* 容错
+  collect(/<action:agent:\s*([\s\S]*?)\s*<\/action:agent[^>]*>/gi, (m) => [decodeAgentEntities(m[1]).trim()].filter(Boolean))
+  collect(/<action:agent>\s*([\s\S]*?)\s*<\/action:agent>/gi, (m) => [decodeAgentEntities(m[1]).trim()].filter(Boolean))
+  collect(/<action:agent:\s*([^\n>]+?)\s*>/gi, (m) => [decodeAgentEntities(m[1]).trim()].filter(Boolean))
+  // 官方方括号格式
+  collect(/\[action:agent:\s*([^\]]+?)\s*\]/gi, (m) => [decodeAgentEntities(m[1]).trim()].filter(Boolean))
+
+  // 去重叠：按起点升序、同起点取更长匹配，避免大块与其内部小标签重复提取
+  candidates.sort((a, b) => a.index - b.index || b.end - a.end)
+  const commands = []
+  const ranges = []
+  let cursor = -1
+  for (const c of candidates) {
+    if (c.index < cursor) continue
+    commands.push(...c.cmds)
+    ranges.push([c.index, c.end])
+    cursor = c.end
+  }
+  return { commands, ranges }
+}
+
+/** 提取 AI 回复中的全部 Agent 命令（兼容多种格式） */
+export function extractAgentCommands(text) {
+  return parseAgentActionMarks(text).commands
+}
+
+/** 判断回复中是否含 Agent 命令（任意兼容格式） */
+export function hasAgentCommand(text) {
+  return parseAgentActionMarks(text).commands.length > 0
+}
+
+/** 从展示文本中剥离所有 Agent 命令标记（任意兼容格式） */
+export function stripAgentActionTags(text) {
+  const src = String(text || '')
+  const { ranges } = parseAgentActionMarks(src)
+  if (!ranges.length) return src.trim()
+  let out = ''
+  let cursor = 0
+  for (const [s, e] of ranges) {
+    if (s < cursor) continue
+    out += src.slice(cursor, s)
+    cursor = e
+  }
+  out += src.slice(cursor)
+  return out.trim()
+}
+
 /**
  * 多轮 Agent 自动循环：任务 → AI 出命令 → 执行 → 结果回传 → 继续，直到完成或达轮数上限。
  * @param {Function} [onThinking] 每轮模型返回深度思考内容时回调 (reasoning: string) => Promise|void
@@ -744,6 +861,7 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
     '',
     '执行规则：',
     '1. 需要执行命令时，必须严格按 [action:agent:命令] 的格式输出（如 [action:agent:ls -la]），可先输出一句说明；格式不符系统不会执行。',
+    '1a. 只允许方括号格式；禁止 <tool_calls>/<invoke>/<command>/<action:agent:...> 等标签、markdown 代码块或函数调用 JSON。',
     '2. 观察命令结果后继续；重复上一步已成功的命令没有意义。',
     '3. 遇报错请分析原因并修正参数/路径，不要反复重试同一失败命令。',
     '4. 不需要更多命令时，直接输出最终成果总结（纯文本）。'
@@ -776,34 +894,36 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
     }
     if (!text) { finalText = '模型未产生输出，任务提前结束。'; try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {} ; return { done: false, finalText, rounds: i, logs } }
 
-    const match = text.match(/\[action:agent:([^\]]+)\]/)
-    if (!match) {
-      // 无命令 → 任务完成
-      finalText = text
+    const commands = extractAgentCommands(text)
+    if (!commands.length) {
+      // 无命令 → 任务完成（剥离可能残留的兼容格式标记）
+      finalText = stripAgentActionTags(text)
       try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
       return { done: true, finalText, rounds: i + 1, logs }
     }
 
-    const cmd = match[1].trim()
-    const check = checkCommand(cmd)
-    if (!check.ok) {
-      logs.push({ cmd, ok: false, reason: check.reason })
-      emitAudit('agent_cmd_rejected', { action: cmd, reason: check.reason })
-      messages.push({ role: 'assistant', content: text })
-      messages.push({ role: 'system', content: `命令被安全策略拒绝：${check.reason}\n请改用允许的命令继续。` })
-      continue
-    }
-
-    const r = await runCommand(cmd, { signal: ac.signal })
-    logs.push({ cmd, ok: r.ok, code: r.code, timedOut: r.timedOut, aborted: r.aborted, costMs: r.costMs, output: r.detail })
-    emitAudit(r.aborted ? (timedOutByHardTimer ? 'agent_timeout' : 'agent_error') : 'agent_cmd', {
-      action: cmd,
-      ok: r.ok && !r.aborted,
-      reason: r.aborted ? (timedOutByHardTimer ? '命令执行超时' : '命令被中断') : (!r.ok ? String(r.error || r.detail || '').slice(0, 200) : undefined)
-    })
     messages.push({ role: 'assistant', content: text })
+    const outputs = []
+    for (const cmd of commands) {
+      const check = checkCommand(cmd)
+      if (!check.ok) {
+        logs.push({ cmd, ok: false, reason: check.reason })
+        emitAudit('agent_cmd_rejected', { action: cmd, reason: check.reason })
+        outputs.push(`命令被安全策略拒绝：${check.reason}`)
+        continue
+      }
+      const r = await runCommand(cmd, { signal: ac.signal })
+      logs.push({ cmd, ok: r.ok, code: r.code, timedOut: r.timedOut, aborted: r.aborted, costMs: r.costMs, output: r.detail })
+      emitAudit(r.aborted ? (timedOutByHardTimer ? 'agent_timeout' : 'agent_error') : 'agent_cmd', {
+        action: cmd,
+        ok: r.ok && !r.aborted,
+        reason: r.aborted ? (timedOutByHardTimer ? '命令执行超时' : '命令被中断') : (!r.ok ? String(r.error || r.detail || '').slice(0, 200) : undefined)
+      })
+      outputs.push(formatResult(r))
+      if (r.aborted) break
+    }
     // 命令输出来自不可信的外部环境（可能反射文件内容），以 user 身份 + untrusted 边界注入，防止其内容以 system 权重劫持后续指令
-    messages.push({ role: 'user', content: `<command_output>\n${formatResult(r)}\n</command_output>` })
+    messages.push({ role: 'user', content: `<command_output>\n${outputs.join('\n---\n')}\n</command_output>` })
   }
 
   try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
@@ -812,15 +932,14 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
 }
 
 /**
- * 被动单次执行：AI 普通回复中若含 [action:agent:命令]，执行一次并回传结果。
+ * 被动单次执行：AI 普通回复中若含 [action:agent:命令]（或兼容的 tool_call / 尖括号格式），执行一次并回传结果。
  * @returns {null | { cleanText, ok, cmd, result }}
  */
 export async function parseAndExecuteAgentAction(replyText) {
-  const re = /\[action:agent:([^\]]+)\]/i
-  const m = replyText.match(re)
-  if (!m) return null
-  const cmd = m[1].trim()
-  const cleanText = replyText.replace(m[0], '').trim()
+  const commands = extractAgentCommands(replyText)
+  if (!commands.length) return null
+  const cmd = commands[0]
+  const cleanText = stripAgentActionTags(replyText)
   const check = checkCommand(cmd)
   if (!check.ok) {
     return { cleanText, ok: false, cmd, result: `命令被安全策略拒绝：${check.reason}` }
@@ -887,27 +1006,35 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
     return { text: String(call.res?.text || '').trim(), reasoning: String(call.res?.reasoning || '').trim() }
   }
 
-  while (executed < cap) {
-    const match = text.match(/\[action:agent:([^\]]+)\]/)
-    if (!match) break
-    const cmd = match[1].trim()
-    const check = checkCommand(cmd)
-    if (!check.ok) {
-      logs.push({ cmd, ok: false, reason: check.reason })
-      emitAudit('agent_cmd_rejected', { action: cmd, reason: check.reason })
-      messages.push({ role: 'system', content: `命令被安全策略拒绝：${check.reason}\n请改用允许的命令继续。` })
-    } else {
-      const r = await runCommand(cmd, { signal: ac.signal })
-      logs.push({ cmd, ok: r.ok, code: r.code, costMs: r.costMs, output: r.detail, aborted: r.aborted })
-      emitAudit(r.aborted ? (timedOutByHardTimer ? 'agent_timeout' : 'agent_error') : 'agent_cmd', {
-        action: cmd,
-        ok: r.ok && !r.aborted,
-        reason: r.aborted ? (timedOutByHardTimer ? '命令执行超时' : '命令被中断') : (!r.ok ? String(r.error || r.detail || '').slice(0, 200) : undefined)
-      })
-      // 同上：命令输出为不可信内容，以 user 身份 + untrusted 边界注入，避免其内容以 system 权重劫持后续指令
-      messages.push({ role: 'user', content: `<command_output>\n${formatResult(r)}\n</command_output>` })
+  while (true) {
+    const commands = extractAgentCommands(text)
+    if (!commands.length) break
+    const outputs = []
+    for (const cmd of commands) {
+      if (executed >= cap) break
+      const check = checkCommand(cmd)
+      if (!check.ok) {
+        logs.push({ cmd, ok: false, reason: check.reason })
+        emitAudit('agent_cmd_rejected', { action: cmd, reason: check.reason })
+        outputs.push(`命令被安全策略拒绝：${check.reason}`)
+      } else {
+        const r = await runCommand(cmd, { signal: ac.signal })
+        logs.push({ cmd, ok: r.ok, code: r.code, costMs: r.costMs, output: r.detail, aborted: r.aborted })
+        emitAudit(r.aborted ? (timedOutByHardTimer ? 'agent_timeout' : 'agent_error') : 'agent_cmd', {
+          action: cmd,
+          ok: r.ok && !r.aborted,
+          reason: r.aborted ? (timedOutByHardTimer ? '命令执行超时' : '命令被中断') : (!r.ok ? String(r.error || r.detail || '').slice(0, 200) : undefined)
+        })
+        outputs.push(formatResult(r))
+        if (r.aborted) { executed++; break }
+      }
+      executed++
     }
-    executed++
+    // 命令输出为不可信内容，以 user 身份 + untrusted 边界注入，避免其内容以 system 权重劫持后续指令
+    if (outputs.length) {
+      messages.push({ role: 'user', content: `<command_output>\n${outputs.join('\n---\n')}\n</command_output>` })
+    }
+    if (executed >= cap) break
     // 硬超时只在入口登记一次，不在循环内重置；整次任务的总时限由 AGENT_HARD_TIMEOUT_MS 控制
     const next = await roundTrip()
     if (next.error) {
@@ -923,8 +1050,8 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
   }
 
   try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
-  const stillAction = /\[action:agent:/.test(text)
-  const finalText = text.replace(/\[action:agent:[^\]]*\]/g, '').trim()
+  const stillAction = hasAgentCommand(text)
+  const finalText = stripAgentActionTags(text)
   if (stillAction) {
     return {
       done: false,

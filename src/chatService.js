@@ -1148,7 +1148,8 @@ export async function handleChat(e) {
     }
 
     // 解析 Agent 命令指令并多轮循环执行（仅主人会话且已注入 agent 上下文时）
-    if (agentContext && /\[action:agent:/i.test(replyText)) {
+    // 用 hasAgentCommand 兼容 [action:agent:..] / 尖括号伪标签 / tool_calls 等模型常见输出
+    if (agentContext && agent.hasAgentCommand(replyText)) {
       // 累计每轮深度思考，Agent 长任务默认不逐轮发送，任务结束/出错后统一汇总一次性发送（防刷屏）
       const agentReasonings = []
       const finishReasoning = async () => {
