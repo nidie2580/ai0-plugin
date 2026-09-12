@@ -893,7 +893,7 @@ export async function buildGroupContext(e) {
   lines.push('  好的，我来帮你禁言该成员10分钟。')
   lines.push('  [action:mute:123:600]')
   lines.push('')
-  const listPolicy = cfg.get('groupOps.allowMemberListFor', 'member')
+  const listPolicy = cfg.get('groupOps.allowMemberListFor', 'admin')
   const listWho = listPolicy === 'master' ? '仅机器人主人可查询' : (listPolicy === 'admin' ? '管理员/机器人主人可查询' : '任何群成员均可查询')
   lines.push(`【信息获取类操作（只读）】`)
   lines.push(`这类操作只是读取群内信息，不产生任何群变更。成员列表查询权限：${listWho}（只有请求者符合该身份时才应输出指令）。输出格式同上：`)
@@ -1219,8 +1219,9 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
       // —— 4 条硬验证（本地判定，不依赖 AI）——
       if (type === 'member_list') {
         // member_list：只读信息获取，但"谁可查"按配置收敛。
-        //   allowMemberListFor = 'member'(默认历史行为：任何成员) | 'admin'(仅管理员/主人) | 'master'(仅机器人主人)
-        const listPolicy = cfg.get('groupOps.allowMemberListFor', 'member')
+        //   allowMemberListFor = 'member'（显式放宽到任何成员）| 'admin'（默认：仅管理员/主人）| 'master'（仅机器人主人）
+        //   默认已收紧到 admin；需要 member 级可见的显式在 config.yaml 里改 allowMemberListFor: member
+        const listPolicy = cfg.get('groupOps.allowMemberListFor', 'admin')
         if (listPolicy === 'admin' && !requesterElevated) {
           results.push({ type, ok: false, msg: '仅管理员/机器人主人可查询群成员列表' }); continue
         } else if (listPolicy === 'master' && !requesterIsMaster) {

@@ -51,7 +51,10 @@ function rateLimitWaitMs(attempt) {
   return Math.min(RATE_LIMIT_RETRY_BASE_MS * Math.pow(2, attempt - 1), RATE_LIMIT_RETRY_CAP_MS)
 }
 // 模块级：记录上一次 LLM 调用的完成时间，用于轮间间隔控制
-let lastLlmCallTime = 0
+// 改为 per-identity Map：不同主人/会话互不影响各自的轮间间隔
+const lastLlmCallTimes = new Map()
+// 全局兜底 key（当调用方未提供身份标识时使用，保持向后兼容）
+const GLOBAL_RATE_LIMIT_KEY = '__global__'
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, Math.max(0, Number(ms) || 0)))
@@ -97,9 +100,19 @@ export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = 
   const conf = cfg.get('agent', {}) || {}
   const callInterval = Number(conf.callIntervalMs) || DEFAULT_CALL_INTERVAL_MS
   // —— 轮间间隔控制：距上次调用不足 callIntervalMs 则先等待（可被 signal 中断） ——
-  const wait = callInterval - (Date.now() - lastLlmCallTime)
+  // per-identity Map：不同主人/会话的间隔互不影响；未提供 identityKey 时走全局兜底
+  const identityKey = opts.identityKey && String(opts.identityKey).trim()
+    ? String(opts.identityKey) : GLOBAL_RATE_LIMIT_KEY
+  const prevTime = lastLlmCallTimes.get(identityKey) || 0
+  const wait = callInterval - (Date.now() - prevTime)
   if (wait > 0) await sleepInterruptible(wait, opts.signal)
-  lastLlmCallTime = Date.now()
+  lastLlmCallTimes.set(identityKey, Date.now())
+  // 防止 Map 无限增长：超过 512 个 key 时清理最老的一半（极低概率，保守措施）
+  if (lastLlmCallTimes.size > 512) {
+    const entries = [...lastLlmCallTimes.entries()].sort((a, b) => a[1] - b[1])
+    const toRemove = entries.slice(0, Math.floor(entries.length / 2))
+    for (const [k] of toRemove) lastLlmCallTimes.delete(k)
+  }
 
   const chat = callFn || ((msgs, o) => llm.chatCompletions(msgs, o))
   let lastErr = null
@@ -129,7 +142,7 @@ export async function callLlmWithRetry({ messages, opts = {}, callFn = null } = 
 // —— 命令白名单：AI 可执行的命令（首命令必须命中，含 cd 内建） ——
 const DEFAULT_ALLOWED = new Set([
   // 基本文件/目录/文本
-  'ls', 'cat', 'head', 'tail', 'wc', 'echo', 'printf', 'pwd', 'whoami', 'date',
+  'ls', 'cd', 'cat', 'head', 'tail', 'wc', 'echo', 'printf', 'pwd', 'whoami', 'date',
   'grep', 'find', 'which', 'tree', 'stat', 'file', 'du', 'df', 'sort', 'uniq',
   'cut', 'tr', 'sed', 'awk', 'basename', 'dirname', 'realpath', 'readlink',
   'diff', 'cmp',
@@ -308,20 +321,105 @@ function assertFileArgsInWorkspace(cmd) {
   const segs = splitSegments(cmd)
   for (const seg of segs) {
     const c0 = firstCommand(seg)
-    if (!FILE_PATH_COMMANDS.has(c0)) continue
+    if (!FILE_PATH_COMMANDS.has(c0) && c0 !== 'curl' && c0 !== 'wget') continue
     const tokens = tokenizeKeepQuoted(seg).slice(1) // 去掉命令本身
+    let i = 0
+    while (i < tokens.length) {
+      const tk = tokens[i]
+      if (!tk) { i++; continue }
+      // curl/wget 的 -o/--output/-O 后跟的路径参数也要校验（属于"非 FILE_PATH_COMMANDS 但写文件到磁盘"）
+      if ((c0 === 'curl' || c0 === 'wget') && tk.startsWith('-')) {
+        if (tk === '-o' || tk === '--output' || tk === '-O' || tk === '--output-document') {
+          const pathTk = tk === '-O' || tk === '--output-document' ? null : tokens[i + 1]
+          if (pathTk) {
+            const abs = path.isAbsolute(pathTk) ? pathTk : path.resolve(WORKSPACE, pathTk)
+            let real = null
+            try { real = fs.realpathSync.native(abs) } catch (_) {
+              try { real = fs.realpathSync.native(path.dirname(abs)) } catch (_2) { real = null }
+            }
+            if (real != null && real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+              return { ok: false, reason: `${c0} 输出路径超出工作区沙箱：${pathTk}` }
+            }
+          }
+          i += 2; continue
+        }
+        i++; continue
+      }
+      if (FILE_PATH_COMMANDS.has(c0)) {
+        if (tk.startsWith('-')) { i++; continue }
+        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(tk)) { i++; continue } // URL，非本地路径
+        const abs = path.isAbsolute(tk) ? tk : path.resolve(WORKSPACE, tk)
+        let real = null
+        try { real = fs.realpathSync.native(abs) } catch (_) {
+          try { real = fs.realpathSync.native(path.dirname(abs)) } catch (_2) { real = null }
+        }
+        if (real == null) { i++; continue } // 父目录也不存在，交由上层命令自然失败，不硬拦
+        if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+          return { ok: false, reason: `参数路径超出工作区沙箱：${tk}` }
+        }
+      }
+      i++
+    }
+  }
+  return { ok: true }
+}
+
+// —— shell 展开逃逸防护：exec 过 shell，会展开 ~ 和裸 $VAR ——
+// assertFileArgsInWorkspace 用字面 path.resolve（不展开），攻击者可用：
+//   cat ~/somefile / cat $HOME/somefile  → 校验按 workspace 相对路径解析 → realpath 失败 → continue 放行 →
+//   执行时 shell 展开到真实 home，读出 workspace 外任意非黑名单文件。
+// 这里在 FILE_PATH 校验之前拦截任何以 ~ 或裸 $ 开头的 token（含引号内的字面文本，
+// 因为 tokenizeKeepQuoted 会保留引号内容——用户输入就是字面 ~ 和 $）。
+function assertNoShellExpandTokens(cmd) {
+  const segs = splitSegments(cmd)
+  for (const seg of segs) {
+    const c0 = firstCommand(seg)
+    if (!c0) continue
+    const tokens = tokenizeKeepQuoted(seg)
+    for (const tk of tokens) {
+      if (!tk || tk === c0) continue
+      if (tk.startsWith('~/') || tk === '~' || tk.startsWith('~/')) {
+        return { ok: false, reason: `禁止 shell 展开的 ~ 路径（会被 exec 展开到真实 home）：${tk}` }
+      }
+      if (tk.startsWith('$') && !/^\$\{[^}]+\}$/.test(tk) && !/\$\{[^}]+\}/.test(tk)) {
+        // 裸 $VAR（不含 ${...} 形式）：如 $HOME、$PATH 会被 shell 展开
+        // ${VAR} 形式也一样危险，同样拒绝
+        return { ok: false, reason: `禁止 shell 变量展开（会被 exec 展开到宿主环境）：${tk}` }
+      }
+      if (tk.startsWith('${')) {
+        return { ok: false, reason: `禁止 shell 变量展开（会被 exec 展开到宿主环境）：${tk}` }
+      }
+    }
+  }
+  return { ok: true }
+}
+
+// —— 泛化绝对路径边界制：所有白名单命令的非选项绝对路径参数都必须落在 workspace ——
+// 白名单里的 find / grep / git / rg / fd / which 等命令不在 FILE_PATH_COMMANDS，
+// 原来的黑名单是名单制（只挡 /etc /root /usr ... 显式列出的系统目录），攻击者可
+// 用 find /opt /proc /sys /dev /run ... 列这些没被列出来的系统目录。
+// 这里泛化：所有白名单命令的非选项 token，若以 "/" 开头（纯绝对路径，排除 "-" 选项），
+// 则 realpath 后必须落在 workspace 内。URL 和数字参数通过 isAbsolute + 首字符 "/" 过滤。
+function assertAllAbsolutePathsInWorkspace(cmd) {
+  let realRoot = null
+  try { realRoot = fs.realpathSync.native(WORKSPACE) } catch (_) { return { ok: true } }
+  const segs = splitSegments(cmd)
+  for (const seg of segs) {
+    const c0 = firstCommand(seg)
+    if (!DEFAULT_ALLOWED.has(c0)) continue
+    const tokens = tokenizeKeepQuoted(seg).slice(1)
     for (const tk of tokens) {
       if (!tk) continue
       if (tk.startsWith('-')) continue
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(tk)) continue // URL，非本地路径
-      const abs = path.isAbsolute(tk) ? tk : path.resolve(WORKSPACE, tk)
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(tk)) continue // URL
+      if (!path.isAbsolute(tk)) continue                  // 相对路径/标识符，放过
       let real = null
-      try { real = fs.realpathSync.native(abs) } catch (_) {
-        try { real = fs.realpathSync.native(path.dirname(abs)) } catch (_2) { real = null }
+      try { real = fs.realpathSync.native(tk) } catch (_) {
+        try { real = fs.realpathSync.native(path.dirname(tk)) } catch (_2) { real = null }
       }
-      if (real == null) continue // 父目录也不存在，交由上层命令自然失败，不硬拦
+      if (real == null) continue
       if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
-        return { ok: false, reason: `参数路径超出工作区沙箱：${tk}` }
+        return { ok: false, reason: `绝对路径超出工作区沙箱（边界制校验）：${tk}` }
       }
     }
   }
@@ -407,6 +505,15 @@ export function checkCommand(rawCmd, opts = {}) {
   // 5) 文件路径参数 realpath 边界（防软链 / /proc / .. 逃逸出工作区）
   const pathCheck = assertFileArgsInWorkspace(cmd)
   if (!pathCheck.ok) return { ok: false, reason: pathCheck.reason }
+
+  // 5b) 泛化绝对路径边界：所有白名单命令的非选项绝对路径参数都必须落在 workspace
+  // （防 find /opt、git log -- path 在工作区外、rg /proc 等名单制绕过）
+  const absCheck = assertAllAbsolutePathsInWorkspace(cmd)
+  if (!absCheck.ok) return { ok: false, reason: absCheck.reason }
+
+  // 5c) shell 展开逃逸防护：exec 过 shell，拦截以 ~ 或裸 $ 开头的 token
+  const expandCheck = assertNoShellExpandTokens(cmd)
+  if (!expandCheck.ok) return { ok: false, reason: expandCheck.reason }
 
   return { ok: true, cmd }
 }
@@ -650,7 +757,7 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
     // 硬超时只在入口登记一次，不在循环内重置
     // 整次任务的总时限由 AGENT_HARD_TIMEOUT_MS 控制
 
-    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal }, callFn })
+    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal, identityKey: (audit && audit.userId) || GLOBAL_RATE_LIMIT_KEY }, callFn })
     if (!call.ok) {
       const reason = call.aborted ? '（请求已被取消/超时）'
         : isRateLimit(call.error) ? 'Agent 因 API 速率限制暂时无法继续，请稍后重试或降低 maxRounds 配置'
@@ -768,7 +875,7 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
   resetHardTimer()
 
   const roundTrip = async () => {
-    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal }, callFn })
+    const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal, identityKey: (audit && audit.userId) || GLOBAL_RATE_LIMIT_KEY }, callFn })
     if (!call.ok) {
       if (call.aborted || ac.signal?.aborted) return { error: { aborted: true, message: '' } }
       return { error: { rateLimit: isRateLimit(call.error), aborted: false, message: sanitizeLog(call.error?.message || call.error) } }

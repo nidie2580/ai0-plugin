@@ -957,8 +957,11 @@ export function createApp() {
       const dir = path.join(PLUGIN_ROOT, 'data', 'history', userId)
       if (!fs.existsSync(dir)) return res.json({ ok: false, msg: '目录不存在' })
       if (sessionId) {
+        // 单删一个会话：同时清理主 .json 和对应的 .meta.json（与整体删除行为对称）
         const p = path.join(dir, `${sessionId}.json`)
         if (fs.existsSync(p)) fs.unlinkSync(p)
+        const metaP = path.join(dir, `${sessionId}.meta.json`)
+        if (fs.existsSync(metaP)) fs.unlinkSync(metaP)
       } else {
         for (const f of fs.readdirSync(dir)) {
           if (f.endsWith('.json')) fs.unlinkSync(path.join(dir, f))
