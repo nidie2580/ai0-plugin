@@ -364,9 +364,19 @@ export async function listAvailableModels({ modelKey = null } = {}) {
       timeout: 15000,
     })
     if (resp.status >= 200 && resp.status < 300) {
+      // OpenAI 兼容格式：{ data: [ { id, ... } ] }；部分服务商直接返回数组
       const arr = Array.isArray(resp.data?.data) ? resp.data.data : Array.isArray(resp.data) ? resp.data : []
       const ids = arr.map(x => x?.id).filter(Boolean)
-      return { ok: true, status: resp.status, url: modelsUrl, models: ids, count: ids.length }
+      if (ids.length > 0) {
+        return { ok: true, status: resp.status, url: modelsUrl, models: ids, count: ids.length }
+      }
+      // 200 但无可解析的模型列表 → 服务可达，仅 /models 列表不可用（不影响对话）
+      return { ok: true, status: resp.status, url: modelsUrl, models: [], count: 0, unsupported: true, note: '/models 未返回模型列表（不影响对话，请手动填写模型名）' }
+    }
+    if (resp.status === 404) {
+      // GLM Coding（/api/coding/paas/v4）等端点不提供 /models：服务本身可达，只是没有模型列表，
+      // 不应据此把平台判为"离线/未返回任何可用模型"（对话走 /chat/completions，与 /models 无关）
+      return { ok: true, status: resp.status, url: modelsUrl, models: [], count: 0, unsupported: true, note: 'HTTP 404：该服务商不提供 /models 列表（不影响对话，请手动填写模型名）' }
     }
     return { ok: false, status: resp.status, url: modelsUrl, models: [], error: `HTTP ${resp.status}` }
   } catch (e) {
@@ -395,7 +405,9 @@ export async function probeModelConnection({ modelKey = null } = {}) {
     url: info.url,
     latencyMs,
     availableModels: info.models || [],
-    count: info.count || 0
+    count: info.count || 0,
+    unsupported: !!info.unsupported,
+    note: info.note || ''
   }
   if (!info.ok && info.error) out.error = info.error
   return out
@@ -503,6 +515,10 @@ export async function chatCompletions(messages, {
       })
     } catch (e) {
       const s = summarizeAxiosError(e)
+      // — P1-4: 重抛 canceled 错误（取消不应被包装成普通错误） —
+      if (e?.name === 'CanceledError' || e?.code === 'ERR_CANCELED' || signal?.aborted) {
+        throw e  // 原样重抛，让外层取消逻辑生效
+      }
       // 当模型开启联网(web:true)却因上游不支持 web_search 工具而失败时，回退为"不联网"重试一次，
       // 保证对话主链路可用（联网是增强项，不应阻塞正常问答）。
       if (m.web === true && !toolsFallbackTried && body.tools) {

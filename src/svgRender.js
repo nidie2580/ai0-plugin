@@ -377,7 +377,7 @@ export function renderModelListPages(providerData, page = 1) {
           cardsHtml += `<text x="${x + 16}" y="${contY + 40}" font-size="11" fill="#9CA3AF">URL: ${esc(p.url.length > 48 ? p.url.slice(0, 45) + '...' : p.url)}</text>`
         }
       } else if ((p.models?.length || 0) === 0) {
-        cardsHtml += `<text x="${x + 16}" y="${contY + 18}" font-size="13" fill="#F59E0B">⚠ 该账号未返回任何可用模型</text>`
+        cardsHtml += `<text x="${x + 16}" y="${contY + 18}" font-size="13" fill="#F59E0B">⚠ 无 /models 列表（不影响对话，可手动填写模型名）</text>`
       } else {
         const list = p.models.slice(seg.modelStart, seg.modelStart + seg.modelCount)
         list.forEach((id, i) => {

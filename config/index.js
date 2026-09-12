@@ -502,6 +502,32 @@ export function saveConfig(config) {
             cleaned[k] = diskConfig[k]
           }
         }
+        // 网页后台不允许修改 permissions.masters（webServer 保存前会删除该字段）：
+        // 若本次保存的 permissions 里没有 masters 而磁盘上有 → 还原，防止主人列表被网页保存洗掉
+        if (cleaned.permissions && typeof cleaned.permissions === 'object' &&
+            diskConfig.permissions && typeof diskConfig.permissions === 'object' &&
+            cleaned.permissions.masters === undefined &&
+            diskConfig.permissions.masters !== undefined) {
+          cleaned.permissions.masters = diskConfig.permissions.masters
+        }
+        // 前端回传的 '********' 密钥占位符一律还原为磁盘真实值，绝不把占位符当密钥落盘
+        // （覆盖 imageGen.apiKey / imageInput.ocr.apiKey 等；磁盘无对应值时删除该字段而非保存占位符）
+        const isPlaceholder = (v) => v === '********'
+        const restorePlaceholders = (target, disk) => {
+          if (!target || typeof target !== 'object' || !disk || typeof disk !== 'object') return
+          for (const k of Object.keys(target)) {
+            if (isDangerKey(k)) continue
+            const tv = target[k]
+            if (isPlaceholder(tv)) {
+              const dv = disk[k]
+              if (typeof dv === 'string' && dv && !isPlaceholder(dv)) target[k] = dv
+              else delete target[k]
+            } else if (tv && typeof tv === 'object') {
+              restorePlaceholders(tv, disk[k])
+            }
+          }
+        }
+        restorePlaceholders(cleaned, diskConfig)
       } catch (_) {}
     }
     const content = YAML.stringify(cleaned)

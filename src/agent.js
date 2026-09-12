@@ -1046,7 +1046,12 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
       return { done: false, finalText: `Agent 执行中断：模型调用失败 ${reason}`, rounds: executed, logs }
     }
     text = next.text
-    if (!text) return { done: false, finalText: '模型未产生输出，Agent 提前结束。', rounds: executed, logs }
+    // 每轮模型的新输出要写回 messages，否则下一轮请求出现连续 user 消息且模型失忆
+    if (!text) {
+      try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
+      return { done: false, finalText: '模型未产生输出，Agent 提前结束。', rounds: executed, logs }
+    }
+    messages.push({ role: 'assistant', content: text })
   }
 
   try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
