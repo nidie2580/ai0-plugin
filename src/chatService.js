@@ -1017,12 +1017,13 @@ export async function handleChat(e) {
     }
   } catch (err) {
     // 区分"硬超时"与"被新请求取代/取消"，避免用宽泛正则把真实错误当取消静默吞掉
-    if (err?.name === 'CanceledError') {
+    if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
       if (timedOut) {
         safeLogger.warn(`[ai0-plugin] 模型生成超时(${hardTimeout}ms)，已中止`)
         replyText = '(生成超时，请重试)'
       } else {
-        replyText = ''  // 被新请求取代时静默吞掉
+        // 被新请求取代：静默返回，不回复、不写历史（避免把取消当错误污染上下文）
+        return true
       }
     } else {
       safeLogger.error(`[ai0-plugin] LLM 调用失败: ${err.message}`)

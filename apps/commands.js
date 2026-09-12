@@ -1003,7 +1003,13 @@ export class AICommands extends plugin {
     if (probe?.url) probeLines.push(`  URL    : ${probe.url}`)
     probeLines.push(`  HTTP   : ${probe?.status ?? '-'}${probe?.code ? '  code=' + probe.code : ''}  耗时 ${probe?.latencyMs ?? '-'} ms`)
     if (probe?.ok) {
-      probeLines.push(`  结果   : ✅ /models 可达（鉴权 & 域名/端口基本正确）`)
+      if (probe.unsupported) {
+        probeLines.push(`  结果   : ⚠ 服务可达，但 /models 未提供模型列表（HTTP ${probe.status ?? '-'}）`)
+        probeLines.push(`           常见于 GLM Coding（/api/coding/paas/v4）等端点：不影响对话，请直接手动填写模型名（#ai设置模型 <模型名>）。`)
+        if (probe.note) probeLines.push(`  说明   : ${probe.note}`)
+      } else {
+        probeLines.push(`  结果   : ✅ /models 可达（鉴权 & 域名/端口基本正确）`)
+      }
       const avail = Array.isArray(probe?.availableModels) ? probe.availableModels : []
       if (avail.length) {
         probeLines.push(`  本账号可用模型（${avail.length} 个）: ${avail.join(', ')}`)
@@ -1225,7 +1231,8 @@ export class AICommands extends plugin {
             return
           }
           if (!pm.models.length) {
-            lines.push(`  📄 该账号未返回任何可用模型`)
+            lines.push(`  📄 /models 未返回模型列表（常见于 GLM Coding 端点，不影响对话）`)
+            lines.push(`     可直接用 "#切换模型 ${key} <模型名>" 手动切换。`)
             return
           }
           const curModel = modelCfg[key]?.model || ''

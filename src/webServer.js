@@ -664,7 +664,7 @@ export function createApp() {
       const k = safe.imageGen.apiKey
       safe.imageGen.apiKey = (!/^\s*$/.test(k) && !/^\*+$/.test(k)) ? API_KEY_PLACEHOLDER : k
     }
-    // OCR（图片转文字）apiKey 脱敏，避免任何已登录会话读取明文密钥
+    // OCR 视觉模型 apiKey 同样脱敏（此前遗漏，配置页会明文回显真实密钥）
     if (safe.imageInput && safe.imageInput.ocr && safe.imageInput.ocr.apiKey) {
       const k = safe.imageInput.ocr.apiKey
       safe.imageInput.ocr.apiKey = (!/^\s*$/.test(k) && !/^\*+$/.test(k)) ? API_KEY_PLACEHOLDER : k
@@ -698,7 +698,7 @@ export function createApp() {
     if (Array.isArray(config)) {
       return res.json({ ok: false, msg: '配置格式错误：不接受数组' })
     }
-    // — 发现E 修复：限制 JSON 嵌套深度，防止深度嵌套栈溢出 DoS —
+// — 发现E 修复：限制 JSON 嵌套深度，防止深度嵌套栈溢出 DoS —
     // 实际配置 4 层就够（model.openai.apiKey / groupOps.masters 等），上限设 8
     // 数组也计入深度（数组元素可能为对象，如 permissions.masters: [[{}], ...] 亦可嵌套）
     function getDepth(obj, cur = 1) {
@@ -717,7 +717,7 @@ export function createApp() {
     }
     const depth = getDepth(config)
     if (depth > 8) {
-      return res.json({ ok: false, msg: `配置嵌套深度 ${depth} 超过上限 8，拒绝处理` })
+      return res.json({ ok: false, msg: '配置嵌套过深（最多 8 层，当前检测为 ' + depth + ' 层），拒绝保存' })
     }
 
     // — 兼容：吸收 config 顶层中用户手误写成 "web.trustProxy" / "web.host" / "web.port" 的带点键，
@@ -742,8 +742,7 @@ export function createApp() {
 
     // — P0-2: 白名单校验顶层字段 —
     const ALLOWED_TOP_KEYS = new Set([
-      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web',
-      'securityLog', 'imageInput'
+      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web', 'securityLog', 'imageInput'
     ])
     const unknownKeys = Object.keys(config).filter(k => !ALLOWED_TOP_KEYS.has(k))
     if (unknownKeys.length) {
@@ -751,8 +750,10 @@ export function createApp() {
     }
 
     // — P0-2: 禁止通过 API 修改 permissions.masters —
-    // 前端保存时总是带 masters 键（即便为空数组），改为删除而非整体拒绝
-    if (config.permissions?.masters) {
+    // 前端保存时总是带 masters 键（即便为空数组），统一删除；
+    // saveConfig（config/index.js）发现 permissions 里缺 masters 时会从磁盘还原，
+    // 因此网页后台无论如何都改不掉主人列表，也不会把主人列表洗掉。
+    if (config.permissions && typeof config.permissions === 'object') {
       delete config.permissions.masters
     }
 
@@ -797,6 +798,7 @@ export function createApp() {
 
     // — P0-2: 数值字段范围校验 + trustProxy 规范化 —
     const w = config.web
+    if (w) {
       if (w.port != null && (typeof w.port !== 'number' || w.port < 1 || w.port > 65535)) {
         return res.json({ ok: false, msg: 'web.port 必须为 1-65535 之间的数字' })
       }
@@ -1024,6 +1026,7 @@ export function createApp() {
             models: info.models || [],
             count: info.count || 0,
             latencyMs: Date.now() - t0,
+            unsupported: !!info.unsupported,
             error: info.error || null
           }
         } catch (e) {
@@ -1067,7 +1070,7 @@ export function createApp() {
           const info = await llm.listAvailableModels({ modelKey: key })
           const latencyMs = Date.now() - t0
           if (info.ok) {
-            return { ...base, configured: true, status: 'ok', latencyMs, modelCount: info.count || 0, error: null }
+            return { ...base, configured: true, status: 'ok', latencyMs, modelCount: info.count || 0, unsupported: !!info.unsupported, error: null }
           }
           return { ...base, configured: true, status: 'error', latencyMs, modelCount: 0, error: info.error || `HTTP ${info.status}` }
         } catch (e) {
@@ -1359,24 +1362,28 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
       if (sameBind && !forceRestart) {
         return resolve({ ok: true, ...getServerInfo(), already: true })
       }
-      // 配置变更（或强制重启）→ 先关闭旧的，再启动新的
+      // 配置变更（或强制重启）→ 先关闭旧的，再启动新的。
+      // restarted 守卫保证 doStart 只执行一次：close 回调和 1500ms 兜底定时器赛跑，
+      // 若不设守卫，定时器会在新 server 就绪后再次 doStart → EADDRINUSE → 端口自动漂移 +1，
+      // 且被 unref 的旧实例仍在服务、stopWebServer 永远关不掉（孤儿监听）。
       try {
-        try { serverInstance.closeAllConnections?.() } catch (_) {}
-        serverInstance.close(() => {
+        let restarted = false
+        const doRestart = () => {
+          if (restarted) return
+          restarted = true
           serverInstance = null
           currentHost = null
           currentPort = null
           doStart()
-        })
+        }
+        try { serverInstance.closeAllConnections?.() } catch (_) {}
+        serverInstance.close(() => doRestart())
         // 兜底：close 可能不回调
         const t = setTimeout(() => {
-          if (serverInstance) {
-            try { serverInstance.closeAllConnections?.() } catch (_) {}
-            try { serverInstance.unref?.() } catch (_) {}
-            serverInstance = null
-            currentHost = null
-            currentPort = null
-            doStart()
+          if (!restarted) {
+            try { serverInstance?.closeAllConnections?.() } catch (_) {}
+            try { serverInstance?.unref?.() } catch (_) {}
+            doRestart()
           }
         }, 1500)
         if (t && t.unref) t.unref()

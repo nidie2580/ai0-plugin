@@ -1277,7 +1277,10 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       if (r.ok && r.info?.ok) {
         const models = r.info.models || []
         if (!models.length) {
-          box.innerHTML = `<span class="hint">✅ /models 可达（HTTP ${r.info.status || '-'}），但本账号未返回任何模型。URL: ${escapeHtml(r.info.url || '-')}</span>`
+          const note = r.info.unsupported
+            ? `该服务商未提供 /models 模型列表（HTTP ${r.info.status || '-'}），不影响正常对话，请直接在"模型 ID"中手动填写。`
+            : `/models 可达（HTTP ${r.info.status || '-'}），但本账号未返回任何模型。`
+          box.innerHTML = `<span class="hint">⚠ ${note} URL: ${escapeHtml(r.info.url || '-')}</span>`
         } else {
           const sel = $(`#providersList select.model-select[data-idx="${idx}"]`)
           if (sel) {
@@ -1288,7 +1291,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
           box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${r.info.latencyMs ?? '-'} ms）。可在上方"模型 ID"下拉中选择。</span>`
         }
       } else {
-        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml(r.info?.error || r.info?.status ? `HTTP ${r.info.status}` : (r.msg || '未知错误'))}<br>URL: ${escapeHtml(r.info?.url || '-')}</span>`
+        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml(r.info?.error || (r.info?.status ? `HTTP ${r.info.status}` : (r.msg || '未知错误')))}<br>URL: ${escapeHtml(r.info?.url || '-')}</span>`
       }
     }
   }
@@ -1323,7 +1326,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       if (item.ok) {
         const models = item.models || []
         if (!models.length) {
-          box.innerHTML = `<span class="hint">✅ /models 可达（HTTP ${item.status || '-'}），但未返回任何模型。</span>`
+          box.innerHTML = `<span class="hint">⚠ ${item.unsupported ? `未提供 /models 列表（HTTP ${item.status || '-'}），不影响对话，请手动填写模型 ID。` : `/models 可达（HTTP ${item.status || '-'}），但未返回任何模型。`}</span>`
         } else {
           const sel = $(`#providersList select.model-select[data-idx="${idx}"]`)
           if (sel) {
