@@ -207,13 +207,13 @@ describe('U1: parseAndExecuteActions 返回 { cleanText, results } 对象', () =
   })
 })
 
-describe('INFO: 群成员列表获取是信息类操作，不需要权限', () => {
+describe('INFO: 群成员列表查询（默认 allowMemberListFor=admin，只读但仍收敛权限）', () => {
   it('member_list 返回成员清单（含昵称/QQ/角色）', async () => {
     const { gid, requesterUid } = setupMockBot()
     const e = makeEvent(gid, requesterUid)
     const r = await groupOps.parseAndExecuteActions('[action:member_list:]', gid, e)
     assert.equal(r.results.length, 1)
-    assert.equal(r.results[0].ok, true, '信息类操作应执行成功（不要求权限）')
+    assert.equal(r.results[0].ok, true, '管理员/主人查询信息类操作应执行成功')
     assert.ok(r.results[0].msg.includes('本群共'), '应返回总人数')
     assert.ok(r.results[0].msg.includes('群主') || r.results[0].msg.includes('管理员'), '应带角色')
     assert.ok(r.results[0].msg.includes('10001'), '应包含请求者QQ')
@@ -229,11 +229,12 @@ describe('INFO: 群成员列表获取是信息类操作，不需要权限', () =
     assert.ok(!r.results[0].msg.includes('普通群员'), '不应包含不匹配成员')
   })
 
-  it('机器人非群主/管理员也能获取成员列表（信息类无权限门槛）', async () => {
+  it('默认 admin 策略下普通成员查询被拒（信息类操作仍收敛权限）', async () => {
     const { gid, requesterUid } = setupMockBot({ botRole: 'member', requesterRole: 'member' })
     const e = makeEvent(gid, requesterUid)
     const r = await groupOps.parseAndExecuteActions('[action:member_list:]', gid, e)
-    assert.equal(r.results[0].ok, true, '信息类操作不应因机器人/请求者权限不足而失败')
+    assert.equal(r.results[0].ok, false, '默认 admin 策略下普通成员不应查到完整成员列表')
+    assert.match(r.results[0].msg, /管理员/)
   })
 
   it('member_list 不出现在群操作同行评审待确认清单中', async () => {
