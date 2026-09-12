@@ -664,6 +664,11 @@ export function createApp() {
       const k = safe.imageGen.apiKey
       safe.imageGen.apiKey = (!/^\s*$/.test(k) && !/^\*+$/.test(k)) ? API_KEY_PLACEHOLDER : k
     }
+    // OCR（图片转文字）apiKey 脱敏，避免任何已登录会话读取明文密钥
+    if (safe.imageInput && safe.imageInput.ocr && safe.imageInput.ocr.apiKey) {
+      const k = safe.imageInput.ocr.apiKey
+      safe.imageInput.ocr.apiKey = (!/^\s*$/.test(k) && !/^\*+$/.test(k)) ? API_KEY_PLACEHOLDER : k
+    }
     // 兼容：把 config.yaml 中被写成顶层 "web.trustProxy"/"web.host"/"web.port" 带点键的值
     //       合并进 safe.web，让前端始终能看到一致、正确的结构。吸收后删除顶层带点键（避免在前端显示/保存时产生 unknownKey 报错）。
     for (const badKey of ['web.trustProxy', 'web.host', 'web.port']) {
@@ -737,7 +742,8 @@ export function createApp() {
 
     // — P0-2: 白名单校验顶层字段 —
     const ALLOWED_TOP_KEYS = new Set([
-      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web'
+      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web',
+      'securityLog', 'imageInput'
     ])
     const unknownKeys = Object.keys(config).filter(k => !ALLOWED_TOP_KEYS.has(k))
     if (unknownKeys.length) {
@@ -791,7 +797,6 @@ export function createApp() {
 
     // — P0-2: 数值字段范围校验 + trustProxy 规范化 —
     const w = config.web
-    if (w) {
       if (w.port != null && (typeof w.port !== 'number' || w.port < 1 || w.port > 65535)) {
         return res.json({ ok: false, msg: 'web.port 必须为 1-65535 之间的数字' })
       }
