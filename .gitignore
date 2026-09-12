@@ -15,4 +15,7 @@ agent/
 .env
 .env.local
 .trae-html-share-packages/
+# 本地工具产物（monkeycode spec 生成器 / trae html 分享包 / 本地诊断脚本）
+.monkeycode/
+.diag.cjs
 _smoke_*.mjs

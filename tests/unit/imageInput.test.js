@@ -1,6 +1,8 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import * as cfg from '../../config/index.js'
 
 // 图片输入功能回归测试
@@ -61,12 +63,15 @@ function pngDataUrlPayload() {
 }
 
 // 本地临时 PNG，供 imageSegmentToDataUrl 无网络本地解析
-const TMP_PNG = '/tmp/opencode/img-input-shared.png'
+// 用系统临时目录动态创建（避免依赖特定环境目录导致测试失败）
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ai0-imgtest-'))
+const TMP_PNG = path.join(TMP_DIR, 'img-input-shared.png')
 function createTempPng() {
   fs.writeFileSync(TMP_PNG, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02, 0x03]))
 }
 function cleanupTempPng() {
   if (fs.existsSync(TMP_PNG)) fs.unlinkSync(TMP_PNG)
+  try { fs.rmdirSync(TMP_DIR) } catch (_) {}
 }
 
 before(() => { restoreConfig(); createTempPng() })
@@ -124,7 +129,7 @@ describe('图片输入', () => {
     })
 
     it('本地文件路径读取并转 data URL', async () => {
-      const f = '/tmp/opencode/img-input-test.png'
+      const f = path.join(TMP_DIR, 'img-input-test.png')
       fs.writeFileSync(f, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01, 0x02]))
       try {
         const r = await helper.imageSegmentToDataUrl({ file: f })

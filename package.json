@@ -29,6 +29,9 @@
     "express": "4.22.2",
     "yaml": "2.9.0"
   },
+  "overrides": {
+    "qs": "6.16.0"
+  },
   "peerDependenciesMeta": {
     "express": { "optional": true }
   }
