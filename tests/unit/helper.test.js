@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeApiBase, replyReasoningAsChat, truncateUnicodeSafe } from '../../src/helper.js'
+import { normalizeApiBase, replyReasoningAsChat, truncateUnicodeSafe, getGroupId, isGroupChat } from '../../src/helper.js'
 
 globalThis.logger = {
   info: () => {}, warn: () => {}, error: () => {}, mark: () => {}
@@ -72,6 +72,27 @@ describe('helper: replyReasoningAsChat 深度思考聊天记录发送', () => {
     const out = await replyReasoningAsChat(e, '   ')
     assert.equal(out, null)
     assert.equal(replies.length, 0)
+  })
+})
+
+describe('helper: 群聊判定', () => {
+  test('兼容多种适配器的群号字段', () => {
+    assert.equal(getGroupId({ group_id: 123 }), 123)
+    assert.equal(getGroupId({ groupId: 234 }), 234)
+    assert.equal(getGroupId({ message: { group_id: 456 } }), 456)
+    assert.equal(getGroupId({ from_group: 789 }), 789)
+    assert.equal(getGroupId({ group: { group_id: 111 } }), 111)
+    assert.equal(getGroupId({ raw: { group_id: 222 } }), 222)
+    assert.equal(getGroupId({ user_id: 1 }), null)
+  })
+
+  test('isGroupChat 在无群号但标记为群时仍判定为群', () => {
+    assert.equal(isGroupChat({ isGroup: true }), true)
+    assert.equal(isGroupChat({ is_group: true }), true)
+    assert.equal(isGroupChat({ message_type: 'group' }), true)
+    assert.equal(isGroupChat({ chat_type: 'guild' }), true)
+    assert.equal(isGroupChat({ user_id: 1 }), false)
+    assert.equal(isGroupChat({ group_id: 9 }), true)
   })
 })
 

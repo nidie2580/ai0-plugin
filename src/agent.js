@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { exec } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
@@ -195,6 +195,8 @@ const DEFAULT_DENY = [
   /\bnano\b/, /\bvim\b/, /\bvi\b/, /\bless\b/, /\bmore\b/,
   // 命令替换 / 反引号 / 变量展开（绕过白名单的常见手法）
   /\$\(/, /\$\{/, /`/,
+  // POSIX 花括号展开（{ls,} / {a,b}）在 shell 下可变成多命令，execFile 虽不展开但仍拦截
+  /\{[^{}\s]+,[^{}]*\}/,
   // TLS/证书工具（openssl 常用于窃取/私钥操作，禁止）
   /\bopenssl\b/,
   // —— 绕过白名单的"子进程派生/破坏性"原语：允许命令会再拉起重定向到非白名单程序，或批量删除 ——
@@ -540,6 +542,53 @@ const INTERPRETER_COMMANDS = new Set([
 ])
 const INTERPRETER_INLINE_CODE_RE = /(?:^|[\s])-(?:c|e|p)(?![a-zA-Z])|--eval\b|--print\b|--execute\b/
 
+function workspaceProtectedNames() {
+  return new Set(['AGENTS.md'])
+}
+
+function isProtectedWorkspacePath(tk) {
+  if (!tk) return false
+  const names = workspaceProtectedNames()
+  const base = path.basename(String(tk).replace(/[\\/]+$/, ''))
+  if (names.has(base)) return true
+  try {
+    const abs = path.isAbsolute(tk) ? tk : path.resolve(WORKSPACE, tk)
+    const root = workspaceRealRoot()
+    if (!root) return names.has(path.basename(abs))
+    const real = fs.existsSync(abs) ? fs.realpathSync.native(abs) : path.normalize(abs)
+    return names.has(path.basename(real))
+  } catch (_) {
+    return names.has(path.basename(String(tk)))
+  }
+}
+
+function assertNoProtectedWorkspaceWrites(cmd) {
+  const segs = splitSegments(cmd)
+  const writeCmds = new Set(['rm', 'mv', 'cp', 'ln', 'sed', 'tee', 'truncate', 'chmod'])
+  for (const seg of segs) {
+    const c0 = firstCommand(seg)
+    if (!c0) continue
+    const tokens = tokenizeKeepQuoted(seg).slice(1)
+    if (c0 === 'sed' && /(^|\s)-i(\b|=)/.test(seg)) {
+      for (const tk of tokens) {
+        if (tk.startsWith('-')) continue
+        if (isProtectedWorkspacePath(tk)) {
+          return { ok: false, reason: '禁止修改受保护的工作区规范文件 AGENTS.md（命令白名单由代码决定，改此文件无效）' }
+        }
+      }
+    }
+    if (!writeCmds.has(c0) && c0 !== 'echo' && c0 !== 'printf' && c0 !== 'cat') continue
+    if ((c0 === 'echo' || c0 === 'printf' || c0 === 'cat') && !/(?:^|[\s;|&])(?:>>?)\s/.test(seg)) continue
+    for (const tk of tokens) {
+      if (!tk || tk.startsWith('-')) continue
+      if (isProtectedWorkspacePath(tk)) {
+        return { ok: false, reason: '禁止修改或删除受保护的工作区规范文件 AGENTS.md（命令白名单由代码决定，改此文件无效）' }
+      }
+    }
+  }
+  return { ok: true }
+}
+
 function assertNoInlineInterpreterCode(cmd) {
   const segs = splitSegments(cmd)
   for (const seg of segs) {
@@ -600,12 +649,26 @@ export function checkCommand(rawCmd, opts = {}) {
   // 4) 引号感知拆分，逐段校验首命令白名单
   const segs = splitSegments(cmd)
   if (!segs.length) return { ok: false, reason: '无法解析命令' }
+  // 命令经 execFile 执行，不再过 /bin/sh：管道/&&/; 无法在无 shell 下工作，必须分步调用
+  if (segs.length > 1) {
+    return { ok: false, reason: '禁止管道、&&、; 等链式命令（不经过 shell 执行）。请拆成多次 [action:agent:单条命令]' }
+  }
   for (const seg of segs) {
     const c0 = firstCommand(seg)
     if (!c0) return { ok: false, reason: '空命令段' }
     if (c0.includes('/')) return { ok: false, reason: `不允许路径形式命令: ${c0}` }
+    if (c0 === 'cd') return { ok: false, reason: '工作目录已锁定为 workspace，无需 cd（命令不经过 shell，cd 无法影响后续调用）' }
     if (!allowed.has(c0)) return { ok: false, reason: `命令不在白名单: ${c0}` }
   }
+  // 重定向依赖 shell；无 shell 时 `>file` 只会变成字面参数，直接拒绝以免误执行
+  for (const tk of tokenizeKeepQuoted(cmd)) {
+    if (!tk) continue
+    if (/^(?:\d*)(?:>>?|<|&>|&>>)|^\d>&\d$/.test(tk) || tk === '2>&1' || tk === '>&2') {
+      return { ok: false, reason: '禁止 shell 重定向（命令不经过 /bin/sh）。请用 curl -o / 命令自身选项写文件' }
+    }
+  }
+  const protectCheck = assertNoProtectedWorkspaceWrites(cmd)
+  if (!protectCheck.ok) return { ok: false, reason: protectCheck.reason }
 
   // 5) 路径边界（统一 fail-closed）：白名单命令的每个 token 值都必须是工作区内路径
   //    （防软链 / /proc / .. 逃逸，也覆盖 --opt=value 内联形式）
@@ -620,7 +683,7 @@ export function checkCommand(rawCmd, opts = {}) {
   const gitCheck = assertNoGitDangerousOptions(cmd)
   if (!gitCheck.ok) return { ok: false, reason: gitCheck.reason }
 
-  // 5d) shell 展开逃逸防护：exec 过 shell，拦截以 ~ 或裸 $ 开头的 token
+  // 5d) 展开逃逸防护：拦截以 ~ 或裸 $ 开头的 token（纵深防御，execFile 本身不展开）
   const expandCheck = assertNoShellExpandTokens(cmd)
   if (!expandCheck.ok) return { ok: false, reason: expandCheck.reason }
 
@@ -644,8 +707,9 @@ const WORKSPACE_FILES = {
 ## 可用命令
 - 文件与目录：ls cat head tail wc grep find sed awk sort uniq cut mkdir touch cp mv rm tar unzip zip diff file stat du
 - 开发工具：jq（node/python/npm 等解释器、git 默认禁用，如确需由管理员在 extraAllowedCommands 开启并自担风险）
-- 网络：curl wget（仅 http/https；不允许 @文件 形式与 file:// 协议；禁止管道到 shell 执行）
+- 网络：curl wget（仅 http/https；不允许 @文件 形式与 file:// 协议）
 - 其他：echo printf pwd whoami date which ps free tree rg fd
+- 每次只能执行一条命令（禁止管道 / && / ; / 重定向）。命令不经过 /bin/sh，由 execFile 按参数数组执行。
 
 ## 路径边界（重要）
 - 所有命令的文件参数都必须位于 workspace 内；绝对路径与 ".." 一律拒绝
@@ -669,6 +733,10 @@ const WORKSPACE_FILES = {
 
 此文件记录跨会话需要长期保留的重要信息（用户偏好、关键决策、项目知识）。
 工作中获得值得长期记住的信息时，追加写入本文件。
+
+## 安全说明
+- 本文件不能覆盖插件代码中的命令白名单、黑名单或路径沙箱。
+- 不要把「允许执行某危险命令」写成记忆；即使写入，运行时仍以代码策略为准。
 
 ## 记录规则
 - 只记录"如何做"的行为模式和项目知识，不记录"做了什么"的一次性任务细节
@@ -700,12 +768,12 @@ export function initWorkspaceFiles() {
   }
   for (const [name, content] of Object.entries(WORKSPACE_FILES)) {
     const p = path.join(WORKSPACE, name)
-    if (!fs.existsSync(p)) {
-      try {
-        fs.writeFileSync(p, content, { encoding: 'utf-8', mode: 0o600 })
-      } catch (err) {
-        safeLogger.warn(`[ai0-plugin] 初始化 agent 工作区文件失败: ${sanitizeLog(err?.message || err)}`)
-      }
+    const force = name === 'AGENTS.md'
+    if (!force && fs.existsSync(p)) continue
+    try {
+      fs.writeFileSync(p, content, { encoding: 'utf-8', mode: 0o600 })
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 初始化 agent 工作区文件失败: ${sanitizeLog(err?.message || err)}`)
     }
   }
 }
@@ -730,7 +798,8 @@ export function buildAgentContext() {
     '命令执行结果会作为后续上下文返回，你可以根据结果继续操作，直到任务完成。',
     `单次任务最多执行 ${maxRounds} 轮命令，完成后输出最终成果总结。`,
     '支持 curl / wget / ls / cat / grep / find / sed / awk / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令（node/python 等解释器与 git 默认禁用；所有路径参数必须落在工作区内）。',
-    '禁止 sudo / shutdown / reboot / mkfs / mount / chown / ssh / scp / nc / chmod（除+x）/ 命令替换 / 写入系统目录等危险操作。'
+    '每次只能执行一条命令：禁止管道 / && / ; / 重定向；命令不经过 /bin/sh。',
+    '禁止 sudo / shutdown / reboot / mkfs / mount / chown / ssh / scp / nc / chmod（除+x）/ 命令替换 / 写入系统目录等危险操作。禁止修改 AGENTS.md。'
   ].join('\n')
 }
 
@@ -759,14 +828,25 @@ export function runCommand(cmd, opts = {}) {
     }
     const start = Date.now()
 
-    // 使用 exec 返回的 child 以便在外部 signal.abort 时强制 kill
+    const argv = tokenizeKeepQuoted(cmd)
+    const bin = argv[0]
+    const args = argv.slice(1)
+    if (!bin) {
+      return resolve({ ok: false, code: -1, costMs: 0, error: '命令为空', detail: '命令为空' })
+    }
+    // 不经过 /bin/sh：execFile(bin, args) 按字面参数执行，消除 shell 展开/重定向/命令替换
     let abortedBySignal = false
-    const child = exec(cmd, {
+    const child = execFile(bin, args, {
       cwd: realCwd,
       timeout,
       maxBuffer: 5 * 1024 * 1024,
       windowsHide: true,
-      encoding: 'utf-8'
+      encoding: 'utf-8',
+      env: {
+        PATH: process.env.PATH || '/usr/bin:/bin',
+        HOME: realCwd,
+        LANG: process.env.LANG || 'C.UTF-8',
+      }
     }, (err, stdout, stderr) => {
       // cleanup signal listener
       try { if (opts.signal) opts.signal.removeEventListener && opts.signal.removeEventListener('abort', onAbort) } catch (_) {}

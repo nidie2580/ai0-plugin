@@ -464,12 +464,10 @@ export class AICommands extends plugin {
     if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const userId = helper.getUserId(e)
-    // 群聊判定必须走 helper.getGroupId：部分适配器把群号放在 e.message.group_id / e.from_group，
-    // 只读 e.group_id 会把群消息误判成"纯私聊"，从而把免登录直链直接贴进群里
-    // （2026-09 安全审查；同文件的 genCode/diagnose/testModel 均已使用 getGroupId）。
+    // 群聊判定走 isGroupChat：覆盖群号字段 + isGroup/message_type，避免把群消息误判成私聊把直链贴进群里
     const groupId = helper.getGroupId(e)
-    const isGroup = groupId != null && groupId !== ''
-    const isPrivate = !!e.user_id && !isGroup  // 纯私聊
+    const isGroup = helper.isGroupChat(e)
+    const isPrivate = !!e.user_id && !isGroup
 
     // —— 第一步：主人身份校验（群聊/私聊都必须过；顺序放最前，防止非主人浪费好友检测成本）
     if (!helper.isMaster(userId, e)) {
@@ -608,8 +606,8 @@ export class AICommands extends plugin {
     if (!helper.isMaster(userId, this.e)) {
       return this.e.reply('❌ 此命令仅主人可用')
     }
-    // 验证码仅在私聊中发送，防止群聊泄露
-    if (helper.getGroupId(this.e)) {
+    // 验证码仅在私聊中发送，防止群聊泄露（群号字段 + isGroup/message_type 双保险）
+    if (helper.isGroupChat(this.e)) {
       return this.e.reply('❌ 请在私聊中使用此命令，避免验证码在群聊中泄露')
     }
     try {
@@ -645,7 +643,7 @@ export class AICommands extends plugin {
     }
     const groupId = helper.getGroupId(e)
     // 诊断命令包含敏感信息（主人列表、apiBase等），仅允许私聊执行
-    if (groupId) {
+    if (helper.isGroupChat(e) || groupId) {
       return e.reply('❌ 诊断命令包含敏感配置信息，请在私聊中使用')
     }
     const sources = helper.listMasterSources()
@@ -964,8 +962,7 @@ export class AICommands extends plugin {
     }
 
     // 测试模型包含 apiBase 等配置信息，仅允许私聊执行
-    const groupId = helper.getGroupId(e)
-    if (groupId) {
+    if (helper.isGroupChat(e)) {
       return e.reply('❌ 模型测试包含配置信息，请在私聊中使用')
     }
 

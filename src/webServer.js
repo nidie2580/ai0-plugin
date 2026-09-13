@@ -157,19 +157,25 @@ function requireAuth(req, res, next) {
 }
 
 function safeCompare(a, b) {
-  const x = Buffer.from(String(a || ''), 'utf-8')
-  const y = Buffer.from(String(b || ''), 'utf-8')
-  // P3-2: 长度不匹配时，不能提前 return——直接返回会泄露"长度不同"的时序信号。
-  // 策略：把较短的 Buffer 用 zero-fill 对齐到较长 Buffer 的长度，再做一次
-  // timingSafeEqual，再把 length 不匹配的情况强制 return false。攻击者无法通过
-  // 耗时分辨"长度不符 → false" 与"长度相符但内容不符 → false"。
-  const maxLen = Math.max(x.length, y.length, 1)
-  const xp = Buffer.alloc(maxLen, 0)
-  const yp = Buffer.alloc(maxLen, 0)
-  x.copy(xp)
-  y.copy(yp)
-  const contentEq = crypto.timingSafeEqual(xp, yp)
-  return x.length === y.length && contentEq
+  try {
+    const KEY = 'ai0-web-compare-v1'
+    const ha = crypto.createHmac('sha256', KEY).update(String(a ?? '')).digest()
+    const hb = crypto.createHmac('sha256', KEY).update(String(b ?? '')).digest()
+    return ha.length === hb.length && crypto.timingSafeEqual(ha, hb)
+  } catch (_) {
+    return false
+  }
+}
+
+function requireApiRate(scope, maxAttempts, windowMs) {
+  return (req, res, next) => {
+    const id = String(req.clientIp || req.ip || 'unknown')
+    const r = auth.checkRateLimit(scope, id, maxAttempts, windowMs)
+    if (!r.ok) {
+      return res.status(429).json({ ok: false, msg: '请求过于频繁，请稍后再试' })
+    }
+    next()
+  }
 }
 
 function requireCsrf(req, res, next) {
@@ -534,12 +540,14 @@ export function createApp() {
       httpOnly: true,
       sameSite: 'strict',
       secure: !!secure,
+      path: '/',
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     res.cookie('ai0_csrf', session.csrf, {
       httpOnly: false,
       sameSite: 'strict',
       secure: !!secure,
+      path: '/',
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     return res.redirect('/')
@@ -558,12 +566,14 @@ export function createApp() {
         httpOnly: true,
         sameSite: 'strict',
         secure: !!secure,
+        path: '/',
         maxAge: auth.AUTH_CFG.tokenExpireMs
       })
       res.cookie('ai0_csrf', csrf, {
         httpOnly: false,
         sameSite: 'strict',
         secure: !!secure,
+        path: '/',
         maxAge: auth.AUTH_CFG.tokenExpireMs
       })
     }
@@ -600,12 +610,14 @@ export function createApp() {
       httpOnly: true,
       sameSite: 'strict',
       secure: !!secure,
+      path: '/',
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     res.cookie('ai0_csrf', session.csrf, {
       httpOnly: false,
       sameSite: 'strict',
       secure: !!secure,
+      path: '/',
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     res.json({ ok: true })
@@ -721,7 +733,7 @@ export function createApp() {
     res.json({ ok: true, config: safe })
   })
 
-  app.post('/api/config', requireAuth, requireCsrf, async (req, res) => {
+  app.post('/api/config', requireAuth, requireCsrf, requireApiRate('cfg', 30, 60_000), async (req, res) => {
     try {
     const { config } = req.body || {}
     if (!config || typeof config !== 'object') {
@@ -1010,7 +1022,7 @@ export function createApp() {
     res.json({ ok: true, data })
   })
 
-  app.delete('/api/sessions/:userId/:sessionId?', requireAuth, requireCsrf, (req, res) => {
+  app.delete('/api/sessions/:userId/:sessionId?', requireAuth, requireCsrf, requireApiRate('sess-del', 30, 60_000), (req, res) => {
     const { userId, sessionId } = req.params
     if (!isValidUserId(userId)) {
       return res.status(400).json({ ok: false, msg: '非法 userId' })
@@ -1049,7 +1061,7 @@ export function createApp() {
   })
 
   // ---- 多 API 平台：探测某 provider 的 /models ----
-  app.post('/api/providers/probe', requireAuth, requireCsrf, async (req, res) => {
+  app.post('/api/providers/probe', requireAuth, requireCsrf, requireApiRate('probe', 20, 60_000), async (req, res) => {
     const { modelKey = null } = req.body || {}
     if (modelKey && (typeof modelKey !== 'string' || modelKey.length > 128)) {
       return res.json({ ok: false, msg: 'modelKey 格式无效' })
@@ -1065,7 +1077,7 @@ export function createApp() {
   })
 
   // ---- 多 API 平台：并发探测所有 provider 的 /models ----
-  app.post('/api/providers/probe-all', requireAuth, requireCsrf, async (req, res) => {
+  app.post('/api/providers/probe-all', requireAuth, requireCsrf, requireApiRate('probe-all', 6, 60_000), async (req, res) => {
     try {
       const c = cfg.loadConfig()
       const modelCfg = c.model || {}
@@ -1150,7 +1162,7 @@ export function createApp() {
     }
   })
 
-  app.post('/api/test-model', requireAuth, requireCsrf, async (req, res) => {
+  app.post('/api/test-model', requireAuth, requireCsrf, requireApiRate('test-model', 8, 60_000), async (req, res) => {
     let { message = '请用一句话介绍你自己', modelKey = null } = req.body || {}
     if (typeof message !== 'string') message = String(message)
     if (message.length > 10000) {
@@ -1193,7 +1205,7 @@ export function createApp() {
   app.get('/api/multi-chat', requireAuth, (req, res) => {
     res.json({ ok: true, identity: getWebIdentity(req) })
   })
-  app.post('/api/multi-chat', requireAuth, requireCsrf, async (req, res) => {
+  app.post('/api/multi-chat', requireAuth, requireCsrf, requireApiRate('multi-chat', 12, 60_000), async (req, res) => {
     let { question = '', modelKeys = null, multiChat = null, deliberate = null, clear = false } = req.body || {}
     const identity = getWebIdentity(req)
     const userId = identity || multiChatService.resolveUserLabel(null, null)
@@ -1295,7 +1307,7 @@ export function createApp() {
     res.json({ ok, msg: ok ? '图片配置已保存' : '保存失败' })
   })
 
-  app.post('/api/test-image', requireAuth, requireCsrf, async (req, res) => {
+  app.post('/api/test-image', requireAuth, requireCsrf, requireApiRate('test-image', 6, 60_000), async (req, res) => {
     const { prompt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') {
       return res.json({ ok: false, msg: '请提供测试提示词' })

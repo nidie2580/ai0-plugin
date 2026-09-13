@@ -52,9 +52,11 @@ describe('agent: checkCommand 白名单放行', () => {
     assert.equal(checkCommand('chmod +x ./run.sh').ok, true)
   })
 
-  test('管道到允许命令放行（每段首命令都在白名单）', () => {
-    assert.equal(checkCommand('cat ./data.json | jq .name').ok, true)
-    assert.equal(checkCommand('ls | grep js | head -3').ok, true)
+  test('管道/链式命令一律拒绝（不经过 shell，必须拆成多次调用）', () => {
+    assert.equal(checkCommand('cat ./data.json | jq .name').ok, false)
+    assert.equal(checkCommand('ls | grep js | head -3').ok, false)
+    assert.equal(checkCommand('ls && echo ok').ok, false)
+    assert.equal(checkCommand('ls; echo ok').ok, false)
   })
 
   test('引号内容不破坏白名单校验', () => {
@@ -234,6 +236,19 @@ describe('agent: checkCommand 危险命令拒绝', () => {
     assert.equal(checkCommand('nano ./a.txt').ok, false)
   })
 
+  test('cd 无意义（cwd 锁定）且 AGENTS.md 不可改', () => {
+    assert.equal(checkCommand('cd ./src').ok, false)
+    assert.equal(checkCommand('rm ./AGENTS.md').ok, false)
+    assert.equal(checkCommand('sed -i s/a/b/ ./AGENTS.md').ok, false)
+    assert.equal(checkCommand('mv ./AGENTS.md ./x.md').ok, false)
+  })
+
+  test('花括号展开与重定向拒绝', () => {
+    assert.equal(checkCommand('{ls,}').ok, false)
+    assert.equal(checkCommand('echo hi > ./out.txt').ok, false)
+    assert.equal(checkCommand('ls 2>&1').ok, false)
+  })
+
   test('空命令与超长命令', () => {
     assert.equal(checkCommand('').ok, false)
     assert.equal(checkCommand('   ').ok, false)
@@ -244,6 +259,29 @@ describe('agent: checkCommand 危险命令拒绝', () => {
     // 关键词类黑名单对原始字符串严格匹配，引号内敏感词不绕过
     assert.equal(checkCommand('echo "sudo rm -rf /"').ok, false)
     assert.equal(checkCommand('echo "shutdown now"').ok, false)
+  })
+})
+
+describe('agent: runCommand 走 execFile 不经过 shell', () => {
+  test('单条白名单命令可执行', async () => {
+    const { runCommand, initWorkspaceFiles } = await import('../../src/agent.js')
+    initWorkspaceFiles()
+    const r = await runCommand('echo hello')
+    assert.equal(r.ok, true)
+    assert.match(String(r.stdout || r.detail || ''), /hello/)
+  })
+
+  test('链式命令在执行层也被拒绝', async () => {
+    const { runCommand } = await import('../../src/agent.js')
+    const r = await runCommand('echo a && echo b')
+    assert.equal(r.ok, false)
+    assert.match(String(r.error || r.detail || ''), /链式|管道|shell/)
+  })
+
+  test('重定向在执行层拒绝', async () => {
+    const { runCommand } = await import('../../src/agent.js')
+    const r = await runCommand('echo hi > ./out.txt')
+    assert.equal(r.ok, false)
   })
 })
 

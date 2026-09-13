@@ -314,7 +314,26 @@ export function getUserId(e) {
 }
 
 export function getGroupId(e) {
-  return e?.group_id ?? e?.message?.group_id ?? e?.from_group ?? null
+  return e?.group_id
+    ?? e?.groupId
+    ?? e?.group?.group_id
+    ?? e?.group?.groupId
+    ?? e?.message?.group_id
+    ?? e?.message?.groupId
+    ?? e?.raw?.group_id
+    ?? e?.from_group
+    ?? e?.sender?.group_id
+    ?? null
+}
+
+/** 群聊判定：除群号字段外，还看 isGroup / message_type，避免适配器漏填 group_id 时把群消息当私聊 */
+export function isGroupChat(e) {
+  const gid = getGroupId(e)
+  if (gid != null && gid !== '') return true
+  if (e?.isGroup === true || e?.is_group === true) return true
+  const mt = String(e?.message_type || e?.chat_type || '').toLowerCase()
+  if (mt === 'group' || mt === 'guild' || mt === 'channel') return true
+  return false
 }
 
 /**
