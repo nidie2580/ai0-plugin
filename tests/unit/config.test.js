@@ -79,30 +79,61 @@ describe('config: getDeepThinkConfig 深度思考全局开关', () => {
 })
 
 describe('config: 深度思考超时放宽', () => {
-  it('普通对话：深度思考用 deepThinkTimeout+30s，盖住 model.timeout', () => {
+  it('普通对话：深度思考用 max(timeout,15min)+30s，盖住 model.timeout', () => {
     assert.equal(cfg.resolveChatHardTimeoutMs({
       enabled: true, timeout: 300_000, modelTimeout: 60_000,
-    }), 330_000)
+    }), 930_000)
     assert.equal(cfg.resolveChatHardTimeoutMs({
       enabled: false, modelTimeout: 60_000,
     }), 83_000)
     assert.equal(cfg.resolveChatHardTimeoutMs({ enabled: false }), 90_000)
   })
 
-  it('Agent 硬超时：深度思考按 timeout×min(轮数,3)+60s，且不低于 10 分钟、封顶 30 分钟', () => {
+  it('Agent 硬超时：深度思考按 timeout×min(轮数,5)+60s，且不低于 10 分钟、封顶 30 分钟', () => {
     assert.equal(cfg.resolveAgentHardTimeoutMs({ enabled: false }), 600_000)
     assert.equal(cfg.resolveAgentHardTimeoutMs({
       enabled: true, timeout: 300_000, maxRounds: 5,
-    }), 960_000)
+    }), 1_800_000)
     assert.equal(cfg.resolveAgentHardTimeoutMs({
       enabled: true, timeout: 180_000, maxRounds: 1,
-    }), 600_000)
+    }), 960_000)
     assert.equal(cfg.resolveAgentHardTimeoutMs({
       enabled: true, timeout: 600_000, maxRounds: 8,
     }), 1_800_000)
     assert.equal(cfg.resolveAgentHardTimeoutMs({
       enabled: false, hardTimeoutMs: 120_000,
     }), 120_000)
+  })
+
+  it('Agent 闲置心跳：思考模型用 timeout+90s，且不超过总时限', () => {
+    assert.equal(cfg.resolveAgentIdleTimeoutMs({ enabled: false }), 600_000)
+    assert.equal(cfg.resolveAgentIdleTimeoutMs({
+      enabled: true, timeout: 300_000,
+    }), 990_000)
+  })
+})
+
+describe('config: 长推理模型名自动放宽超时', () => {
+  before(() => restoreConfig())
+  after(() => restoreConfig())
+
+  it('deepThink=false 时 R1 模型名仍放宽 HTTP 超时', () => {
+    writeConfig({ model: 'deepseek-r1', thinking: false }, { deepThink: false })
+    assert.equal(cfg.getDeepThinkConfig('a').enabled, false)
+    assert.equal(cfg.looksLikeThinkingModel('a'), true)
+    assert.equal(cfg.shouldRelaxLlmTimeout('a'), true)
+  })
+
+  it('普通 gpt 模型不因名称放宽', () => {
+    writeConfig({ model: 'gpt-3.5-turbo' }, { deepThink: false })
+    assert.equal(cfg.looksLikeThinkingModel('a'), false)
+    assert.equal(cfg.shouldRelaxLlmTimeout('a'), false)
+  })
+
+  it('per-model thinking=true 即使全局 deepThink=false 也放宽', () => {
+    writeConfig({ thinking: true, model: 'gpt-4o' }, { deepThink: false })
+    assert.equal(cfg.getDeepThinkConfig('a').enabled, false)
+    assert.equal(cfg.shouldRelaxLlmTimeout('a'), true)
   })
 })
 

@@ -1537,7 +1537,7 @@ export class AICommands extends plugin {
     const deepThink = cfg.getDeepThinkConfig(defaultKey)
     const agentConf = cfg.get('agent', {}) || {}
     const outerMs = Math.max(900_000, cfg.resolveAgentHardTimeoutMs({
-      enabled: deepThink.enabled,
+      enabled: cfg.shouldRelaxLlmTimeout(defaultKey),
       timeout: deepThink.timeout,
       hardTimeoutMs: agentConf.hardTimeoutMs,
       maxRounds: agentConf.maxRounds,

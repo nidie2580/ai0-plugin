@@ -574,12 +574,12 @@ export async function chatCompletions(messages, {
     body.tools = [{ type: 'web_search' }]
   }
 
-  // 深度思考：全局 response.deepThink 开启时所有模型都放宽超时（深度思考可能思考 1~3 分钟）；
-  // 未配置全局开关时回退读旧版 per-model thinking 字段。按 deepThinkTimeout 放宽避免思考被切断
+  // 超时放宽：deepThink=true、per-model thinking、或模型名像 R1/reasoner 时，
+  // axios 至少 5 分钟，避免默认 deepThink:false + model.timeout=60s 掐断长推理。
   const deepThink = cfg.getDeepThinkConfig(modelCfgKey)
-  const isThinking = deepThink.enabled
-  const effTimeout = isThinking
-    ? deepThink.timeout
+  const relaxTimeout = cfg.shouldRelaxLlmTimeout(modelCfgKey)
+  const effTimeout = relaxTimeout
+    ? Math.max(deepThink.timeout, 900_000)
     : (Number(m.timeout) || 60000)
 
   // safeLogger 自带 console 降级，无需判全局 logger（原 typeof logger 守卫在无全局 logger 时会静默跳过日志）

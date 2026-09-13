@@ -755,8 +755,9 @@ export async function handleChat(e) {
   const modelCfg2 = cfg.loadConfig().model?.[defaultKey] || {}
   const rawTimeout = Number(modelCfg2.timeout)
   const deepThink = cfg.getDeepThinkConfig(defaultKey)
+  const relaxTimeout = cfg.shouldRelaxLlmTimeout(defaultKey)
   const hardTimeout = cfg.resolveChatHardTimeoutMs({
-    enabled: deepThink.enabled,
+    enabled: relaxTimeout,
     timeout: deepThink.timeout,
     modelTimeout: rawTimeout,
   })
@@ -770,14 +771,18 @@ export async function handleChat(e) {
   const ac = new AbortController()
   let timedOut = false
   const isSuperseded = () => !!(ac.signal?.aborted && !timedOut)
-  let timeoutTimer = setTimeout(() => {
-    timedOut = true
-    try { ac.abort('hard-timeout') } catch (_) {}
-  }, hardTimeout)
+  let timeoutTimer = null
+  const armChatTimer = (ms) => {
+    try { if (timeoutTimer) clearTimeout(timeoutTimer) } catch (_) {}
+    timeoutTimer = setTimeout(() => {
+      timedOut = true
+      try { ac.abort('hard-timeout') } catch (_) {}
+    }, ms)
+  }
   inflightChat.set(inflightKey, { controller: ac, at: Date.now() })
   const ownsInflight = () => inflightChat.get(inflightKey)?.controller === ac
   const releaseChatInflight = () => {
-    try { clearTimeout(timeoutTimer) } catch (_) {}
+    try { if (timeoutTimer) clearTimeout(timeoutTimer) } catch (_) {}
     if (ownsInflight()) inflightChat.delete(inflightKey)
   }
 
@@ -923,6 +928,7 @@ export async function handleChat(e) {
   if (isSuperseded()) return true
 
   try {
+    armChatTimer(hardTimeout)
     // 图片输入：把当前轮图片接入"发给主模型的 history"副本（不改持久化 history，避免 base64 污染上下文）
     let reqHistory = history
     try {
@@ -1195,16 +1201,12 @@ export async function handleChat(e) {
         // 深度思考模型单轮可达数分钟，agent 循环按 deepThinkTimeout × 轮数放宽，封顶 30 分钟。
         const agentConf = cfg.get('agent', {}) || {}
         const agentHardTimeout = cfg.resolveAgentHardTimeoutMs({
-          enabled: deepThink.enabled,
+          enabled: relaxTimeout,
           timeout: deepThink.timeout,
           hardTimeoutMs: agentConf.hardTimeoutMs,
           maxRounds: agentConf.maxRounds,
         })
-        clearTimeout(timeoutTimer)
-        timeoutTimer = setTimeout(() => {
-          timedOut = true
-          try { ac.abort('hard-timeout') } catch (_) {}
-        }, agentHardTimeout)
+        armChatTimer(agentHardTimeout)
         const agentLoop = await agent.continueAgentInHistory({
           history,
           assistantText: historyText,

@@ -829,11 +829,17 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
   const rounds = Math.max(1, Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS)
 
   const deepThink = cfg.getDeepThinkConfig(modelKey)
+  const relaxTimeout = cfg.shouldRelaxLlmTimeout(modelKey)
   const AGENT_HARD_TIMEOUT_MS = cfg.resolveAgentHardTimeoutMs({
-    enabled: deepThink.enabled,
+    enabled: relaxTimeout,
     timeout: deepThink.timeout,
     hardTimeoutMs: conf.hardTimeoutMs,
     maxRounds: rounds,
+  })
+  const AGENT_IDLE_TIMEOUT_MS = cfg.resolveAgentIdleTimeoutMs({
+    enabled: relaxTimeout,
+    timeout: deepThink.timeout,
+    hardTimeoutMs: conf.hardTimeoutMs,
   })
   const ac = new AbortController()
   let timedOutByHardTimer = false
@@ -845,13 +851,20 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
     } catch (_) {}
   }
   let hardTimer = null
+  const startedAt = Date.now()
   function resetHardTimer() {
     try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
+    const remain = AGENT_HARD_TIMEOUT_MS - (Date.now() - startedAt)
+    if (remain <= 0) {
+      timedOutByHardTimer = true
+      try { ac.abort() } catch (_) {}
+      return
+    }
     hardTimer = setTimeout(() => {
       timedOutByHardTimer = true
       safeLogger.warn('[ai0-plugin] Agent 硬超时触发，abort')
       try { ac.abort() } catch (_) {}
-    }, AGENT_HARD_TIMEOUT_MS)
+    }, Math.min(AGENT_IDLE_TIMEOUT_MS, remain))
   }
   resetHardTimer()
 
@@ -877,8 +890,8 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
   let finalText = ''
 
   for (let i = 0; i < rounds; i++) {
-    // 硬超时只在入口登记一次，不在循环内重置
-    // 整次任务的总时限由 AGENT_HARD_TIMEOUT_MS 控制
+    // 闲置心跳：每轮 LLM/命令有进展就续期，总时限仍由 AGENT_HARD_TIMEOUT_MS 封顶
+    resetHardTimer()
 
     const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal, identityKey: (audit && audit.userId) || GLOBAL_RATE_LIMIT_KEY }, callFn })
     if (!call.ok) {
@@ -893,6 +906,7 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
     }
     const res = call.res
     const text = String(res?.text || '').trim()
+    resetHardTimer()
     // 深度思考内容：回调发送方（如以聊天记录形式发到群/私聊），不阻断循环
     if (res?.reasoning && typeof onThinking === 'function') {
       try { await onThinking(String(res.reasoning).trim()) } catch (_) {}
@@ -918,6 +932,7 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
         continue
       }
       const r = await runCommand(cmd, { signal: ac.signal })
+      resetHardTimer()
       logs.push({ cmd, ok: r.ok, code: r.code, timedOut: r.timedOut, aborted: r.aborted, costMs: r.costMs, output: r.detail })
       emitAudit(r.aborted ? (timedOutByHardTimer ? 'agent_timeout' : 'agent_error') : 'agent_cmd', {
         action: cmd,
@@ -977,22 +992,35 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
   const emitAudit = (kind, extra = {}) => securityLog.recordSecurityEvent({ kind, ...(audit || {}), ...extra })
 
   const deepThink = cfg.getDeepThinkConfig(modelKey)
+  const relaxTimeout = cfg.shouldRelaxLlmTimeout(modelKey)
   const AGENT_HARD_TIMEOUT_MS = cfg.resolveAgentHardTimeoutMs({
-    enabled: deepThink.enabled,
+    enabled: relaxTimeout,
     timeout: deepThink.timeout,
     hardTimeoutMs: conf.hardTimeoutMs,
     maxRounds: cap,
   })
+  const AGENT_IDLE_TIMEOUT_MS = cfg.resolveAgentIdleTimeoutMs({
+    enabled: relaxTimeout,
+    timeout: deepThink.timeout,
+    hardTimeoutMs: conf.hardTimeoutMs,
+  })
   const ac = new AbortController()
   let timedOutByHardTimer = false
   let hardTimer = null
+  const startedAt = Date.now()
   function resetHardTimer() {
     try { if (hardTimer) clearTimeout(hardTimer) } catch (_) {}
+    const remain = AGENT_HARD_TIMEOUT_MS - (Date.now() - startedAt)
+    if (remain <= 0) {
+      timedOutByHardTimer = true
+      try { ac.abort() } catch (_) {}
+      return
+    }
     hardTimer = setTimeout(() => {
       timedOutByHardTimer = true
       safeLogger.warn('[ai0-plugin] continueAgentInHistory 硬超时触发，abort')
       try { ac.abort() } catch (_) {}
-    }, AGENT_HARD_TIMEOUT_MS)
+    }, Math.min(AGENT_IDLE_TIMEOUT_MS, remain))
   }
   // 若外部 signal 提前 aborted，则同步到内部 ac
   if (signal) {
@@ -1004,11 +1032,13 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
   resetHardTimer()
 
   const roundTrip = async () => {
+    resetHardTimer()
     const call = await callLlmWithRetry({ messages, opts: { modelKey, signal: ac.signal, identityKey: (audit && audit.userId) || GLOBAL_RATE_LIMIT_KEY }, callFn })
     if (!call.ok) {
       if (call.aborted || ac.signal?.aborted) return { error: { aborted: true, message: '' } }
       return { error: { rateLimit: isRateLimit(call.error), aborted: false, message: sanitizeLog(call.error?.message || call.error) } }
     }
+    resetHardTimer()
     // 深度思考内容：回调发送方（如以聊天记录形式发到群/私聊），不阻断循环
     if (call.res?.reasoning && typeof onThinking === 'function') {
       try { await onThinking(String(call.res?.reasoning).trim()) } catch (_) {}
@@ -1029,6 +1059,7 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
         outputs.push(`命令被安全策略拒绝：${check.reason}`)
       } else {
         const r = await runCommand(cmd, { signal: ac.signal })
+        resetHardTimer()
         logs.push({ cmd, ok: r.ok, code: r.code, costMs: r.costMs, output: r.detail, aborted: r.aborted })
         emitAudit(r.aborted ? (timedOutByHardTimer ? 'agent_timeout' : 'agent_error') : 'agent_cmd', {
           action: cmd,

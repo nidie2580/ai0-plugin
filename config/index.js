@@ -596,8 +596,8 @@ export function get(key, defaultValue) {
  * - response.deepThink === false → 对所有模型关闭（强制覆盖旧 per-model thinking 配置）
  * - response.deepThink 未配置    → 回退读旧版 model.<modelKey>.thinking（向后兼容）
  * 返回 { enabled, timeout }：
- *   - enabled：是否是深度思考模型（决定放宽超时）
- *   - timeout：深度思考单次请求超时（毫秒，未配则兜底 180_000ms）
+ *   - enabled：是否按深度思考展示/处理（showReasoning 等）
+ *   - timeout：深度思考单次请求超时（毫秒，未配则兜底 300_000ms）
  */
 export function getDeepThinkConfig(modelKey) {
   const config = loadConfig()
@@ -610,7 +610,7 @@ export function getDeepThinkConfig(modelKey) {
   let enabled
   if (globalFlag === true) enabled = true
   else if (globalFlag === false) enabled = false
-  else enabled = legacyEnabled
+  else enabled = legacyEnabled || looksLikeThinkingModel(modelKey, config)
 
   // 超时解析：全局 deepThinkTimeout 优先；未配置时用 per-model thinkingTimeout；
   // 都没配则用 per-model timeout，最后兜底 180_000ms（且确保不低于 180s，避免思考被切断）
@@ -622,6 +622,28 @@ export function getDeepThinkConfig(modelKey) {
   return { enabled, timeout }
 }
 
+const THINKING_MODEL_RE = /r1\b|reasoner|\bthinking\b|\bqwq\b|hunyuan-t1|glm[-_]?z1|\bo1\b|\bo1-|o1-preview|o1-mini|\bo3\b|\bo3-|o4-mini|kimi-k1/i
+
+/** 从模型 key / 展示名 / 上游 model 字段判断是否为长推理模型 */
+export function looksLikeThinkingModel(modelKey, config = null) {
+  const conf = config || loadConfig()
+  const per = conf.model?.[modelKey] || {}
+  const hay = [modelKey, per.model, per.name].filter(Boolean).join(' ')
+  return THINKING_MODEL_RE.test(hay)
+}
+
+/**
+ * HTTP / Abort 是否按深度思考放宽。
+ * response.deepThink=false 只关掉「全体按思考处理」；R1 / reasoner 等仍应放宽，避免默认配置被 60s 掐断。
+ */
+export function shouldRelaxLlmTimeout(modelKey) {
+  const config = loadConfig()
+  if (config.response?.deepThink === true) return true
+  const per = config.model?.[modelKey] || {}
+  if (per.thinking === true) return true
+  return looksLikeThinkingModel(modelKey, config)
+}
+
 export const DEFAULT_AGENT_HARD_TIMEOUT_MS = 600_000
 export const MAX_AGENT_HARD_TIMEOUT_MS = 1_800_000
 
@@ -631,7 +653,7 @@ export const MAX_AGENT_HARD_TIMEOUT_MS = 1_800_000
  */
 export function resolveChatHardTimeoutMs({ enabled, timeout, modelTimeout } = {}) {
   if (enabled) {
-    const think = Math.max(Number(timeout) || 180_000, 180_000)
+    const think = Math.max(Number(timeout) || 900_000, 900_000)
     return Math.min(think + 30_000, MAX_AGENT_HARD_TIMEOUT_MS)
   }
   const raw = Number(modelTimeout)
@@ -639,7 +661,7 @@ export function resolveChatHardTimeoutMs({ enabled, timeout, modelTimeout } = {}
 }
 
 /**
- * Agent 整次任务硬超时。深度思考按「单次思考时限 × min(轮数, 3) + 60s」放宽，
+ * Agent 整次任务总时限。深度思考按「单次思考时限 × min(轮数, 5) + 60s」放宽，
  * 且不低于 agent.hardTimeoutMs（默认 10 分钟），封顶 30 分钟（与网页校验一致）。
  */
 export function resolveAgentHardTimeoutMs({ enabled, timeout, hardTimeoutMs, maxRounds } = {}) {
@@ -648,10 +670,18 @@ export function resolveAgentHardTimeoutMs({ enabled, timeout, hardTimeoutMs, max
     ? Math.min(configured, MAX_AGENT_HARD_TIMEOUT_MS)
     : DEFAULT_AGENT_HARD_TIMEOUT_MS
   if (!enabled) return base
-  const think = Math.max(Number(timeout) || 180_000, 180_000)
+  const think = Math.max(Number(timeout) || 900_000, 900_000)
   const rounds = Math.max(1, Number(maxRounds) || 5)
-  const forThink = think * Math.min(rounds, 3) + 60_000
+  const forThink = think * Math.min(rounds, 5) + 60_000
   return Math.min(Math.max(base, forThink), MAX_AGENT_HARD_TIMEOUT_MS)
+}
+
+/** 无进展（单轮 LLM/命令）闲置时限：思考模型用单次思考时限+90s，否则用总硬超时 */
+export function resolveAgentIdleTimeoutMs({ enabled, timeout, hardTimeoutMs } = {}) {
+  const total = resolveAgentHardTimeoutMs({ enabled, timeout, hardTimeoutMs, maxRounds: 5 })
+  if (!enabled) return total
+  const think = Math.max(Number(timeout) || 900_000, 900_000)
+  return Math.min(Math.max(think + 90_000, 990_000), total)
 }
 
 /**
