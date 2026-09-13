@@ -122,7 +122,8 @@ describe('runDeliberation', () => {
     assert.equal(res.ok, true)
     assert.equal(res.converged, true)
     assert.equal(res.chosenModelKey, 'b')
-    assert.match(res.finalText, /修订版/)
+    // 表决针对上一轮立场：A/C 同意的是 B 的首轮完整答案，不能改用 B 本轮修订稿
+    assert.match(res.finalText, /初始观点（最完整）/)
     assert.equal(res.rounds.length, 2)
   })
 

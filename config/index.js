@@ -472,6 +472,51 @@ export function getLastConfigError() {
   return lastParseError
 }
 
+const API_KEY_PLACEHOLDER = '********'
+const isDangerConfigKey = (k) => k === '__proto__' || k === 'constructor' || k === 'prototype'
+const isApiKeyPlaceholder = (v) => v === API_KEY_PLACEHOLDER
+
+/**
+ * 把前端回传的 '********' 占位符还原为磁盘真实密钥。
+ * keyMap: 新平台 key → 旧平台 key（改名时占位符对不上同名条目）。
+ */
+export function restoreMaskedSecrets(target, disk, keyMap = null) {
+  if (!target || typeof target !== 'object' || !disk || typeof disk !== 'object') return target
+  const map = (keyMap && typeof keyMap === 'object')
+    ? keyMap
+    : (target._providerKeyMap && typeof target._providerKeyMap === 'object' ? target._providerKeyMap : null)
+  if (target.model && typeof target.model === 'object' && disk.model && typeof disk.model === 'object') {
+    for (const k of Object.keys(target.model)) {
+      if (isDangerConfigKey(k) || k === 'default') continue
+      const entry = target.model[k]
+      if (!entry || typeof entry !== 'object') continue
+      if (isApiKeyPlaceholder(entry.apiKey)) {
+        const lookup = (map && typeof map[k] === 'string' && map[k]) || k
+        const dv = disk.model[lookup]?.apiKey
+        if (typeof dv === 'string' && dv && !isApiKeyPlaceholder(dv)) entry.apiKey = dv
+        else delete entry.apiKey
+      }
+    }
+  }
+  const walk = (t, d) => {
+    if (!t || typeof t !== 'object' || Array.isArray(t) || !d || typeof d !== 'object') return
+    for (const k of Object.keys(t)) {
+      if (isDangerConfigKey(k) || k === 'model') continue
+      const tv = t[k]
+      if (isApiKeyPlaceholder(tv)) {
+        const dv = d[k]
+        if (typeof dv === 'string' && dv && !isApiKeyPlaceholder(dv)) t[k] = dv
+        else delete t[k]
+      } else if (tv && typeof tv === 'object' && !Array.isArray(tv)) {
+        walk(tv, d[k])
+      }
+    }
+  }
+  walk(target, disk)
+  delete target._providerKeyMap
+  return target
+}
+
 export function saveConfig(config) {
   try {
     // 过滤掉环境变量覆盖的键，防止密钥明文落盘
@@ -489,16 +534,19 @@ export function saveConfig(config) {
     }
     // 深度合并：保留磁盘上存在但前端未传的字段，防止字段丢失
     // 安全：跳过 __proto__/constructor/prototype 等危险键，防止原型污染
-    const isDangerKey = (k) => k === '__proto__' || k === 'constructor' || k === 'prototype'
+    const incomingKeyMap = (cleaned._providerKeyMap && typeof cleaned._providerKeyMap === 'object')
+      ? { ...cleaned._providerKeyMap }
+      : null
+    delete cleaned._providerKeyMap
     for (const k of Object.keys(cleaned)) {
-      if (isDangerKey(k)) delete cleaned[k]
+      if (isDangerConfigKey(k)) delete cleaned[k]
     }
     if (fs.existsSync(USER_CONFIG)) {
       try {
         const diskRaw = fs.readFileSync(USER_CONFIG, 'utf-8')
         const diskConfig = YAML.parse(diskRaw) || {}
         for (const k of Object.keys(diskConfig)) {
-          if (isDangerKey(k)) continue
+          if (isDangerConfigKey(k)) continue
           if (!(k in cleaned)) {
             cleaned[k] = diskConfig[k]
           }
@@ -513,22 +561,7 @@ export function saveConfig(config) {
         }
         // 前端回传的 '********' 密钥占位符一律还原为磁盘真实值，绝不把占位符当密钥落盘
         // （覆盖 imageGen.apiKey / imageInput.ocr.apiKey 等；磁盘无对应值时删除该字段而非保存占位符）
-        const isPlaceholder = (v) => v === '********'
-        const restorePlaceholders = (target, disk) => {
-          if (!target || typeof target !== 'object' || !disk || typeof disk !== 'object') return
-          for (const k of Object.keys(target)) {
-            if (isDangerKey(k)) continue
-            const tv = target[k]
-            if (isPlaceholder(tv)) {
-              const dv = disk[k]
-              if (typeof dv === 'string' && dv && !isPlaceholder(dv)) target[k] = dv
-              else delete target[k]
-            } else if (tv && typeof tv === 'object') {
-              restorePlaceholders(tv, disk[k])
-            }
-          }
-        }
-        restorePlaceholders(cleaned, diskConfig)
+        restoreMaskedSecrets(cleaned, diskConfig, incomingKeyMap)
       } catch (_) {}
     }
     const content = YAML.stringify(cleaned)

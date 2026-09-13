@@ -219,17 +219,20 @@ export async function runDeliberation({ question, modelKeys, maxRounds, judgeKey
       const results = await Promise.all(tasks)
       rounds.push({ round: r, entries: results })
 
-      // 更新最新立场
+      // 表决针对的是上一轮立场（编号来自 othersOf 里的 prevByKey）
+      const snapshot = new Map(prevByKey)
       const votes = new Map() // index -> count（排除"自己投自己"，计数实际参与的不同模型）
       const participantsThisRound = []
       results.forEach((x) => {
         if (x.error) return
         participantsThisRound.push(x.modelKey)
-        if (x.text) prevByKey.set(x.modelKey, { text: x.text })
         if (x.agree != null && x.agree >= 0 && x.agree < activeKeys.length) {
           if (activeKeys[x.agree] !== x.modelKey) {
             votes.set(x.agree, (votes.get(x.agree) || 0) + 1)
           }
+          // 同意某编号：不覆盖自己上一轮完整立场（正文往往只是附议）
+        } else if (x.text) {
+          prevByKey.set(x.modelKey, { text: x.text })
         }
       })
 
@@ -247,7 +250,7 @@ export async function runDeliberation({ question, modelKeys, maxRounds, judgeKey
           const chosenKey = activeKeys[bestIdx]
           return {
             ok: true,
-            finalText: prevByKey.get(chosenKey)?.text || '',
+            finalText: snapshot.get(chosenKey)?.text || prevByKey.get(chosenKey)?.text || '',
             converged: true,
             rounds,
             chosenModelKey: chosenKey,

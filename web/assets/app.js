@@ -1217,6 +1217,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     // 构建 model 段：保留 _origKey 不在的对象直接丢弃
     const c = JSON.parse(JSON.stringify(providersCache))
     const newModel = { default: providersDefault }
+    const keyMap = {}
     for (const p of providersList) {
       newModel[p.key] = {
         name: p.name || '',
@@ -1227,8 +1228,10 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         maxTokens: Number(p.maxTokens) || 2000,
         timeout: Number(p.timeout) || 60000
       }
+      if (p._origKey && p._origKey !== p.key) keyMap[p.key] = p._origKey
     }
     c.model = newModel
+    if (Object.keys(keyMap).length) c._providerKeyMap = keyMap
 
     msg.className = 'save-msg'
     msg.textContent = '保存中…'
@@ -1291,7 +1294,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
           box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${r.info.latencyMs ?? '-'} ms）。可在上方"模型 ID"下拉中选择。</span>`
         }
       } else {
-        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml(r.info?.error || (r.info?.status ? `HTTP ${r.info.status}` : (r.msg || '未知错误')))}<br>URL: ${escapeHtml(r.info?.url || '-')}</span>`
+        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml(r.info?.error || r.msg || (r.info?.status != null ? `HTTP ${r.info.status}` : '未知错误'))}<br>URL: ${escapeHtml(r.info?.url || '-')}</span>`
       }
     }
   }
@@ -1337,7 +1340,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
           box.innerHTML = `<span class="hint">✅ ${models.length} 个模型（${item.latencyMs ?? '-'} ms）</span>`
         }
       } else {
-        box.innerHTML = `<span class="err">❌ ${escapeHtml(item.error || `HTTP ${item.status}`)}</span>`
+        box.innerHTML = `<span class="err">❌ ${escapeHtml(item.error || (item.status != null ? `HTTP ${item.status}` : '未知错误'))}</span>`
       }
     })
     msg.className = 'save-msg ok'

@@ -185,6 +185,12 @@ export async function isAllowedOutboundUrl(u) {
  * Returns { ok: true, response, finalUrl } on success or { ok: false, error } on failure.
  * Uses axios internally for proper TLS servername (SNI) support.
  */
+/** 是否存在系统/环境 HTTP(S) 代理。有代理时保持域名连接，让 axios 走代理。 */
+export function hasSystemProxy() {
+  const keys = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']
+  return keys.some((k) => String(process.env[k] || '').trim())
+}
+
 export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 3) {
   let current = origUrl
   let redirects = 0
@@ -203,8 +209,8 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
     // 避免整包缓冲后才检查导致 OOM（arraybuffer 会先把全量载入内存）
     const maxBytes = (Number.isFinite(opts?.maxBytes) && opts.maxBytes > 0) ? opts.maxBytes : 20 * 1024 * 1024
     const cap = maxBytes + 4096
-    let axiosOpts = { ...workingOpts, maxRedirects: 0, validateStatus: () => true, proxy: false, responseType: 'arraybuffer', maxContentLength: cap, maxBodyLength: cap }
-    if (check.resolvedIp) {
+    let axiosOpts = { ...workingOpts, maxRedirects: 0, validateStatus: () => true, responseType: 'arraybuffer', maxContentLength: cap, maxBodyLength: cap }
+    if (check.resolvedIp && !hasSystemProxy()) {
       try {
         const u = new URL(current)
         if (!net.isIP(u.hostname)) {
@@ -213,6 +219,7 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
           connectUrl = u.toString()
           axiosOpts.headers = { ...(axiosOpts.headers || {}), 'Host': origHostname + (u.port ? `:${u.port}` : '') }
           axiosOpts.servername = origHostname
+          axiosOpts.proxy = false
         }
       } catch (_) {}
     }
@@ -272,10 +279,10 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
       // DNS Rebinding 防护：使用已解析的 IP 直接连接，避免二次 DNS 解析
       let connectUrl = current
       const reqOpts = { ...workingOpts }
-      if (check.resolvedIp) {
+      if (check.resolvedIp && !hasSystemProxy()) {
         try {
           const u = new URL(current)
-          // 仅对域名（非 IP）应用 DNS pinning
+          // 仅对域名（非 IP）应用 DNS pinning；有系统代理时保持域名，走 HTTP(S)_PROXY
           if (!net.isIP(u.hostname)) {
             const origHostname = u.hostname
             u.hostname = check.resolvedIp
@@ -285,10 +292,11 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
             const origUrl = new URL(current)
             reqOpts.headers['Host'] = origUrl.hostname + (origUrl.port ? `:${origUrl.port}` : '')
             reqOpts.servername = origHostname
+            reqOpts.proxy = false
           }
         } catch (_) {}
       }
-      const conf = Object.assign({}, reqOpts, { method, url: connectUrl, data, maxRedirects: 0, validateStatus: () => true, proxy: false })
+      const conf = Object.assign({}, reqOpts, { method, url: connectUrl, data, maxRedirects: 0, validateStatus: () => true })
       const resp = await axios.request(conf)
       if (resp.status >= 300 && resp.status < 400) {
         const loc = resp.headers?.location

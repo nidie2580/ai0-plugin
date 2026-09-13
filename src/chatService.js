@@ -751,6 +751,36 @@ export async function handleChat(e) {
   // 模型展示名：取 name，退化到 model，再退化到 key。在多模型聚合回复与历史 [*] 标记中使用。
   const modelDisplay = (k) => String(modelCfg[k]?.name || modelCfg[k]?.model || k)
 
+  // 并发控制尽早登记：同一用户同一会话的新请求取消旧请求，避免先发后到覆盖历史
+  const modelCfg2 = cfg.loadConfig().model?.[defaultKey] || {}
+  const rawTimeout = Number(modelCfg2.timeout)
+  const AGENT_HARD_TIMEOUT_MS = 600_000
+  const isThinkingModel = cfg.getDeepThinkConfig(defaultKey).enabled
+  const hardTimeout = isThinkingModel
+    ? Math.min((Number.isFinite(rawTimeout) && rawTimeout > 500 ? rawTimeout : 90_000) * 2 + 30_000, AGENT_HARD_TIMEOUT_MS)
+    : (Number.isFinite(rawTimeout) && rawTimeout > 500 ? Math.min(rawTimeout * 1.3 + 5000, 180_000) : 90_000)
+  pruneMapToSize(inflightChat, MAX_INFLIGHT)
+  const inflightKey = `${userId}/${sessionId}`
+  const prev = inflightChat.get(inflightKey)
+  if (prev?.controller) {
+    try { prev.controller.abort('cancelled-by-newer-request') } catch (_) {}
+    inflightChat.delete(inflightKey)
+  }
+  const ac = new AbortController()
+  let timedOut = false
+  const isSuperseded = () => !!(ac.signal?.aborted && !timedOut)
+  let timeoutTimer = setTimeout(() => {
+    timedOut = true
+    try { ac.abort('hard-timeout') } catch (_) {}
+  }, hardTimeout)
+  inflightChat.set(inflightKey, { controller: ac, at: Date.now() })
+  const ownsInflight = () => inflightChat.get(inflightKey)?.controller === ac
+  const releaseChatInflight = () => {
+    try { clearTimeout(timeoutTimer) } catch (_) {}
+    if (ownsInflight()) inflightChat.delete(inflightKey)
+  }
+
+  try {
   let history = llm.loadHistory(userId, sessionId)
   // 不再在此手动 prepend sysPrompt：
   // 下方 injectContextIntoHistory 会把 finalSysPrompt 合并进消息头的 first system 消息，
@@ -788,8 +818,8 @@ export async function handleChat(e) {
         safeLogger.info(
           `[ai0-plugin] 身份接口未返回数据，命中确定性兜底(kind=${fallback.kind})：群=${groupId} 用户=${userId} 原文=${pureText.slice(0, 60)}`
         )
-        await helper.replyText(e, fallback.reply)
-        return true
+          await helper.replyText(e, fallback.reply)
+          return true
       }
     } catch (err) {
       safeLogger.warn(`[ai0-plugin] 身份确定性兜底处理失败（忽略，继续走正常流程）: ${err.message}`)
@@ -876,7 +906,7 @@ export async function handleChat(e) {
   try {
     const comp = await llm.compressHistoryIfNeeded(history, { contextSize })
     history = comp.history
-    if (comp.compressed) {
+    if (comp.compressed && ownsInflight()) {
       llm.saveHistory(userId, sessionId, history)
     }
   } catch (err) {
@@ -889,32 +919,7 @@ export async function handleChat(e) {
   let groupOpConsensus = false // 多模型协同收敛出的回复=参与模型已达成的统一意见；其内群操作无需再做同行评审 y/n
   let mmExpectedResponders = 0 // 本轮多模型并行应返回的模型数（判断"是否全部模型都给出了回复"）
 
-  // 并发控制：同一用户同一会话的新请求 → 取消正在飞的旧请求（防止"先发后到"的串上下文）
-  // 再做一层超时保险：AbortController 配合 axios 的 signal，同时给 model timeout 留余地
-  const modelCfg2 = cfg.loadConfig().model?.[defaultKey] || {}
-  const rawTimeout = Number(modelCfg2.timeout)
-  // Agent 多轮循环期间的"最终兜底"硬超时：改为 10 分钟，防止死锁的同时不至于把长思考切断
-  const AGENT_HARD_TIMEOUT_MS = 600_000
-  // 深度思考模型（全局 response.deepThink，未配回退旧 model.xxx.thinking）单次响应可能思考 1~3 分钟，
-  // 硬超时需放宽，避免思考被切断
-  const isThinkingModel = cfg.getDeepThinkConfig(defaultKey).enabled
-  const hardTimeout = isThinkingModel
-    ? Math.min((Number.isFinite(rawTimeout) && rawTimeout > 500 ? rawTimeout : 90_000) * 2 + 30_000, 600_000)
-    : (Number.isFinite(rawTimeout) && rawTimeout > 500 ? Math.min(rawTimeout * 1.3 + 5000, 180_000) : 90_000)
-  pruneMapToSize(inflightChat, MAX_INFLIGHT)
-  const inflightKey = `${userId}/${sessionId}`
-  const prev = inflightChat.get(inflightKey)
-  if (prev?.controller) {
-    try { prev.controller.abort('cancelled-by-newer-request') } catch (_) {}
-    inflightChat.delete(inflightKey)
-  }
-  const ac = new AbortController()
-  let timedOut = false
-  let timeoutTimer = setTimeout(() => {
-    timedOut = true
-    try { ac.abort('hard-timeout') } catch (_) {}
-  }, hardTimeout)
-  inflightChat.set(inflightKey, { controller: ac, at: Date.now() })
+  if (isSuperseded()) return true
 
   try {
     // 图片输入：把当前轮图片接入"发给主模型的 history"副本（不改持久化 history，避免 base64 污染上下文）
@@ -979,6 +984,7 @@ export async function handleChat(e) {
         groupOpConsensus = true
         safeLogger.info(`[ai0-plugin] 多模型协同已收敛：其内群操作视为全员同意，跳过同行评审二次确认`)
       }
+      if (isSuperseded()) return true
       safeLogger.info(`[ai0-plugin] 多模型协同完成：收敛=${delib.converged} 轮次=${delib.rounds.length} 模型=${activeModelKeys.length}`)
     } else {
       // 并行模式：记录本轮应参与的模型数，用于判定"全部模型是否都输出了同一个群操作指令"
@@ -1000,6 +1006,7 @@ export async function handleChat(e) {
         return { modelKey: k, text: res?.text || '', modelName: res?.modelName || k, reasoning: res?.reasoning }
       })
       const results = await Promise.allSettled(tasks)
+      if (isSuperseded()) return true
       const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value)
       const failed = results.filter((r) => r.status === 'rejected').map((r) => r.reason)
 
@@ -1035,7 +1042,8 @@ export async function handleChat(e) {
     }
   } catch (err) {
     // 区分"硬超时"与"被新请求取代/取消"，避免用宽泛正则把真实错误当取消静默吞掉
-    if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
+    const canceled = err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED' || err?.name === 'AbortError' || ac.signal?.aborted
+    if (canceled) {
       if (timedOut) {
         safeLogger.warn(`[ai0-plugin] 模型生成超时(${hardTimeout}ms)，已中止`)
         replyText = '(生成超时，请重试)'
@@ -1049,9 +1057,10 @@ export async function handleChat(e) {
     }
   } finally {
     clearTimeout(timeoutTimer)
-    // 只清理自己登记的（可能在执行期间又被新请求替换并 abort 过了，不能删新的那条）
-    if (inflightChat.get(inflightKey)?.controller === ac) inflightChat.delete(inflightKey)
   }
+
+  // allSettled 会吞掉 CanceledError：被取代后不得再写历史、不得回复「（没有产生回复内容）」
+  if (isSuperseded() || !ownsInflight()) return true
 
   if (replyText) {
     // 群聊且开启了群操作，解析AI回复中的群操作指令并执行
@@ -1130,7 +1139,7 @@ export async function handleChat(e) {
             }
             // 存入历史（不含操作指令与操作报告，避免污染 AI 上下文）
             history.push({ role: 'assistant', content: historyText + '\n[已生成并发送图片]' })
-            llm.saveHistory(userId, sessionId, history)
+            if (ownsInflight()) llm.saveHistory(userId, sessionId, history)
             return true
           } else {
             replyText = replyText + '\n\n❌ 图片生成失败：' + imgResult.error
@@ -1155,7 +1164,7 @@ export async function handleChat(e) {
             const tag = musicResult.cardSent ? '已发送音乐卡片' : (musicResult.sentText ? '已为你点歌（文本分享）' : '已为你点歌')
             const base = historyText.trim()
             history.push({ role: 'assistant', content: (base ? base + '\n' : '') + `[${tag}]` })
-            llm.saveHistory(userId, sessionId, history)
+            if (ownsInflight()) llm.saveHistory(userId, sessionId, history)
             return true
           } else {
             replyText = replyText + '\n\n❌ 点歌失败：' + musicResult.error
@@ -1251,7 +1260,7 @@ export async function handleChat(e) {
     } else if (historyText) {
       history.push({ role: 'assistant', content: historyText })
     }
-    llm.saveHistory(userId, sessionId, history)
+    if (ownsInflight()) llm.saveHistory(userId, sessionId, history)
   }
 
   // 默认只输出 AI 纯回复，不加任何固定后缀。想追加模型名标签可在 config.yaml 里 response.showModelTag: true
@@ -1262,6 +1271,9 @@ export async function handleChat(e) {
 
   await helper.replyText(e, finalText)
   return true
+  } finally {
+    releaseChatInflight()
+  }
 }
 
 /**

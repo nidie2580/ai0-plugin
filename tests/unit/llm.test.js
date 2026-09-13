@@ -11,7 +11,8 @@ import {
   loadHistory,
   cleanupOldSessions,
   extractReasoning,
-  contentToText
+  contentToText,
+  interpretModelsListResponse
 } from '../../src/llm.js'
 
 // llm.js 引用 Yunzai 全局 logger；测试环境注入 mock
@@ -241,5 +242,38 @@ describe('llm: contentToText 模型输出收敛（修复输出为空/数组问�
 
   test('纯空白字符串返回原字符（由上层 trim 处理）', () => {
     assert.equal(contentToText('   '), '   ')
+  })
+})
+
+describe('llm: interpretModelsListResponse /models 探测判定', () => {
+  test('200 + data[].id 返回模型列表', () => {
+    const r = interpretModelsListResponse(200, { data: [{ id: 'glm-4' }, { id: 'glm-4.5' }] }, 'https://x/v1/models')
+    assert.equal(r.ok, true)
+    assert.equal(r.unsupported, undefined)
+    assert.deepEqual(r.models, ['glm-4', 'glm-4.5'])
+    assert.equal(r.count, 2)
+  })
+
+  test('200 但空结构标 unsupported，不报未返回任何可用模型', () => {
+    const r = interpretModelsListResponse(200, { object: 'list' }, 'https://x/v1/models')
+    assert.equal(r.ok, true)
+    assert.equal(r.unsupported, true)
+    assert.equal(r.count, 0)
+    assert.match(r.note, /未返回模型列表/)
+  })
+
+  test('401/403/404 标 unsupported（GLM coding 等仅 /chat/completions）', () => {
+    for (const status of [401, 403, 404, 405, 501]) {
+      const r = interpretModelsListResponse(status, null, 'https://x/v4/models')
+      assert.equal(r.ok, true, `HTTP ${status} 应 ok`)
+      assert.equal(r.unsupported, true)
+      assert.match(r.note, /不提供 \/models/)
+    }
+  })
+
+  test('500 仍判失败', () => {
+    const r = interpretModelsListResponse(500, { error: 'boom' }, 'https://x/v1/models')
+    assert.equal(r.ok, false)
+    assert.equal(r.error, 'HTTP 500')
   })
 })

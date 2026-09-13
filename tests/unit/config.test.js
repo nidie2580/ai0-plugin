@@ -77,3 +77,30 @@ describe('config: getDeepThinkConfig 深度思考全局开关', () => {
     assert.equal(cfg.getDeepThinkConfig('a').timeout, 180000)
   })
 })
+
+describe('config: restoreMaskedSecrets 占位符还原', () => {
+  it('同名平台把 ******** 还原为磁盘真实 key', () => {
+    const target = { model: { kimi: { apiKey: '********', apiBase: 'https://a' } } }
+    const disk = { model: { kimi: { apiKey: 'sk-real', apiBase: 'https://a' } } }
+    cfg.restoreMaskedSecrets(target, disk)
+    assert.equal(target.model.kimi.apiKey, 'sk-real')
+  })
+
+  it('改名后按 keyMap 还原，不把 ******** 当真实 key', () => {
+    const target = {
+      model: { moonshot: { apiKey: '********', apiBase: 'https://a', name: 'Kimi' } },
+      _providerKeyMap: { moonshot: 'kimi' }
+    }
+    const disk = { model: { kimi: { apiKey: 'sk-real-kimi', apiBase: 'https://a' } } }
+    cfg.restoreMaskedSecrets(target, disk)
+    assert.equal(target.model.moonshot.apiKey, 'sk-real-kimi')
+    assert.equal(target._providerKeyMap, undefined)
+  })
+
+  it('imageGen.apiKey 占位符同样还原', () => {
+    const target = { imageGen: { apiKey: '********', apiBase: 'https://img' } }
+    const disk = { imageGen: { apiKey: 'sk-img', apiBase: 'https://img' } }
+    cfg.restoreMaskedSecrets(target, disk)
+    assert.equal(target.imageGen.apiKey, 'sk-img')
+  })
+})

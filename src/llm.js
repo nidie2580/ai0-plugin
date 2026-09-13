@@ -349,7 +349,7 @@ function isZhipuJwtCandidate(apiBase, apiKey) {
   if (!apiKey || !ZHIPU_JWT_CANDIDATE_RE.test(apiKey)) return false
   try {
     const host = new URL(normalizeApiBase(apiBase)).hostname
-    return host === 'bigmodel.cn' || host.endsWith('.bigmodel.cn')
+    return host === 'bigmodelcn' || host.endsWith('.bigmodel.cn')
   } catch (_) {
     return false
   }
@@ -396,6 +396,23 @@ async function retryWithZhipuJwt(resp, { url, method, body, apiKey, apiBase, tim
   }
 }
 
+/** 把 GET /models 的 HTTP 状态与响应体解释为探测结果（供探测 UI 与单测共用）。 */
+export function interpretModelsListResponse(status, data, modelsUrl = '') {
+  if (status >= 200 && status < 300) {
+    const arr = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : []
+    const ids = arr.map((x) => x?.id).filter(Boolean)
+    if (ids.length > 0) {
+      return { ok: true, status, url: modelsUrl, models: ids, count: ids.length }
+    }
+    return { ok: true, status, url: modelsUrl, models: [], count: 0, unsupported: true, note: '/models 未返回模型列表（不影响对话，请手动填写模型名）' }
+  }
+  // GLM Coding 等端点只提供 /chat/completions：/models 可能 401/403/404/405/501。
+  if (status === 401 || status === 403 || status === 404 || status === 405 || status === 501) {
+    return { ok: true, status, url: modelsUrl, models: [], count: 0, unsupported: true, note: `HTTP ${status}：该服务商不提供 /models 列表（不影响对话，请手动填写模型名）` }
+  }
+  return { ok: false, status, url: modelsUrl, models: [], error: `HTTP ${status}` }
+}
+
 export async function listAvailableModels({ modelKey = null } = {}) {
   const config = cfg.loadConfig()
   const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
@@ -423,24 +440,12 @@ export async function listAvailableModels({ modelKey = null } = {}) {
     ;({ resp } = await retryWithZhipuJwt(resp, {
       url: modelsUrl, method: 'get', body: null, apiKey, apiBase: base, timeout: 15000, signal: null,
     }))
-    if (resp.status >= 200 && resp.status < 300) {
-      // OpenAI 兼容格式：{ data: [ { id, ... } ] }；部分服务商直接返回数组
-      const arr = Array.isArray(resp.data?.data) ? resp.data.data : Array.isArray(resp.data) ? resp.data : []
-      const ids = arr.map(x => x?.id).filter(Boolean)
-      if (ids.length > 0) {
-        return { ok: true, status: resp.status, url: modelsUrl, models: ids, count: ids.length }
-      }
-      // 200 但无可解析的模型列表 → 服务可达，仅 /models 列表不可用（不影响对话）
-      return { ok: true, status: resp.status, url: modelsUrl, models: [], count: 0, unsupported: true, note: '/models 未返回模型列表（不影响对话，请手动填写模型名）' }
-    }
-    if (resp.status === 404) {
-      // GLM Coding（/api/coding/paas/v4）等端点不提供 /models：服务本身可达，只是没有模型列表，
-      // 不应据此把平台判为"离线/未返回任何可用模型"（对话走 /chat/completions，与 /models 无关）
-      return { ok: true, status: resp.status, url: modelsUrl, models: [], count: 0, unsupported: true, note: 'HTTP 404：该服务商不提供 /models 列表（不影响对话，请手动填写模型名）' }
-    }
-    return { ok: false, status: resp.status, url: modelsUrl, models: [], error: `HTTP ${resp.status}` }
+    return interpretModelsListResponse(resp.status, resp.data, modelsUrl)
   } catch (e) {
     const s = summarizeAxiosError(e)
+    if (s.status === 401 || s.status === 403 || s.status === 404 || s.status === 405 || s.status === 501) {
+      return interpretModelsListResponse(s.status, null, modelsUrl)
+    }
     return { ok: false, models: [], error: s.message, status: s.status, url: modelsUrl }
   }
 }

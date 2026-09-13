@@ -906,11 +906,18 @@ export function createApp() {
     // 把脱敏的 apiKey 还原：收到 **** 时，从原配置读取
     const old = cfg.loadConfig()
     const cleaned = JSON.parse(JSON.stringify(config))
+    const keyMap = (cleaned._providerKeyMap && typeof cleaned._providerKeyMap === 'object')
+      ? cleaned._providerKeyMap
+      : null
+    delete cleaned._providerKeyMap
     if (cleaned.model && old.model) {
       for (const k of Object.keys(cleaned.model)) {
+        if (k === 'default') continue
         const newVal = cleaned.model[k]?.apiKey
-        const oldVal = old.model[k]?.apiKey
+        const lookupKey = (keyMap && typeof keyMap[k] === 'string' && keyMap[k]) || k
+        const oldVal = old.model[lookupKey]?.apiKey
         // 精确比对：仅当值完全匹配占位符时还原（防止误还原包含 **** 的真实 Key）
+        // 改名时用 _providerKeyMap 找到旧 key，避免把 ******** 当真实密钥落盘
         if (typeof newVal === 'string' && newVal === API_KEY_PLACEHOLDER && typeof oldVal === 'string') {
           cleaned.model[k].apiKey = oldVal
         }

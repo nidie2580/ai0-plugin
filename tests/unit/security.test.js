@@ -101,3 +101,36 @@ describe('security: isAllowedOutboundUrl', () => {
     assert.equal(result.ok, false)
   })
 })
+
+describe('security: hasSystemProxy', () => {
+  it('无代理环境变量时为 false', () => {
+    const bak = {
+      HTTP_PROXY: process.env.HTTP_PROXY,
+      HTTPS_PROXY: process.env.HTTPS_PROXY,
+      ALL_PROXY: process.env.ALL_PROXY,
+      http_proxy: process.env.http_proxy,
+      https_proxy: process.env.https_proxy,
+      all_proxy: process.env.all_proxy,
+    }
+    try {
+      for (const k of Object.keys(bak)) delete process.env[k]
+      assert.equal(sec.hasSystemProxy(), false)
+    } finally {
+      for (const [k, v] of Object.entries(bak)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  it('HTTPS_PROXY 非空时为 true', () => {
+    const prev = process.env.HTTPS_PROXY
+    try {
+      process.env.HTTPS_PROXY = 'http://127.0.0.1:7890'
+      assert.equal(sec.hasSystemProxy(), true)
+    } finally {
+      if (prev === undefined) delete process.env.HTTPS_PROXY
+      else process.env.HTTPS_PROXY = prev
+    }
+  })
+})
