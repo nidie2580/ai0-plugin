@@ -36,6 +36,25 @@ import { safeLogger, sanitizeLog } from './globals.js'
 let QQ_API_TIMEOUT_MS = 5000
 let QQ_API_TIMEOUT_MS_OVERRIDE = null   // 仅供 __test__ 覆盖默认/配置值（测试需极短超时）
 
+/**
+ * 成员列表查询权限策略（fail-closed）。
+ * 取值：'member' = 任何群成员 | 'admin'（默认）= 群主/管理员/机器人主人 | 'master' = 仅机器人主人。
+ * 2026-09 安全审查：旧实现只对精确字符串 'admin'/'master' 收权，没有 else 兜底——
+ * 写成 'Admin'、'admins'、空值或 true 时会**静默放开给所有群成员**（全群 QQ/昵称/角色泄露）。
+ * 现在：先 trim + 小写归一化，非法值按最严格的 'master' 处理并告警一次。
+ */
+let _memberListPolicyWarned = false
+export function resolveMemberListPolicy() {
+  const raw = cfg.get('groupOps.allowMemberListFor', 'admin')
+  const v = typeof raw === 'string' ? raw.trim().toLowerCase() : raw
+  if (v === 'member' || v === 'admin' || v === 'master') return v
+  if (!_memberListPolicyWarned) {
+    _memberListPolicyWarned = true
+    safeLogger.warn(`[ai0-plugin] groupOps.allowMemberListFor 取值非法(${JSON.stringify(raw)})，已按最严格的 'master' 处理；可选值：member / admin / master`)
+  }
+  return 'master'
+}
+
 function getQqApiTimeoutMs() {
   if (QQ_API_TIMEOUT_MS_OVERRIDE != null) return QQ_API_TIMEOUT_MS_OVERRIDE
   const v = Number(cfg.get('groupOps.apiTimeoutMs', QQ_API_TIMEOUT_MS))
@@ -893,8 +912,10 @@ export async function buildGroupContext(e) {
   lines.push('  好的，我来帮你禁言该成员10分钟。')
   lines.push('  [action:mute:123:600]')
   lines.push('')
-  const listPolicy = cfg.get('groupOps.allowMemberListFor', 'admin')
-  const listWho = listPolicy === 'master' ? '仅机器人主人可查询' : (listPolicy === 'admin' ? '管理员/机器人主人可查询' : '任何群成员均可查询')
+  const listWho = (() => {
+    const p = resolveMemberListPolicy()
+    return p === 'master' ? '仅机器人主人可查询' : (p === 'admin' ? '管理员/机器人主人可查询' : '任何群成员均可查询')
+  })()
   lines.push(`【信息获取类操作（只读）】`)
   lines.push(`这类操作只是读取群内信息，不产生任何群变更。成员列表查询权限：${listWho}（只有请求者符合该身份时才应输出指令）。输出格式同上：`)
   lines.push('  查群成员列表（可选关键词，如输入 @某人昵称）:[action:member_list:关键词]   —— 不写关键词（写成 [action:member_list:]）即返回全体成员')
@@ -1218,10 +1239,8 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
 
       // —— 4 条硬验证（本地判定，不依赖 AI）——
       if (type === 'member_list') {
-        // member_list：只读信息获取，但"谁可查"按配置收敛。
-        //   allowMemberListFor = 'member'（显式放宽到任何成员）| 'admin'（默认：仅管理员/主人）| 'master'（仅机器人主人）
-        //   默认已收紧到 admin；需要 member 级可见的显式在 config.yaml 里改 allowMemberListFor: member
-        const listPolicy = cfg.get('groupOps.allowMemberListFor', 'admin')
+        // member_list：只读信息获取，但"谁可查"按配置收敛（值非法时按最严格的 master 处理，见 resolveMemberListPolicy）。
+        const listPolicy = resolveMemberListPolicy()
         if (listPolicy === 'admin' && !requesterElevated) {
           results.push({ type, ok: false, msg: '仅管理员/机器人主人可查询群成员列表' }); continue
         } else if (listPolicy === 'master' && !requesterIsMaster) {
@@ -1414,8 +1433,11 @@ export async function parseAndExecuteActions(replyText, groupId, e = null, audit
 
       } else if (type === 'member_list') {
         // 信息获取类：获取群成员列表（昵称/QQ/角色），不产生任何群变更。
+        // private: true —— 结果含全群 QQ/昵称/角色，只能私聊回给请求者，
+        // 不能拼进群回复（2026-09 审查：旧实现把结果并入 shown 直接播到群里，
+        // 使"仅管理员可查"的收紧在输出环节失效）。
         const listSummary = await getMemberListSummary(groupId, args[0])
-        results.push({ type, ok: true, msg: listSummary })
+        results.push({ type, ok: true, msg: listSummary, private: true })
 
       } else {
         results.push({ type, ok: false, msg: `未知操作类型：${type}` })

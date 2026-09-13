@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import * as cfg from '../../config/index.js'
 
 // "/<模型名>" 艾特解析 + 模型联网开关 回归测试
@@ -12,7 +13,7 @@ import * as cfg from '../../config/index.js'
 
 const chatService = await import('../../src/chatService.js')
 
-const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
 const backupExists = fs.existsSync(CONFIG_PATH)
 const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
 

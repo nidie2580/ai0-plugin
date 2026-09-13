@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import { scrubSensitiveTokens } from './helper.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -54,16 +55,18 @@ export function appendChatLog(entry) {
   try {
     ensureDir(CHATLOG_DIR)
     const list = readChatLog()
+    // 落盘前脱敏（与 llm.js 的历史存档策略一致）：用户可能把 API Key / Cookie 等
+    // 直接贴进对话，互聊记录会被 Web 后台「互聊记录」页回显，不做脱敏等于明文留存密钥。
     const rec = {
       id: randomUUID(),
       ts: Date.now(),
       userId: String(entry?.userId ?? ''),
       sessionId: String(entry?.sessionId ?? ''),
-      question: String(entry?.question ?? '').slice(0, 4000),
+      question: scrubSensitiveTokens(String(entry?.question ?? '')).slice(0, 4000),
       replies: Array.isArray(entry?.replies)
         ? entry.replies.map((r) => ({
             model: String(r?.model ?? ''),
-            text: String(r?.text ?? '').slice(0, 8000),
+            text: scrubSensitiveTokens(String(r?.text ?? '')).slice(0, 8000),
           }))
         : [],
     }

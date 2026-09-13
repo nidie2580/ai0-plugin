@@ -130,7 +130,6 @@ export function getStatus() {
     list.push({
       identity: rec.identity,
       ip: rec.ip,
-      approveCode: rec.code,       // 10 位放行码，展示给主管弹窗
       approved: rec.approved,
       createdAt: rec.createdAt,
     })

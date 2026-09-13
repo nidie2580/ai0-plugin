@@ -1068,6 +1068,11 @@ export async function handleChat(e) {
 
   // allSettled 会吞掉 CanceledError：被取代后不得再写历史、不得回复「（没有产生回复内容）」
   if (isSuperseded() || !ownsInflight()) return true
+  // 统一的"已过期"判定：请求被更新的消息取代（或 inflight 已被接管）后，
+  // 不得再执行群变更 / 生图 / Agent 循环，也不得发出过期回复。
+  // 2026-09 安全审查：旧实现只在上面这一处检查，之后的群操作（踢人/禁言）与最终回复
+  // 仍会照常执行——用户连发两条消息时，旧请求依然会踢人并发出过期内容。
+  const isStale = () => isSuperseded() || !ownsInflight()
 
   if (replyText) {
     // 群聊且开启了群操作，解析AI回复中的群操作指令并执行
@@ -1075,15 +1080,19 @@ export async function handleChat(e) {
     let historyText = replyText
     if (isGroup && groupContext) {
       try {
+        if (isStale()) return true // 已过期：不再执行任何群变更
         // 群操作同行评审（多模型一致确认，仅 multiChat 开启且 >=2 模型时生效）。
         // 参与评审模型需全部明确同意才放行；否决/能回复但读不出 y/n → 取消；调用异常模型排除出票。
         // 特例：回复来自"多模型协同讨论"且已收敛(groupOpConsensus)——收敛本身已让参与模型就同一版本
         // 表态过半同意，其内群操作即团队认可，不再重复发起 y/n 评审，直接走权限校验与执行。
         // 并行模式同理：全部参与模型都输出了同一条操作指令(unanimousOp) = 大家已一致认可该操作。
+        // 注意（2026-09 安全审查）：必须要求 >=2 个参与模型，"一致同意"才有意义。旧实现在
+        // `/<模型>` 定向模式下 activeModelKeys=[atKey] → mmExpectedResponders=1、
+        // multiModelReplies 只有该模型自己一条，"自己包含自己输出的 tag"恒为真 → 评审被整段跳过。
         let execText = replyText
         let cancelReport = ''
         let unanimousOp = false
-        if (!groupOpConsensus && mmExpectedResponders > 0 && multiModelReplies.length === mmExpectedResponders) {
+        if (!groupOpConsensus && mmExpectedResponders >= 2 && multiModelReplies.length === mmExpectedResponders) {
           const tagRe = /\[action:[^\]]*\]/g
           const tags = [...new Set(String(replyText).match(tagRe) || [])]
           if (tags.length) {
@@ -1112,10 +1121,25 @@ export async function handleChat(e) {
           shown = (shown.trim() ? shown.trim() + '\n\n' : '') + cancelReport
         }
         if (results.length) {
-          const actionReport = results.map(r =>
-            r.ok ? `✅ ${r.msg}` : `❌ ${r.msg}`
-          ).join('\n')
-          shown = shown + '\n\n' + actionReport
+          // private 结果（如成员列表：全群 QQ/昵称/角色）不进群回复，只私聊发给请求者；
+          // 否则"仅管理员可查"的收紧会在输出环节失效（2026-09 安全审查）。
+          const privateResults = results.filter((r) => r.private === true)
+          const publicResults = results.filter((r) => r.private !== true)
+          if (publicResults.length) {
+            const actionReport = publicResults.map(r =>
+              r.ok ? `✅ ${r.msg}` : `❌ ${r.msg}`
+            ).join('\n')
+            shown = shown + '\n\n' + actionReport
+          }
+          for (const r of privateResults) {
+            try {
+              const sent = await helper.sendPrivate(userId, r.ok ? r.msg : `❌ ${r.msg}`)
+              if (!sent || sent.ok === false) throw new Error(sent?.reason || '私信发送失败')
+            } catch (dmErr) {
+              safeLogger.warn(`[ai0-plugin] 私有结果私信发送失败(${userId}): ${dmErr?.message || dmErr}`)
+              shown = shown + `\n\n（有 ${privateResults.length} 条敏感结果需私聊发送，但私信失败，请先添加机器人为好友后重试）`
+            }
+          }
           safeLogger.info(`[ai0-plugin] 群操作执行结果: ${JSON.stringify(results)}`)
         }
         replyText = shown
@@ -1127,6 +1151,7 @@ export async function handleChat(e) {
     // 解析图片生成指令并执行
     if (imageContext) {
       try {
+        if (isStale()) return true // 已过期：不再生图（生图耗时长，过期后白花钱且会发出过期图片）
         const imgResult = await parseAndExecuteImageAction(replyText, userId)
         if (imgResult) {
           replyText = imgResult.cleanText
@@ -1138,7 +1163,11 @@ export async function handleChat(e) {
             // 再发送图片
             if (imgResult.imageBuffer) {
               try {
-                await e.reply(helper.getImageSegment(imgResult.imageBuffer))
+                // 注意：getImageSegment 是 async（内部要落临时文件），必须 await 出 segment 再发，
+                // 否则传进 e.reply 的是 Promise → 图片必然发送失败（2026-09 安全审查发现）。
+                const imgSeg = await helper.getImageSegment(imgResult.imageBuffer)
+                if (!imgSeg) throw new Error('图片 segment 构造失败')
+                await e.reply(imgSeg)
               } catch (imgErr) {
                 safeLogger.error(`[ai0-plugin] 发送图片失败: ${imgErr.message}`)
                 await helper.replyText(e, '图片生成成功但发送失败，请查看日志。')
@@ -1198,6 +1227,7 @@ export async function handleChat(e) {
         agentReasonings.length = 0
       }
       try {
+        if (isStale()) return true // 已过期：不再进入 Agent 循环（可达 10 分钟，过期后仍会执行命令）
         // 深度思考模型单轮可达数分钟，agent 循环按 deepThinkTimeout × 轮数放宽，封顶 30 分钟。
         const agentConf = cfg.get('agent', {}) || {}
         const agentHardTimeout = cfg.resolveAgentHardTimeoutMs({
@@ -1240,6 +1270,9 @@ export async function handleChat(e) {
         await finishReasoning()
       }
     }
+
+    // 已过期（被新消息取代）：不写历史、不发过期回复，直接让位给新请求
+    if (isStale()) return true
 
     // 存入历史使用 historyText（不含群操作报告，避免污染 AI 上下文）。
     // 多模型模式：把每个模型的回答以 "[*] 模型名：正文" 逐条保存，下一轮模型即可通过

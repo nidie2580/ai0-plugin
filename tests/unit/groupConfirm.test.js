@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import * as cfg from '../../config/index.js'
 
 // 群操作「同行评审」（多模型一致确认）回归测试
@@ -15,7 +16,7 @@ import * as cfg from '../../config/index.js'
 
 const svc = await import('../../src/groupConfirm.js')
 
-const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
 const backupExists = fs.existsSync(CONFIG_PATH)
 const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
 
@@ -148,12 +149,14 @@ describe('群操作同行评审', () => {
       return { text: replies[m ? m[0] : ''] ?? 'y', ok: true }
     }
 
-    it('部分模型异常 + 剩余模型全部 y → 放行（排除出票不计票）', async () => {
+    it('部分模型异常 + 仅剩 1 票 y → 取消（不得由出招模型自投一票放行）', async () => {
       writeConfig({ chat: { multiModel: { enabled: true, multiChat: true } } })
       const r = await svc.reviewGroupActions({ replyText: '[action:ban:123:60]', groupId: '1', userText: 'hi', judgeFn: partialBoom({ '[action:ban:123:60]': 'y' }) })
-      assert.equal(r.verdicts[0].ok, true)
-      assert.match(r.verdicts[0].reasons.join(';'), /一致同意/)
-      assert.match(r.verdicts[0].reasons.join(';'), /1 个调用异常模型已排除出票/)
+      // 2026-09 安全审查：旧实现在此处放行（"全部参与评审模型一致同意"），
+      // 但参与票只有 1 张（另一模型调用异常被排除），等于作者模型自我同意 → 现在必须取消。
+      assert.equal(r.verdicts[0].ok, false)
+      assert.match(r.verdicts[0].reasons.join(';'), /仅 1 个评审模型可确认/)
+      assert.match(r.verdicts[0].reasons.join(';'), /≥2 个模型一致同意/)
     })
 
     it('部分模型异常 + 剩余模型否决 → 取消', async () => {

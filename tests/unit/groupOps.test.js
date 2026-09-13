@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import * as cfg from '../../config/index.js'
 
 /**
@@ -245,7 +246,7 @@ describe('INFO: 群成员列表查询（默认 allowMemberListFor=admin，只读
 })
 
 describe('member_list 权限策略 allowMemberListFor', () => {
-  const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+  const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
   const backupExists = fs.existsSync(CONFIG_PATH)
   const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
 
@@ -279,6 +280,40 @@ describe('member_list 权限策略 allowMemberListFor', () => {
     const e = makeEvent(m.gid, m.requesterUid)
     const r = await groupOps.parseAndExecuteActions('[action:member_list:]', m.gid, e)
     assert.equal(r.results[0].ok, false, 'owner 角色不一定等于机器人主人(master)，应仍受 master 门禁约束')
+  })
+
+  // —— 2026-09 安全审查：配置值非法时必须 fail-closed ——
+  // 旧实现只对精确的 'admin'/'master' 两个字符串收权，没有 else 兜底：
+  // 写成 'Admin' / 'admins' / 空值 / true 时**任何人都能查全群 QQ+昵称+角色**。
+  it('配置值大小写/空白差异仍被识别为 admin（不再静默放开）', async () => {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ groupOps: { allowMemberListFor: '  Admin  ' } }), 'utf-8')
+    cfg.setForceLoad(true)
+    const m = setupMockBot({ botRole: 'owner', requesterRole: 'member' })
+    const e = makeEvent(m.gid, m.requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:member_list:]', m.gid, e)
+    assert.equal(r.results[0].ok, false, '普通成员不应因大小写/空格而被放行')
+  })
+
+  it('配置值非法（拼错/空值/非字符串）时按最严格 master 处理', async () => {
+    for (const bad of ['admins', '', true, null, 123]) {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ groupOps: { allowMemberListFor: bad } }), 'utf-8')
+      cfg.setForceLoad(true)
+      // 群主（owner 角色）在 master 策略下也应被拒（owner 角色 ≠ 机器人主人）
+      const m = setupMockBot({ botRole: 'owner', requesterRole: 'owner' })
+      const e = makeEvent(m.gid, m.requesterUid)
+      const r = await groupOps.parseAndExecuteActions('[action:member_list:]', m.gid, e)
+      assert.equal(r.results[0].ok, false, `非法值 ${JSON.stringify(bad)} 必须 fail-closed`)
+    }
+  })
+
+  it('成员列表结果标记为 private（只能私聊回给请求者，不得进群回复）', async () => {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ groupOps: { allowMemberListFor: 'admin' } }), 'utf-8')
+    cfg.setForceLoad(true)
+    const m = setupMockBot({ botRole: 'owner', requesterRole: 'admin' })
+    const e = makeEvent(m.gid, m.requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:member_list:]', m.gid, e)
+    assert.equal(r.results[0].ok, true)
+    assert.equal(r.results[0].private, true, '含全群 QQ/昵称/角色的结果必须标记 private 以走私聊通道')
   })
 })
 
@@ -480,7 +515,7 @@ describe('RECALL: 撤回消息（recall）', () => {
 })
 
 describe('RECALL 开关：allowRecall=false 时拒绝', () => {
-  const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+  const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
   const backupExists = fs.existsSync(CONFIG_PATH)
   const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
 

@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import * as cfg from '../../config/index.js'
 
 // 网页端「模型互聊」服务 回归测试
@@ -11,7 +12,7 @@ import * as cfg from '../../config/index.js'
 
 const svc = await import('../../src/multiChatService.js')
 
-const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
 const backupExists = fs.existsSync(CONFIG_PATH)
 const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
 

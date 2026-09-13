@@ -14,6 +14,7 @@ import {
   contentToText,
   interpretModelsListResponse
 } from '../../src/llm.js'
+import * as llm from '../../src/llm.js'
 
 // llm.js 引用 Yunzai 全局 logger；测试环境注入 mock
 globalThis.logger = {
@@ -275,5 +276,46 @@ describe('llm: interpretModelsListResponse /models 探测判定', () => {
     const r = interpretModelsListResponse(500, { error: 'boom' }, 'https://x/v1/models')
     assert.equal(r.ok, false)
     assert.equal(r.error, 'HTTP 500')
+  })
+})
+
+// —— 2026-09 安全审查：上下文压缩包必须在 system 头中保持"任意时刻至多 1 条" ——
+// 旧实现把压缩包作为 system 消息留在头部，而下方的 while 循环只扫描 dialog，
+// 永不推进 → 每压缩一次就永久多出一条 ≤4000 字摘要，system 头单调膨胀直到 512KB 触发整体裁剪。
+describe('llm: 上下文压缩包不累积（回归）', () => {
+  const countSummary = (h) => h.filter((m) => /^【上下文压缩包】/.test(String(m?.content || ''))).length
+  const growDialog = (hist, n, tag) => {
+    const out = [...hist]
+    for (let i = 0; i < n; i++) out.push({ role: i % 2 ? 'assistant' : 'user', content: `${tag}${i}` })
+    return out
+  }
+
+  test('连续两轮压缩后 system 头只保留 1 个压缩包，且旧压缩包被并入本轮重压缩', async () => {
+    const seen = []
+    const fakeSummarize = async (msgs) => { seen.push(msgs); return '【上下文压缩包】\n摘要要点' }
+
+    // contextSize=10 → 阈值 max(8, 25) = 25 条非 system 消息
+    let history = [{ role: 'system', content: '基础 system 提示' }, ...growDialog([], 30, 'x')]
+    const r1 = await llm.compressHistoryIfNeeded(history, { contextSize: 10, summarize: fakeSummarize })
+    assert.equal(r1.compressed, true)
+    assert.equal(countSummary(r1.history), 1)
+    assert.equal(r1.history[0].content, '基础 system 提示', '原 system 头必须保留')
+
+    // 第二轮：再堆积一轮对话（此时头部已含上一轮的压缩包）
+    const grown = growDialog(r1.history, 30, 'y')
+    const r2 = await llm.compressHistoryIfNeeded(grown, { contextSize: 10, summarize: fakeSummarize })
+    assert.equal(r2.compressed, true)
+    assert.equal(countSummary(r2.history), 1, '两次压缩后仍只能有 1 个压缩包（旧实现会累积为 2 个）')
+    assert.ok(seen[1].some((m) => /^【上下文压缩包】/.test(String(m?.content || ''))),
+      '旧压缩包必须参与本轮重压缩（信息不丢），而不是被直接丢弃')
+    // 头长度不随轮次增长：基础 system + 1 个压缩包
+    assert.equal(r2.history.filter((m) => m.role === 'system').length, 2)
+  })
+
+  test('未达阈值时不压缩、不动历史', async () => {
+    const history = [{ role: 'system', content: 's' }, ...growDialog([], 5, 'a')]
+    const r = await llm.compressHistoryIfNeeded(history, { contextSize: 10, summarize: async () => '【上下文压缩包】\nx' })
+    assert.equal(r.compressed, false)
+    assert.equal(r.history.length, history.length)
   })
 })

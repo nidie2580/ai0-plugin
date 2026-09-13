@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import * as cfg from '../../config/index.js'
 
 // 深度思考全局开关（response.deepThink）纯逻辑测试
@@ -10,7 +11,7 @@ import * as cfg from '../../config/index.js'
 //  - legacy-fallback：response.deepThink 未配置 → 回退读旧版 model.<key>.thinking（向后兼容）。
 //  - timeout：全局 deepThinkTimeout 优先；未配回退 per-model thinkingTimeout / timeout，兜底 ≥180s。
 
-const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
 const backupExists = fs.existsSync(CONFIG_PATH)
 const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
 

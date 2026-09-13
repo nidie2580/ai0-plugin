@@ -46,7 +46,16 @@ export function checkUserQuota(userId) {
   evictOverCapacity(dailyUsage, MAX_DAILY_USAGE_ENTRIES)
 
   const ic = getImageGenConfig()
-  const allowedUsers = ic.allowedUsers || []
+  // 白名单归一化（2026-09 安全审查）：
+  //   - YAML 写成裸标量 `allowedUsers: 123456` → 得到 number，旧实现 `allowedUsers.length > 0` 为
+  //     false → 白名单被静默跳过，任何人可生图；
+  //   - 写成字符串 `allowedUsers: "123456"` → `.includes()` 退化为子串匹配，用户 123 也会命中。
+  // 这里统一成"去空字符串数组"：裸标量按单元素白名单处理（保留管理员本意），非数组空值视为未配置。
+  const rawAllowed = ic.allowedUsers
+  const allowedUsers = (Array.isArray(rawAllowed)
+    ? rawAllowed
+    : (rawAllowed == null || rawAllowed === '' ? [] : [rawAllowed])
+  ).map((v) => String(v).trim()).filter(Boolean)
   // 白名单检查：非空白名单时，只有列表中的用户可用
   if (allowedUsers.length > 0 && !allowedUsers.includes(String(userId))) {
     return { ok: false, reason: '你没有图片生成权限' }

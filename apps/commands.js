@@ -464,7 +464,11 @@ export class AICommands extends plugin {
     if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const e = this.e
     const userId = helper.getUserId(e)
-    const isGroup = !!e.group_id
+    // 群聊判定必须走 helper.getGroupId：部分适配器把群号放在 e.message.group_id / e.from_group，
+    // 只读 e.group_id 会把群消息误判成"纯私聊"，从而把免登录直链直接贴进群里
+    // （2026-09 安全审查；同文件的 genCode/diagnose/testModel 均已使用 getGroupId）。
+    const groupId = helper.getGroupId(e)
+    const isGroup = groupId != null && groupId !== ''
     const isPrivate = !!e.user_id && !isGroup  // 纯私聊
 
     // —— 第一步：主人身份校验（群聊/私聊都必须过；顺序放最前，防止非主人浪费好友检测成本）
@@ -1396,7 +1400,7 @@ export class AICommands extends plugin {
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
     // 使用 escapeColons 替代全局 escape()，避免中文群名被 URI 编码成 %E6%96%B0... 乱码
-    const r = await groupOps.parseAndExecuteActions(`[action:set_group_name:${escapeColons(newName)}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:set_group_name:${escapeColons(newName)}]`, gid, e, { userId: helper.getUserId(e) })
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`修改群名失败：${r.results[0].msg}`)
     return e.reply(ok ? `已修改群名为: ${newName}` : '修改群名失败')
@@ -1410,7 +1414,7 @@ export class AICommands extends plugin {
     const arg = e.raw_message?.replace(/^#ai(全体|全员)禁言\s*/, '').trim()
     if (!arg) return e.reply('用法: #ai全体禁言 开|关\n示例: #ai全体禁言 开')
     const on = ['开', '启用', '1'].includes(arg)
-    const r = await groupOps.parseAndExecuteActions(`[action:mute_all:${on ? 1 : 0}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:mute_all:${on ? 1 : 0}]`, gid, e, { userId: helper.getUserId(e) })
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`操作失败：${r.results[0].msg}`)
     return e.reply(ok ? `${on ? '已开启' : '已关闭'}全体禁言` : '操作失败')
@@ -1433,7 +1437,7 @@ export class AICommands extends plugin {
     else dur *= 60
     if (dur > 30 * 86400) return e.reply('禁言时长不能超过 30 天')
     // 走 timed_mute 执行链（已在 groupOps 验证可用）：[action:timed_mute:QQ:秒]
-    const r = await groupOps.parseAndExecuteActions(`[action:timed_mute:${targetQQ}:${dur}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:timed_mute:${targetQQ}:${dur}]`, gid, e, { userId: helper.getUserId(e) })
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`定时禁言失败：${r.results[0].msg}`)
     return e.reply(ok ? `已禁言 ${targetQQ} ${match[3]}${unit}` : '定时禁言失败')
@@ -1447,7 +1451,7 @@ export class AICommands extends plugin {
     const arg = e.raw_message?.replace(/^#ai头衔展示\s*/, '').trim()
     if (!arg) return e.reply('用法: #ai头衔展示 开|关\n示例: #ai头衔展示 开')
     const on = ['开', '启用', '1'].includes(arg)
-    const r = await groupOps.parseAndExecuteActions(`[action:title_display:${on ? 1 : 0}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:title_display:${on ? 1 : 0}]`, gid, e, { userId: helper.getUserId(e) })
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`操作失败：${r.results[0].msg}`)
     return e.reply(ok ? `${on ? '已开启' : '已关闭'}头衔展示` : '操作失败')
@@ -1460,7 +1464,7 @@ export class AICommands extends plugin {
     if (!notice) return e.reply('请提供公告内容，如: #ai改公告 新公告内容')
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
-    const r = await groupOps.parseAndExecuteActions(`[action:set_notice:${escapeColons(notice)}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:set_notice:${escapeColons(notice)}]`, gid, e, { userId: helper.getUserId(e) })
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`修改公告失败：${r.results[0].msg}`)
     return e.reply(ok ? '公告已更新' : '修改公告失败')
@@ -1475,7 +1479,7 @@ export class AICommands extends plugin {
     const arg = e.raw_message?.replace(/^#ai群搜索\s*/, '').trim()
     if (!arg) return e.reply('用法: #ai群搜索 开|关\n示例: #ai群搜索 开')
     const on = ['开', '启用', '1'].includes(arg)
-    const r = await groupOps.parseAndExecuteActions(`[action:group_search:${on ? 1 : 0}]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:group_search:${on ? 1 : 0}]`, gid, e, { userId: helper.getUserId(e) })
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`操作失败：${r.results[0].msg}`)
     return e.reply(ok ? `${on ? '已开启' : '已关闭'}群搜索` : '操作失败')
@@ -1489,7 +1493,7 @@ export class AICommands extends plugin {
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
     // 统一格式：[action:blacklist:目标QQ:add]
-    const r = await groupOps.parseAndExecuteActions(`[action:blacklist:${match[1]}:add]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:blacklist:${match[1]}:add]`, gid, e, { userId: helper.getUserId(e) })
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`拉黑失败：${r.results[0].msg}`)
     return e.reply(ok ? `已拉黑 QQ: ${match[1]}` : '拉黑失败')
@@ -1503,7 +1507,7 @@ export class AICommands extends plugin {
     const gid = e.group_id
     if (!gid) return e.reply('请在群聊中使用此命令')
     // 统一格式：[action:blacklist:目标QQ:remove]
-    const r = await groupOps.parseAndExecuteActions(`[action:blacklist:${match[2]}:remove]`, gid, e)
+    const r = await groupOps.parseAndExecuteActions(`[action:blacklist:${match[2]}:remove]`, gid, e, { userId: helper.getUserId(e) })
     const ok = allActionsOk(r)
     if (!ok && r?.results?.[0]?.msg) return e.reply(`解除拉黑失败：${r.results[0].msg}`)
     return e.reply(ok ? `已解除拉黑 QQ: ${match[2]}` : '解除拉黑失败')

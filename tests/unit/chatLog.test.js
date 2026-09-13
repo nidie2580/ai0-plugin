@@ -67,6 +67,24 @@ describe('模型互聊记录(chatLog)', () => {
     assert.ok(!items.some((e) => e.question === 'q1'))
     assert.ok(items.some((e) => e.question === 'q249'))
   })
+
+  it('C6: 落盘前脱敏（用户贴进对话的密钥不得明文留存）', () => {
+    // 合成串，非真实凭据；与 llm.js 历史存档使用同一套脱敏规则
+    const fakeSk = 'sk-abcdefghijklmnopqrstuvwxyz0123456789'
+    const fakeGhp = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    chatLog.appendChatLog({
+      userId: '10001',
+      sessionId: 'session-1',
+      question: `我的key是 ${fakeSk} 请帮我看看`,
+      replies: [{ model: 'm', text: `收到，你的token ${fakeGhp} 已记录` }],
+    })
+    const { items } = chatLog.queryChatLog({ limit: 1, offset: 0 })
+    const top = items[0]
+    assert.ok(!top.question.includes(fakeSk), 'question 中的 sk- 令牌必须被脱敏')
+    assert.ok(!top.replies[0].text.includes(fakeGhp), 'reply 中的 ghp_ 令牌必须被脱敏')
+    assert.match(top.question, /\[已脱敏:openai-sk:/)
+    assert.match(top.replies[0].text, /\[已脱敏:github-pat:/)
+  })
 })
 
 function appendOne(question, model, text) {

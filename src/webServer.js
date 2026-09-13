@@ -423,6 +423,29 @@ export function createApp() {
     next()
   })
 
+  // —— 登录守卫锁定态的服务端强制（2026-09 安全审查）——
+  // loginGuard 的设计是"异身份登录待审批期间锁定所有已登录控制台"，但旧实现只有前端
+  // CSS 遮罩 + 弹窗，服务端不拦截任何请求 → 已登录会话（或持有 cookie 的攻击者）在
+  // "锁定"期间照样能读写配置/删除历史。这里把它变成真的：锁定期间只放行
+  // 状态查询、登出与登录类接口，其余 API 一律 423。
+  const GUARD_LOCK_ALLOWLIST = new Set(['/api/guard/status', '/api/me', '/api/logout'])
+  app.use((req, res, next) => {
+    try {
+      if (!loginGuard.isLocked()) return next()
+      const p = req.path || ''
+      if (GUARD_LOCK_ALLOWLIST.has(p)) return next()
+      if (p.startsWith('/api/login/')) return next()
+      if (req.method === 'GET' && !p.startsWith('/api/')) return next() // 页面/静态资源：让前端能渲染锁定遮罩
+      return res.status(423).json({
+        ok: false,
+        locked: true,
+        msg: '检测到异身份登录申请，控制台已锁定。请在机器人运行终端输入「继续操作 <放行码或请求人QQ>」解锁。',
+      })
+    } catch (_) {
+      return next()
+    }
+  })
+
   // 静态资源与页面一律禁用缓存：避免升级/重装后浏览器继续用旧版 app.js/app.css
   // 与新版 dashboard.html/login.html 错配，导致控制台初始化异常而「卡在配置加载中」。
   app.use((req, res, next) => {

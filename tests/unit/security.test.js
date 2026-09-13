@@ -13,7 +13,7 @@ const LOG_DIR = path.join(__dirname, '..', '..', 'logs', 'security')
 const LOG_FILE = path.join(LOG_DIR, 'security.log')
 
 describe('security: 安全审计日志轮转', () => {
-  const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+  const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
   const backupExists = fs.existsSync(CONFIG_PATH)
   const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
   const logDirExists = fs.existsSync(LOG_DIR)

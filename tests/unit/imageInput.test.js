@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import * as cfg from '../../config/index.js'
 
 // 图片输入功能回归测试
@@ -21,7 +22,7 @@ const chatService = await import('../../src/chatService.js')
 const llm = await import('../../src/llm.js')
 
 // —— 临时改写 config.yaml，保证测试独立于用户真实配置 ——
-const CONFIG_PATH = new URL('../../config/config.yaml', import.meta.url).pathname
+const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
 const backupExists = fs.existsSync(CONFIG_PATH)
 const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
 
@@ -143,6 +144,22 @@ describe('图片输入', () => {
     it('超限的 data URL 被拒绝', async () => {
       const r = await helper.imageSegmentToDataUrl({ data: pngDataUrlPayload() }, 4)
       assert.equal(r.ok, false)
+    })
+
+    it('本地非图片文件被拒绝（防借 OCR 链路读取并外传任意文件）', async () => {
+      // 2026-09 安全审查：旧实现用 `guessMimeFromBuffer(buf) || 'image/png'` 兜底，
+      // 任意文件（config.yaml / sessions.key / /etc/shadow）都会被当作 PNG 送去视觉接口。
+      const secret = path.join(TMP_DIR, 'not-an-image.yaml')
+      fs.writeFileSync(secret, 'apiKey: sk-abcdefghijklmnopqrstuvwxyz\n', 'utf-8')
+      try {
+        const r = await helper.imageSegmentToDataUrl({ file: secret })
+        assert.equal(r.ok, false, '非图片文件必须拒绝')
+        assert.match(String(r.error), /不是可识别的图片格式/)
+        const r2 = await helper.imageSegmentToDataUrl({ url: secret })
+        assert.equal(r2.ok, false, '经 url 字段传入的本地非图片路径同样必须拒绝')
+      } finally {
+        if (fs.existsSync(secret)) fs.unlinkSync(secret)
+      }
     })
   })
 

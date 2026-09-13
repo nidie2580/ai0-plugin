@@ -385,7 +385,10 @@ export async function imageSegmentToDataUrl(seg, maxBytes = 8 * 1024 * 1024) {
     return { ok: true, dataUrl: `data:${mime};base64,${seg.data}`, bytes }
   }
 
-  // 3) 本地文件路径（NapCat 缓存通常不在插件允许根目录内，但仍限制为"已存在的小文件"，防拖任意大文件）
+  // 3) 本地文件路径（NapCat 等适配器的图片缓存通常不在插件允许根目录内，故不用根目录白名单，
+  //    改用"内容必须是可识别的图片格式"做校验）。2026-09 安全审查：旧实现 `guessMimeFromBuffer(buf)
+  //    || 'image/png'` 的兜底会把任意文件（config.yaml / data/sessions.key / /etc/shadow …）
+  //    当作 PNG 送去 OCR/视觉接口 base64 外传；这里去掉兜底，非图片一律拒绝。
   const local = seg.file || seg.url
   if (local && fs.existsSync(local)) {
     let st
@@ -393,7 +396,8 @@ export async function imageSegmentToDataUrl(seg, maxBytes = 8 * 1024 * 1024) {
     if (!st.isFile()) return { ok: false, error: '非普通文件' }
     if (st.size > maxBytes) return { ok: false, error: `图片过大(${Math.round(st.size / 1024 / 1024)}MB)已拒绝` }
     const buf = fs.readFileSync(local)
-    const mime = guessMimeFromBuffer(buf) || 'image/png'
+    const mime = guessMimeFromBuffer(buf)
+    if (!mime) return { ok: false, error: '本地文件不是可识别的图片格式，已拒绝（防任意文件外传）' }
     return { ok: true, dataUrl: `data:${mime};base64,${buf.toString('base64')}`, bytes: buf.length }
   }
 

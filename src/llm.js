@@ -146,6 +146,9 @@ export function saveHistory(userId, sessionId, messages) {
 }
 
 export function cleanupOldSessions(userId, maxSessions, timeoutMs) {
+  // 与 historyFile() 保持一致的格式校验：防 userId='..' / '../x' 之类把 dir 指到 data/ 或插件外，
+  // 从而把其他 *.json（如 data/chat-log.json）当"过期会话"删掉（2026-09 安全审查）。
+  if (!/^\d{1,20}$/.test(String(userId))) return
   const dir = path.join(HISTORY_DIR, String(userId))
   if (!fs.existsSync(dir)) return
   // —— 清理逻辑合并为单次 readdir + 单次排序：——
@@ -249,27 +252,32 @@ async function summarizeWithModel(messagesToCompress, opts = {}) {
  *   - 如果无需压缩或压缩失败但 fallback 裁剪成功，返回裁剪后的 history；
  *   - compressed=true 表示已写入一条新的压缩摘要 system 消息并替换了中间对话。
  */
-export async function compressHistoryIfNeeded(history, { contextSize = 10, extra = {} } = {}) {
+export async function compressHistoryIfNeeded(history, { contextSize = 10, extra = {}, summarize = null } = {}) {
   if (!Array.isArray(history)) return { history: [], compressed: false }
   // 1. 拆出 system head 和对话正文
   let idx = 0
   while (idx < history.length && history[idx]?.role === 'system') idx++
   const sysHead = history.slice(0, idx)
   const dialog = history.slice(idx)
+  // 压缩包（【上下文压缩包】）是 system 消息，会被上面并入 sysHead；这里单独摘出来：
+  //   旧实现让它一直躺在 head 里 → 下面的 while 永不推进 → 每压缩一次就永久多一条摘要，
+  //   system 头单调增长直到 512KB 上限触发整体裁剪（2026-09 安全审查）。
+  //   现在：旧摘要参与本轮重压缩（信息不丢），插入新摘要时移除旧摘要，任意时刻只保留一个。
+  const isSummaryMsg = (m) => m?.role === 'system' && /^【上下文压缩包】/.test(String(m?.content || ''))
+  const priorSummaries = sysHead.filter(isSummaryMsg)
+  const cleanedHead = sysHead.filter((m) => !isSummaryMsg(m))
   const threshold = Math.max(8, Math.round(contextSize * COMPRESS_TRIGGER_MULT))
   if (dialog.length < threshold) return { history, compressed: false }
 
   // 2. 决定保留尾部最近多少条 + 需要压缩的中间段
   const tailKeep = Math.max(4, Math.round(contextSize * COMPRESS_KEEP_TAIL_RATIO))
   let compressEnd = dialog.length - tailKeep
-  // 若起点处有压缩包，则把旧压缩包也纳入本轮重新压缩（避免多个压缩包叠成噪声）
+  // 若正文起点处有压缩包（非前导 system 的异常历史），同样纳入本轮重新压缩
   let compressStart = 0
-  while (compressStart < compressEnd &&
-         dialog[compressStart]?.role === 'system' &&
-         /^【上下文压缩包】/.test(String(dialog[compressStart]?.content || ''))) {
+  while (compressStart < compressEnd && isSummaryMsg(dialog[compressStart])) {
     compressStart++
   }
-  const toCompress = dialog.slice(compressStart, compressEnd)
+  const toCompress = [...priorSummaries, ...dialog.slice(compressStart, compressEnd)]
   // 少于 4 条无需压缩（纯裁剪就够了）
   if (toCompress.length < 4) {
     const trimmed = [...sysHead, ...dialog.slice(-Math.max(contextSize, 6))]
@@ -280,7 +288,8 @@ export async function compressHistoryIfNeeded(history, { contextSize = 10, extra
   let compressed = false
   let summaryText = null
   try {
-    summaryText = await summarizeWithModel(toCompress, extra)
+    // summarize 可注入（测试用）：默认走 LLM 摘要
+    summaryText = await (summarize || summarizeWithModel)(toCompress, extra)
   } catch (_) { summaryText = null }
   if (summaryText) {
     // M7: 压缩摘要同样过一遍敏感令牌脱敏（防线兜底——即使输入侧 scrub 有遗漏，
@@ -288,13 +297,12 @@ export async function compressHistoryIfNeeded(history, { contextSize = 10, extra
     const sb = scrubSensitiveTokens(summaryText)
     const summaryMsg = { role: 'system', content: sb }
     const newDialog = [
-      ...dialog.slice(0, compressStart),  // 保留"之前的压缩包"也可以，不过上面 while 已经跳过
       summaryMsg,
       ...dialog.slice(compressEnd),
     ]
-    safeLogger.info(`[ai0-plugin] 上下文压缩完成：压缩 ${toCompress.length} 条 → 1 条压缩包（当前对话窗口 ${sysHead.length + newDialog.length} 条）`)
+    safeLogger.info(`[ai0-plugin] 上下文压缩完成：压缩 ${toCompress.length} 条 → 1 条压缩包（含并入的旧压缩包 ${priorSummaries.length} 条；当前对话窗口 ${cleanedHead.length + newDialog.length} 条）`)
     compressed = true
-    return { history: [...sysHead, ...newDialog], compressed }
+    return { history: [...cleanedHead, ...newDialog], compressed }
   }
   // 降级：裁剪至最近 contextSize 条
   safeLogger.warn(`[ai0-plugin] 上下文压缩降级：裁剪 ${dialog.length} → ${contextSize} 条`)
