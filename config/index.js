@@ -195,8 +195,9 @@ groupOps:
   allowLevelTitle: true
   # 允许撤回消息（recall：消息id制/引用制；撤自己/机器人消息无需权限，撤他人消息需群管理权限）
   allowRecall: true
-  # 群成员列表查询权限（member_list）：member=任何成员(默认) admin=仅管理员/主人 master=仅机器人主人
-  allowMemberListFor: member
+  # 群成员列表查询权限（member_list）：member=任何成员 admin=仅管理员/主人 master=仅机器人主人
+  # 默认 admin：member_list 返回全群成员资料，任何成员可查会放大骚扰/信息收集风险
+  allowMemberListFor: admin
 
 # 安全审计日志设置
 securityLog:
