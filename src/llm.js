@@ -340,6 +340,62 @@ function summarizeAxiosError(err) {
   }
 }
 
+// —— 智谱 API Key 兼容：{API Key ID}.{secret} 直传失败时，自动改用 JWT 签名鉴权 ——
+// 智谱 v4 支持把完整 "{id}.{secret}" 直接放进 Bearer；但部分账号/企业实例只认 JWT。
+// JWT 规范（智谱官方）：HS256，header 含 sign_type:SIGN，payload 含 api_key/exp/timestamp。
+const ZHIPU_JWT_CANDIDATE_RE = /^[A-Za-z0-9]{8,}\.[A-Za-z0-9+/=_-]{8,}$/
+
+function isZhipuJwtCandidate(apiBase, apiKey) {
+  if (!apiKey || !ZHIPU_JWT_CANDIDATE_RE.test(apiKey)) return false
+  try {
+    const host = new URL(normalizeApiBase(apiBase)).hostname
+    return host === 'bigmodel.cn' || host.endsWith('.bigmodel.cn')
+  } catch (_) {
+    return false
+  }
+}
+
+function b64url(input) {
+  return Buffer.from(input, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+function generateZhipuJwt(apiKey) {
+  const dot = apiKey.indexOf('.')
+  const id = apiKey.slice(0, dot)
+  const secret = apiKey.slice(dot + 1)
+  const nowMs = Date.now()
+  const header = b64url(JSON.stringify({ alg: 'HS256', sign_type: 'SIGN' }))
+  const payload = b64url(JSON.stringify({ api_key: id, exp: Math.floor(nowMs / 1000) + 3600, timestamp: nowMs }))
+  const sig = crypto.createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+  return `${header}.${payload}.${sig}`
+}
+
+// 401/403 且是智谱域名 + id.secret 格式时，用 JWT 重试一次（只重试一次，失败则走原错误流程）
+async function retryWithZhipuJwt(resp, { url, method, body, apiKey, apiBase, timeout, signal }) {
+  if (!resp || (resp.status !== 401 && resp.status !== 403)) return { retried: false, resp }
+  if (!isZhipuJwtCandidate(apiBase, apiKey)) return { retried: false, resp }
+  let jwt
+  try {
+    jwt = generateZhipuJwt(apiKey)
+  } catch (_) {
+    return { retried: false, resp }
+  }
+  safeLogger.info('[ai0-plugin] 智谱 API 鉴权失败(401/403)：改用 {id}.{secret} 签发的 JWT 重试一次')
+  try {
+    const resp2 = await safeAxiosRequest(method, url, body, {
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${jwt}` },
+      timeout,
+      signal,
+    })
+    return { retried: true, resp: resp2 }
+  } catch (e) {
+    if (e?.name === 'CanceledError' || e?.code === 'ERR_CANCELED' || signal?.aborted) throw e
+    safeLogger.warn(`[ai0-plugin] JWT 鉴权重试仍失败：${sanitizeLog(e?.message || e)}`)
+    return { retried: true, resp }
+  }
+}
+
 export async function listAvailableModels({ modelKey = null } = {}) {
   const config = cfg.loadConfig()
   const modelCfgKey = modelKey || config.model?.default || 'openai-compatible'
@@ -356,13 +412,17 @@ export async function listAvailableModels({ modelKey = null } = {}) {
   }
   const modelsUrl = `${base}/models`
   try {
-    const resp = await safeAxiosRequest('get', modelsUrl, null, {
+    let resp = await safeAxiosRequest('get', modelsUrl, null, {
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Accept': 'application/json'
       },
       timeout: 15000,
     })
+    // 智谱 JWT 兜底：直传 {id}.{secret} 得到 401/403 时，改用 JWT 重试一次
+    ;({ resp } = await retryWithZhipuJwt(resp, {
+      url: modelsUrl, method: 'get', body: null, apiKey, apiBase: base, timeout: 15000, signal: null,
+    }))
     if (resp.status >= 200 && resp.status < 300) {
       // OpenAI 兼容格式：{ data: [ { id, ... } ] }；部分服务商直接返回数组
       const arr = Array.isArray(resp.data?.data) ? resp.data.data : Array.isArray(resp.data) ? resp.data : []
@@ -543,6 +603,11 @@ export async function chatCompletions(messages, {
     delete body.tools
     resp = await doRequest()
   }
+
+  // 智谱 JWT 兜底：直传 {id}.{secret} 得到 401/403 时，用其签发 JWT 重试一次
+  ;({ resp } = await retryWithZhipuJwt(resp, {
+    url, method: 'post', body, apiKey: rawKey, apiBase: normalizedBase, timeout: effTimeout, signal,
+  }))
 
   const status = resp.status
   if (status < 200 || status >= 300) {
