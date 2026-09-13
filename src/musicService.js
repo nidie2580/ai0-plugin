@@ -15,6 +15,8 @@
 import * as cfg from '../config/index.js'
 import { safeLogger } from './globals.js'
 import { safeAxiosRequest } from './security.js'
+import { safeSegmentImage } from './helper.js'
+import { renderSongCard } from './svgRender.js'
 
 const MUSIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
 const HTTP_TIMEOUT_MS = 8000
@@ -429,4 +431,184 @@ export function buildMusicContext() {
     '  4) 点歌指令只供系统解析执行，用户看不到，不要在正文里提到该指令。',
     `  5) 当前搜索源：${srcLabel}。`,
   ].join('\n')
+}
+
+// ============================================================
+//   直连点歌命令 + 待歌名状态 + 富格式发送（语音 + 点歌卡片 + 链接）
+// ============================================================
+
+/** 匹配点歌命令："点歌"、"点歌 歌名"、"#点歌 xxx"。非命令返回 null。 */
+export function matchSongCommand(text) {
+  const t = String(text || '').trim()
+  if (!t) return null
+  const m = /^#?\s*点歌(?:\s+([^\n]{1,100}))?\s*$/.exec(t)
+  if (!m) return null
+  return { keyword: (m[1] || '').trim() }
+}
+
+// 待歌名状态：群/私聊分 key，TTL 内该用户下一条纯文本消息即为歌名（无需再 @/前缀）
+const PENDING_TTL_MS = 2 * 60 * 1000
+const PENDING_MAX = 500
+const pendingSongReq = new Map()
+
+function pendingKey(groupId, userId) {
+  return `${groupId ? 'g' + groupId : 'p'}:${userId}`
+}
+
+export function setPendingSongRequest(groupId, userId) {
+  if (!userId) return
+  if (pendingSongReq.size >= PENDING_MAX) {
+    const oldest = pendingSongReq.keys().next().value
+    if (oldest) pendingSongReq.delete(oldest)
+  }
+  pendingSongReq.set(pendingKey(groupId, userId), Date.now() + PENDING_TTL_MS)
+}
+
+export function peekPendingSongRequest(groupId, userId) {
+  const k = pendingKey(groupId, userId)
+  const exp = pendingSongReq.get(k)
+  if (!exp) return false
+  if (Date.now() > exp) {
+    pendingSongReq.delete(k)
+    return false
+  }
+  return true
+}
+
+export function clearPendingSongRequest(groupId, userId) {
+  pendingSongReq.delete(pendingKey(groupId, userId))
+}
+
+/** 语音段（record）：适配器不支持/无 ffmpeg 时发送会抛错，由调用方忽略继续发卡片 */
+export function buildRecordSegment(item) {
+  const url = String(item?.playUrl || '').trim()
+  if (!url) return null
+  try {
+    if (typeof segment !== 'undefined' && segment && typeof segment.record === 'function') {
+      return segment.record(url)
+    }
+  } catch (_) {}
+  return { type: 'record', data: { file: url } }
+}
+
+function getBotName(e) {
+  let n = ''
+  try {
+    n = String(e?.bot?.nickname || (typeof Bot !== 'undefined' ? Bot?.nickname : '') || 'AI')
+  } catch (_) {}
+  return (n.trim() || 'AI').slice(0, 20)
+}
+
+/**
+ * 富格式发送（仿"XX为您点歌"风格，与纯文本降级的三级策略 sendSongsResult 并存）：
+ *   ① 语音（有可播直链时；发送失败忽略）
+ *   ② 点歌卡片图（SVG 渲染）→ 降级原生 music 卡 → share 卡 → 纯文本
+ *   ③ 卡片图发送成功时补一条纯链接（图内链接不可点）
+ * @returns {Promise<{ok:boolean, sentCard:boolean, voiceSent:boolean, text?:string, msg?:string}>}
+ */
+export async function sendSongsResultRich(e, songs, opts = {}) {
+  const list = Array.isArray(songs) ? songs : []
+  if (!list.length) {
+    const t = opts.emptyText || '没有找到相关歌曲，换个关键词试试？'
+    try { await e.reply(t) } catch (_) {}
+    return { ok: false, sentCard: false, voiceSent: false, text: t, msg: 'empty' }
+  }
+  const item = list.find((s) => String(s.playUrl || '').trim()) || list[0]
+  let voiceSent = false
+
+  // ① 语音
+  const rec = buildRecordSegment(item)
+  if (rec) {
+    try {
+      await e.reply(rec)
+      voiceSent = true
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 点歌语音发送失败(忽略，继续发卡片): ${err?.message || err}`)
+    }
+  }
+
+  // ② SVG 点歌卡片图 + ③ 纯链接
+  try {
+    const svgPath = renderSongCard(item, getBotName(e))
+    await e.reply(safeSegmentImage(svgPath))
+    if (item.pageUrl) {
+      try { await e.reply(String(item.pageUrl)) } catch (_) {}
+    }
+    return { ok: true, sentCard: true, voiceSent }
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 点歌卡片图发送失败，降级原生卡片: ${err?.message || err}`)
+  }
+
+  // 降级：原生 music 自定义卡（自带可播音频）→ share 卡 → 纯文本
+  const native = buildMusicCardSegment(item)
+  if (native) {
+    try {
+      await e.reply(native)
+      return { ok: true, sentCard: true, voiceSent }
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 原生音乐卡片发送失败，降级 share: ${err?.message || err}`)
+    }
+  }
+  const share = buildShareSegment(item)
+  if (share) {
+    try {
+      await e.reply(share)
+      return { ok: true, sentCard: false, voiceSent }
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] share 卡片发送失败，降级纯文本: ${err?.message || err}`)
+    }
+  }
+  const text = buildSongsText(list, { source: opts.source })
+  try { await e.reply(text) } catch (_) {}
+  return { ok: true, sentCard: false, voiceSent, text }
+}
+
+/** 搜索 + 富格式发送（点歌命令与 AI 点歌指令共用）。 */
+export async function searchAndSendSongs(e, keyword, opts = {}) {
+  const res = await searchSongs({ keyword, source: opts.source })
+  if (!res.ok) {
+    const t = res.msg || '没有找到相关歌曲，换个关键词试试？'
+    try { await e.reply(t) } catch (_) {}
+    return { ok: false, sentCard: false, voiceSent: false, text: t, msg: res.msg }
+  }
+  return sendSongsResultRich(e, res.songs, { source: res.source })
+}
+
+/**
+ * 处理直连点歌命令（"点歌"/"点歌 歌名"/"#点歌 xxx"）。未命中返回 false。
+ * 需遵守触发规则（群内 @/前缀），由调用方在 matched 判定之后调用。
+ * 只发"点歌"两个字的：登记待歌名状态并提示回复歌名。
+ */
+export async function handleSongCommand(e, pureText, ctx = {}) {
+  if (!isMusicEnabled()) return false
+  const hit = matchSongCommand(pureText)
+  if (!hit) return false
+  if (hit.keyword) {
+    await searchAndSendSongs(e, hit.keyword)
+    return true
+  }
+  setPendingSongRequest(ctx.groupId, ctx.userId)
+  try { await e.reply('🎵 歌名是？直接回复歌名即可（2分钟内有效），发送「取消」退出点歌。') } catch (_) {}
+  return true
+}
+
+/**
+ * 消费待歌名状态：命中时把这条消息当歌名执行点歌（"取消"退出）。未命中返回 false。
+ * 在触发规则之前调用（问完歌名后直接回歌名，不需要再 @/前缀）。
+ */
+export async function consumePendingSongReply(e, { groupId, userId, text } = {}) {
+  if (!isMusicEnabled()) return false
+  if (!peekPendingSongRequest(groupId, userId)) return false
+  clearPendingSongRequest(groupId, userId)
+  const kw = String(text || '').trim()
+  if (!kw) {
+    try { await e.reply('没有拿到歌名，点歌已取消。') } catch (_) {}
+    return true
+  }
+  if (/^取消$/.test(kw)) {
+    try { await e.reply('已取消点歌。') } catch (_) {}
+    return true
+  }
+  await searchAndSendSongs(e, kw.slice(0, 100))
+  return true
 }

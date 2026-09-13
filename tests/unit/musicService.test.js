@@ -291,3 +291,105 @@ describe('sendSongsResult（三级发送策略）', () => {
     assert.equal(calls[0], '没有找到相关歌曲，换个关键词试试？')
   })
 })
+
+// ===== 直连点歌命令 / 待歌名状态 / 富格式发送 =====
+
+describe('matchSongCommand / 待歌名状态', () => {
+  it('M7a：命中"点歌"/"点歌 歌名"/"#点歌 xxx"，不误伤普通文本', () => {
+    assert.deepEqual(music.matchSongCommand('点歌'), { keyword: '' })
+    assert.deepEqual(music.matchSongCommand('点歌 晴天'), { keyword: '晴天' })
+    assert.deepEqual(music.matchSongCommand('#点歌 晴天'), { keyword: '晴天' })
+    assert.equal(music.matchSongCommand('点歌晴天'), null)
+    assert.equal(music.matchSongCommand('我想点歌'), null)
+    assert.equal(music.matchSongCommand(''), null)
+    assert.equal(music.matchSongCommand(null), null)
+  })
+
+  it('M7b：待歌名状态 set/peek/clear 与用户隔离', () => {
+    music.setPendingSongRequest('123', 'u1')
+    assert.equal(music.peekPendingSongRequest('123', 'u1'), true)
+    assert.equal(music.peekPendingSongRequest('123', 'u2'), false)
+    assert.equal(music.peekPendingSongRequest('456', 'u1'), false)
+    music.clearPendingSongRequest('123', 'u1')
+    assert.equal(music.peekPendingSongRequest('123', 'u1'), false)
+  })
+})
+
+describe('buildRecordSegment', () => {
+  it('M8：有 playUrl → record 段；无 → null', () => {
+    const seg = music.buildRecordSegment({ playUrl: 'https://cdn/x.mp3' })
+    assert.equal(seg.type, 'record')
+    assert.equal(seg.data.file, 'https://cdn/x.mp3')
+    assert.equal(music.buildRecordSegment({ playUrl: '' }), null)
+    assert.equal(music.buildRecordSegment(null), null)
+  })
+})
+
+describe('sendSongsResultRich（语音+点歌卡片图+链接）', () => {
+  async function makeE() {
+    const calls = []
+    return { calls, e: { reply: async (m) => { calls.push(m) } } }
+  }
+
+  it('M9a：可播 → 语音 + 卡片图 + 纯链接 三条', async () => {
+    const { calls, e } = await makeE()
+    const songs = [{
+      pageUrl: 'https://music.163.com/#/song?id=1', playUrl: 'https://cdn/x.mp3',
+      title: '晴天', artist: '周杰伦', album: '叶惠美', cover: '', durationSec: 269, source: 'netease',
+    }]
+    const res = await music.sendSongsResultRich(e, songs, { source: 'netease' })
+    assert.equal(res.ok, true)
+    assert.equal(res.sentCard, true)
+    assert.equal(res.voiceSent, true)
+    assert.equal(calls.length, 3)
+    assert.equal(calls[0].type, 'record')
+    assert.equal(calls[1].type, 'image')
+    assert.equal(calls[2], 'https://music.163.com/#/song?id=1')
+  })
+
+  it('M9b：无可播直链 → 卡片图 + 链接（无语音）', async () => {
+    const { calls, e } = await makeE()
+    const songs = [{ pageUrl: 'https://music.163.com/#/song?id=1', playUrl: '', title: '晴天', artist: '周杰伦', source: 'netease' }]
+    const res = await music.sendSongsResultRich(e, songs, { source: 'netease' })
+    assert.equal(res.ok, true)
+    assert.equal(res.sentCard, true)
+    assert.equal(res.voiceSent, false)
+    assert.equal(calls.length, 2)
+  })
+
+  it('M9c：空列表 → 提示文本', async () => {
+    const { calls, e } = await makeE()
+    const res = await music.sendSongsResultRich(e, [], { source: 'netease' })
+    assert.equal(res.ok, false)
+    assert.match(calls[0], /没有找到相关歌曲/)
+  })
+
+  it('M9d：卡片渲染落盘且内容含歌名（自动清理前可读）', async () => {
+    const svg = await import('../../src/svgRender.js')
+    const p = svg.renderSongCard({ title: '晴天', artist: '周杰伦', album: '叶惠美', durationSec: 269, pageUrl: 'https://music.163.com/#/song?id=1', source: 'netease' }, '小真哥')
+    assert.ok(fs.existsSync(p))
+    const content = fs.readFileSync(p, 'utf-8')
+    assert.match(content, /晴天/)
+    assert.match(content, /为您点歌/)
+    try { fs.unlinkSync(p) } catch (_) {}
+  })
+})
+
+describe('consumePendingSongReply', () => {
+  it('M10a：未挂起 → false 且不回复', async () => {
+    const calls = []
+    const e = { reply: async (m) => { calls.push(m) } }
+    const handled = await music.consumePendingSongReply(e, { groupId: 'g1', userId: 'u9', text: '晴天' })
+    assert.equal(handled, false)
+    assert.equal(calls.length, 0)
+  })
+
+  it('M10b：挂起后回"取消" → 已取消，不再搜索', async () => {
+    const calls = []
+    const e = { reply: async (m) => { calls.push(m) } }
+    music.setPendingSongRequest('g1', 'u10')
+    const handled = await music.consumePendingSongReply(e, { groupId: 'g1', userId: 'u10', text: '取消' })
+    assert.equal(handled, true)
+    assert.match(String(calls[0]), /已取消点歌/)
+  })
+})
