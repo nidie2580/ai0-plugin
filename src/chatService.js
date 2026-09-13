@@ -581,6 +581,15 @@ export async function handleChat(e) {
     return false
   }
 
+  // 点歌：待歌名状态优先消费（"点歌"问过歌名后，直接回歌名即可，无需再 @/前缀；2 分钟 TTL）
+  if (text && musicService.isMusicEnabled?.()) {
+    try {
+      if (await musicService.consumePendingSongReply(e, { groupId, userId, text })) return true
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 点歌待歌名状态处理异常: ${err?.message || err}`)
+    }
+  }
+
   const groupAtReply = cfg.get('chat.groupAtReply', true)
   const privateReply = cfg.get('chat.privateReply', true)
   const triggerPrefix = cfg.get('chat.triggerPrefix', []) || []
@@ -643,6 +652,15 @@ export async function handleChat(e) {
   // 防 AI 互聊循环：确认要回复前登记一次触发；若判定循环冷却中则静默跳过，
   // 避免与同群的其他机器人互相 @ 无限互答烧 token/余额。
   if (loopGuardReport(groupId, userId).suppressed) return false
+
+  // 直连点歌命令（"点歌"/"点歌 歌名"/"#点歌 xxx"）——遵守触发规则，命中即不再走 AI
+  if (musicService.isMusicEnabled?.()) {
+    try {
+      if (await musicService.handleSongCommand(e, pureText, { groupId, userId })) return true
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 点歌命令处理异常: ${err?.message || err}`)
+    }
+  }
 
   // 如果 parsed.current.text 能拿到更干净的正文（已去掉 reply/quote 段等），优先用它
   const baseForPure = (parsed.current?.text && typeof parsed.current.text === 'string')
@@ -1321,6 +1339,6 @@ async function parseAndExecuteMusicAction(replyText, e) {
   if (!res.ok) {
     return { cleanText, ok: false, error: res.msg || '音乐搜索失败' }
   }
-  const sent = await musicService.sendSongsResult(e, res.songs, { source: res.source })
+  const sent = await musicService.sendSongsResultRich(e, res.songs, { source: res.source })
   return { cleanText, ok: sent.ok, cardSent: sent.sentCard, sentText: sent.text || '' }
 }

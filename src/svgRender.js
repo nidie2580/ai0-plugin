@@ -440,3 +440,69 @@ export function countPages(providerData) {
   }
   return Math.max(1, Math.ceil(segCount / MAX_PLATFORMS_PER_IMAGE))
 }
+
+// ============================================================
+//   点歌卡片（"{botName}为您点歌" 风格，仿音乐 App 分享卡）
+// ============================================================
+
+/** 秒 → "mm:ss"（非法/0 返回 ''） */
+function fmtDuration(sec) {
+  const n = Number(sec)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  const m = Math.floor(n / 60)
+  const s = Math.round(n % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+/**
+ * 渲染点歌卡片 → 落盘 SVG，返回绝对路径。
+ * item: { title, artist, album, cover, pageUrl, durationSec, source }
+ * 失败抛异常，由调用方降级为原生卡片/文本。
+ */
+export function renderSongCard(item, botName = 'AI') {
+  const title = String(item?.title || '未知歌曲').slice(0, 40)
+  const artist = String(item?.artist || '未知歌手').slice(0, 40)
+  const album = String(item?.album || '').slice(0, 40)
+  const dur = fmtDuration(item?.durationSec)
+  const link = String(item?.pageUrl || '')
+  const cover = String(item?.cover || '')
+  const srcLabel = item?.source === 'qq' ? 'QQ音乐' : '网易云音乐'
+
+  const W = 520
+  const H = 268
+  const coverSvg = cover
+    ? `<image x="24" y="86" width="150" height="150" href="${esc(cover)}" preserveAspectRatio="xMidYMid slice" clip-path="url(#coverClip)"/>`
+    : `<rect x="24" y="86" width="150" height="150" rx="10" fill="#FBCFE8"/>
+       <text x="99" y="170" text-anchor="middle" font-size="56" fill="#F472B6">🎵</text>`
+
+  const rows = []
+  let ry = 116
+  const pushRow = (label, value, fill) => {
+    if (!value) return
+    rows.push(`<text x="196" y="${ry}" font-size="14" fill="#9CA3AF">${esc(label)}</text>
+    <text x="${196 + label.length * 14 + 8}" y="${ry}" font-size="14" fill="${fill || '#6B7280'}">${esc(String(value).slice(0, 30))}</text>`)
+    ry += 30
+  }
+  pushRow('歌手:', artist)
+  if (album) pushRow('专辑:', album)
+  if (dur) pushRow('时长:', dur, '#EC4899')
+  pushRow('来源:', srcLabel, '#6B7280')
+
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family='PingFang SC,Microsoft YaHei,Helvetica Neue,Arial,sans-serif'>
+  <defs>
+    <clipPath id="coverClip"><rect x="24" y="86" width="150" height="150" rx="10"/></clipPath>
+    <linearGradient id="songBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFF1F7"/>
+      <stop offset="100%" stop-color="#FFE4F1"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="${W}" height="${H}" rx="18" fill="url(#songBg)" stroke="#FBCFE8"/>
+  <text x="${W / 2}" y="48" text-anchor="middle" font-size="22" font-weight="700" fill="#EC4899">🎁 ${esc(botName)}为您点歌</text>
+  ${coverSvg}
+  <text x="196" y="106" font-size="19" font-weight="700" fill="#BE185D">${esc(title)}</text>
+  ${rows.join('\n  ')}
+  ${link ? `<text x="${W / 2}" y="${H - 18}" text-anchor="middle" font-size="13" fill="#3B82F6">${esc(link)}</text>` : ''}
+</svg>`
+  return writeSvg(svg, 'song')
+}
