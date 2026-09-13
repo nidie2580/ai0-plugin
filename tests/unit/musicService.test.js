@@ -337,14 +337,34 @@ describe('sendSongsResultRich（语音+点歌卡片图+链接）', () => {
       pageUrl: 'https://music.163.com/#/song?id=1', playUrl: 'https://cdn/x.mp3',
       title: '晴天', artist: '周杰伦', album: '叶惠美', cover: '', durationSec: 269, source: 'netease',
     }]
-    const res = await music.sendSongsResultRich(e, songs, { source: 'netease' })
+    const res = await music.sendSongsResultRich(e, songs, {
+      source: 'netease',
+      downloadAudioFn: async () => ({ ok: true, filePath: '/tmp/fake-song.mp3' }),
+    })
     assert.equal(res.ok, true)
     assert.equal(res.sentCard, true)
     assert.equal(res.voiceSent, true)
     assert.equal(calls.length, 3)
     assert.equal(calls[0].type, 'record')
+    assert.equal(calls[0].data.file, '/tmp/fake-song.mp3')
     assert.equal(calls[1].type, 'image')
     assert.equal(calls[2], 'https://music.163.com/#/song?id=1')
+  })
+
+  it('M9e：版权受限（download 返回 copyright）→ 无语音，链接附说明', async () => {
+    const { calls, e } = await makeE()
+    const songs = [{
+      pageUrl: 'https://music.163.com/#/song?id=1', playUrl: 'https://cdn/x.mp3',
+      title: '晴天', artist: '周杰伦', source: 'netease',
+    }]
+    const res = await music.sendSongsResultRich(e, songs, {
+      source: 'netease',
+      downloadAudioFn: async () => ({ ok: false, reason: '响应为 HTML 占位页', copyright: true }),
+    })
+    assert.equal(res.ok, true)
+    assert.equal(res.voiceSent, false)
+    assert.equal(calls.length, 2)
+    assert.match(String(calls[1]), /版权受限/)
   })
 
   it('M9b：无可播直链 → 卡片图 + 链接（无语音）', async () => {
@@ -391,5 +411,25 @@ describe('consumePendingSongReply', () => {
     const handled = await music.consumePendingSongReply(e, { groupId: 'g1', userId: 'u10', text: '取消' })
     assert.equal(handled, true)
     assert.match(String(calls[0]), /已取消点歌/)
+  })
+
+  it('M10c：挂起后回 #帮助 → 不当作歌名，保留待歌名状态', async () => {
+    const calls = []
+    const e = { reply: async (m) => { calls.push(m) } }
+    music.setPendingSongRequest('g1', 'u11')
+    const handled = await music.consumePendingSongReply(e, { groupId: 'g1', userId: 'u11', text: '#帮助' })
+    assert.equal(handled, false)
+    assert.equal(calls.length, 0)
+    assert.equal(music.peekPendingSongRequest('g1', 'u11'), true)
+    music.clearPendingSongRequest('g1', 'u11')
+  })
+
+  it('M10d：待歌名输入解析——命令保留、点歌命令抽歌名', () => {
+    assert.deepEqual(music.resolvePendingSongInput('#帮助'), { kind: 'keep' })
+    assert.deepEqual(music.resolvePendingSongInput('/cmd'), { kind: 'keep' })
+    assert.deepEqual(music.resolvePendingSongInput('点歌'), { kind: 'keep' })
+    assert.deepEqual(music.resolvePendingSongInput('点歌 晴天'), { kind: 'search', keyword: '晴天' })
+    assert.deepEqual(music.resolvePendingSongInput('取消'), { kind: 'cancel' })
+    assert.deepEqual(music.resolvePendingSongInput('晴天'), { kind: 'search', keyword: '晴天' })
   })
 })

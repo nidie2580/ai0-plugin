@@ -5,6 +5,7 @@ config/config.yaml.bak
 data/history/*
 !data/history/.gitkeep
 data/tmp-stickers/
+data/tmp/
 data/sessions.json
 data/sessions.json.tmp
 data/sessions.key

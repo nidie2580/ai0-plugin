@@ -349,7 +349,10 @@ function isZhipuJwtCandidate(apiBase, apiKey) {
   if (!apiKey || !ZHIPU_JWT_CANDIDATE_RE.test(apiKey)) return false
   try {
     const host = new URL(normalizeApiBase(apiBase)).hostname
-    return host === 'bigmodelcn' || host.endsWith('.bigmodel.cn')
+    return host === 'bigmodel.cn'
+      || host.endsWith('.bigmodel.cn')
+      || host === 'api.z.ai'
+      || host.endsWith('.z.ai')
   } catch (_) {
     return false
   }
@@ -383,8 +386,14 @@ async function retryWithZhipuJwt(resp, { url, method, body, apiKey, apiBase, tim
   }
   safeLogger.info('[ai0-plugin] 智谱 API 鉴权失败(401/403)：改用 {id}.{secret} 签发的 JWT 重试一次')
   try {
+    const jwtHeaders = {
+      'Authorization': `Bearer ${jwt}`,
+      ...(String(method).toLowerCase() === 'get'
+        ? { Accept: 'application/json' }
+        : { 'Content-Type': 'application/json' }),
+    }
     const resp2 = await safeAxiosRequest(method, url, body, {
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${jwt}` },
+      headers: jwtHeaders,
       timeout,
       signal,
     })
@@ -509,8 +518,8 @@ export async function chatCompletions(messages, {
   // 协议防呆：apiBase 指向 Anthropic 兼容端点（/v1/messages 协议，供 Claude Code 等使用）时，
   // OpenAI 协议的 /chat/completions 在该网关上得不到有效回复（实测现象：HTTP 200 但解析不到
   // 内容，对话表现为"(空)"）。直接给出可执行的配置建议，而不是让用户对着空回复排查。
-  if (/\/anthropic\/?$/i.test(normalizedBase)) {
-    const swapHint = normalizedBase.includes('open.bigmodel.cn')
+  if (/\/anthropic(\/v\d+)?\/?$/i.test(normalizedBase) || /\/v\d+\/messages\/?$/i.test(normalizedBase)) {
+    const swapHint = /bigmodel\.cn/i.test(normalizedBase)
       ? 'https://open.bigmodel.cn/api/paas/v4'
       : 'https://api.z.ai/api/paas/v4'
     throw new Error(`apiBase 是 Anthropic 兼容端点（${sanitizeLog(normalizedBase)}），走 /v1/messages 协议；本插件使用 OpenAI 协议（/chat/completions），二者不兼容。请把 apiBase 改为 ${swapHint} 后重试。`)
