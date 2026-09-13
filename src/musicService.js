@@ -13,6 +13,10 @@
  * 纯解析/构造函数与网络隔离，便于注入 httpFn/httpPostFn/httpPageFn 做单元测试。
  */
 import * as cfg from '../config/index.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { safeLogger } from './globals.js'
 import { safeAxiosRequest } from './security.js'
 import { safeSegmentImage } from './helper.js'
@@ -20,6 +24,9 @@ import { renderSongCard } from './svgRender.js'
 
 const MUSIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
 const HTTP_TIMEOUT_MS = 8000
+
+const AUDIO_TMP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'tmp')
+const AUDIO_MAX_BYTES = 20 * 1024 * 1024
 
 /** 读取 chat.music 配置（含缺省补齐） */
 export function getMusicConfig() {
@@ -491,6 +498,66 @@ export function buildRecordSegment(item) {
   return { type: 'record', data: { file: url } }
 }
 
+/** 音频魔数嗅探：ID3/MP3帧同步/Ogg/MP4/M4A/WAV/FLAC 任一命中即视为音频 */
+function looksLikeAudioBuffer(buf) {
+  if (!buf || buf.length < 12) return false
+  if (buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) return true                    // "ID3" (mp3)
+  if (buf[0] === 0xFF && (buf[1] & 0xE0) === 0xE0) return true                               // MPEG 帧同步 (mp3)
+  if (buf.slice(0, 4).toString('latin1') === 'OggS') return true                             // ogg
+  if (buf.slice(4, 8).toString('latin1') === 'ftyp') return true                             // mp4/m4a
+  if (buf.slice(0, 4).toString('latin1') === 'RIFF' && buf.slice(8, 12).toString('latin1') === 'WAVE') return true // wav
+  if (buf.slice(0, 4).toString('latin1') === 'fLaC') return true                             // flac
+  return false
+}
+
+/**
+ * 把 playUrl 真实下载为本地临时音频文件（跟随重定向 + 校验确为音频），供 record 发送。
+ * 背景：网易云 outer/url 对版权歌曲 302 → music.163.com/404（该页返回 200 + 大体积 HTML），
+ *      QQ 直链也可能 403；直接把 URL 交给适配器发语音会因"下载到 404 页面"静默失败
+ *      （用户只看到链接没有语音）。插件侧先下载并用魔数验证，成功才发本地文件，
+ *      失败返回可读原因（版权受限等）。
+ * @returns {Promise<{ok:boolean, filePath?:string, reason?:string, copyright?:boolean}>}
+ */
+export async function downloadAudioForVoice(item) {
+  const url = String(item?.playUrl || '').trim()
+  if (!url) return { ok: false, reason: '无可播直链' }
+  try {
+    const resp = await safeAxiosRequest('get', url, null, {
+      headers: {
+        'User-Agent': MUSIC_UA,
+        Referer: /qq\.com/.test(url) ? 'https://y.qq.com/' : 'https://music.163.com/',
+      },
+      timeout: HTTP_TIMEOUT_MS * 2,
+      responseType: 'arraybuffer',
+      maxContentLength: AUDIO_MAX_BYTES,
+      maxBodyLength: AUDIO_MAX_BYTES,
+    })
+    if (resp.status !== 200) {
+      // 302 已被 safeAxiosRequest 跟随；此处非 200 多为版权 404/403
+      return { ok: false, reason: `音频下载失败(HTTP ${resp.status})`, copyright: true }
+    }
+    const ct = String(resp.headers?.['content-type'] || '')
+    const buf = Buffer.from(resp.data || Buffer.alloc(0))
+    if (/text\/html/i.test(ct)) {
+      // 网易云版权 302 的落点是 200 的 HTML 占位页，按版权受限处理
+      return { ok: false, reason: `响应为 HTML 占位页(content-type=${ct})`, copyright: true }
+    }
+    if (!looksLikeAudioBuffer(buf)) {
+      return { ok: false, reason: `响应非音频格式(${ct || 'content-type 缺失'}, ${buf.length}B)`, copyright: true }
+    }
+    if (!fs.existsSync(AUDIO_TMP_DIR)) fs.mkdirSync(AUDIO_TMP_DIR, { recursive: true })
+    const filePath = path.join(AUDIO_TMP_DIR, `song-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}.mp3`)
+    fs.writeFileSync(filePath, buf)
+    // 5 分钟后清理（语音发送链路已完成）
+    setTimeout(() => {
+      try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath) } catch (_) {}
+    }, 5 * 60 * 1000).unref?.()
+    return { ok: true, filePath }
+  } catch (err) {
+    return { ok: false, reason: `音频下载异常：${err?.message || err}` }
+  }
+}
+
 function getBotName(e) {
   let n = ''
   try {
@@ -515,24 +582,36 @@ export async function sendSongsResultRich(e, songs, opts = {}) {
   }
   const item = list.find((s) => String(s.playUrl || '').trim()) || list[0]
   let voiceSent = false
+  let voiceSkippedReason = ''
 
-  // ① 语音
-  const rec = buildRecordSegment(item)
-  if (rec) {
-    try {
-      await e.reply(rec)
-      voiceSent = true
-    } catch (err) {
-      safeLogger.warn(`[ai0-plugin] 点歌语音发送失败(忽略，继续发卡片): ${err?.message || err}`)
+  // ① 语音：先把直链真实下载为本地文件（版权歌 302→404 在此被拦下），再 record 发送
+  const download = opts.downloadAudioFn || downloadAudioForVoice
+  const dl = await download(item).catch((err) => ({ ok: false, reason: `下载钩子异常：${err?.message || err}` }))
+  if (dl?.ok && dl.filePath) {
+    const rec = buildRecordSegment({ playUrl: dl.filePath })
+    if (rec) {
+      try {
+        await e.reply(rec)
+        voiceSent = true
+      } catch (err) {
+        safeLogger.warn(`[ai0-plugin] 点歌语音发送失败(适配器不支持/缺ffmpeg？忽略，继续发卡片): ${err?.message || err}`)
+        voiceSkippedReason = '语音发送失败'
+      }
     }
+  } else {
+    voiceSkippedReason = dl?.reason || '未知'
+    safeLogger.info(`[ai0-plugin] 点歌语音跳过：${voiceSkippedReason}${dl?.copyright ? '（版权受限，无试听）' : ''}`)
   }
 
-  // ② SVG 点歌卡片图 + ③ 纯链接
+  // ② SVG 点歌卡片图 + ③ 纯链接（版权受限时附一句说明；图内链接不可点）
   try {
     const svgPath = renderSongCard(item, getBotName(e))
     await e.reply(safeSegmentImage(svgPath))
     if (item.pageUrl) {
-      try { await e.reply(String(item.pageUrl)) } catch (_) {}
+      const linkText = voiceSent || !dl?.copyright
+        ? String(item.pageUrl)
+        : `${item.pageUrl}\n(该歌曲版权受限，没有语音试听，点链接可去 App 播放)`
+      try { await e.reply(linkText) } catch (_) {}
     }
     return { ok: true, sentCard: true, voiceSent }
   } catch (err) {
