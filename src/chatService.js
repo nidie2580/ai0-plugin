@@ -754,11 +754,12 @@ export async function handleChat(e) {
   // 并发控制尽早登记：同一用户同一会话的新请求取消旧请求，避免先发后到覆盖历史
   const modelCfg2 = cfg.loadConfig().model?.[defaultKey] || {}
   const rawTimeout = Number(modelCfg2.timeout)
-  const AGENT_HARD_TIMEOUT_MS = 600_000
-  const isThinkingModel = cfg.getDeepThinkConfig(defaultKey).enabled
-  const hardTimeout = isThinkingModel
-    ? Math.min((Number.isFinite(rawTimeout) && rawTimeout > 500 ? rawTimeout : 90_000) * 2 + 30_000, AGENT_HARD_TIMEOUT_MS)
-    : (Number.isFinite(rawTimeout) && rawTimeout > 500 ? Math.min(rawTimeout * 1.3 + 5000, 180_000) : 90_000)
+  const deepThink = cfg.getDeepThinkConfig(defaultKey)
+  const hardTimeout = cfg.resolveChatHardTimeoutMs({
+    enabled: deepThink.enabled,
+    timeout: deepThink.timeout,
+    modelTimeout: rawTimeout,
+  })
   pruneMapToSize(inflightChat, MAX_INFLIGHT)
   const inflightKey = `${userId}/${sessionId}`
   const prev = inflightChat.get(inflightKey)
@@ -1191,14 +1192,19 @@ export async function handleChat(e) {
         agentReasonings.length = 0
       }
       try {
-        // 深度思考模型思考可能长达数分钟，agent 循环不应被 chatService 的初始硬超时立即截止，
-        // 但也不能完全清空超时（否则可能死锁）。故重新登记一个放宽到 10 分钟的超时作为最终兜底；
-        // 超时或"新请求取代/新会话"时仍通过 ac.abort() 彻底终止底层 LLM 请求。
+        // 深度思考模型单轮可达数分钟，agent 循环按 deepThinkTimeout × 轮数放宽，封顶 30 分钟。
+        const agentConf = cfg.get('agent', {}) || {}
+        const agentHardTimeout = cfg.resolveAgentHardTimeoutMs({
+          enabled: deepThink.enabled,
+          timeout: deepThink.timeout,
+          hardTimeoutMs: agentConf.hardTimeoutMs,
+          maxRounds: agentConf.maxRounds,
+        })
         clearTimeout(timeoutTimer)
         timeoutTimer = setTimeout(() => {
           timedOut = true
           try { ac.abort('hard-timeout') } catch (_) {}
-        }, AGENT_HARD_TIMEOUT_MS)
+        }, agentHardTimeout)
         const agentLoop = await agent.continueAgentInHistory({
           history,
           assistantText: historyText,

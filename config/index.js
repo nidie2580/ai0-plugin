@@ -622,6 +622,38 @@ export function getDeepThinkConfig(modelKey) {
   return { enabled, timeout }
 }
 
+export const DEFAULT_AGENT_HARD_TIMEOUT_MS = 600_000
+export const MAX_AGENT_HARD_TIMEOUT_MS = 1_800_000
+
+/**
+ * 普通对话的外层 Abort 时限。深度思考必须盖住 getDeepThinkConfig().timeout，
+ * 避免 model.timeout（常见 60s）把正在思考的请求提前 abort。
+ */
+export function resolveChatHardTimeoutMs({ enabled, timeout, modelTimeout } = {}) {
+  if (enabled) {
+    const think = Math.max(Number(timeout) || 180_000, 180_000)
+    return Math.min(think + 30_000, MAX_AGENT_HARD_TIMEOUT_MS)
+  }
+  const raw = Number(modelTimeout)
+  return Number.isFinite(raw) && raw > 500 ? Math.min(raw * 1.3 + 5000, 180_000) : 90_000
+}
+
+/**
+ * Agent 整次任务硬超时。深度思考按「单次思考时限 × min(轮数, 3) + 60s」放宽，
+ * 且不低于 agent.hardTimeoutMs（默认 10 分钟），封顶 30 分钟（与网页校验一致）。
+ */
+export function resolveAgentHardTimeoutMs({ enabled, timeout, hardTimeoutMs, maxRounds } = {}) {
+  const configured = Number(hardTimeoutMs)
+  const base = Number.isFinite(configured) && configured >= 30_000
+    ? Math.min(configured, MAX_AGENT_HARD_TIMEOUT_MS)
+    : DEFAULT_AGENT_HARD_TIMEOUT_MS
+  if (!enabled) return base
+  const think = Math.max(Number(timeout) || 180_000, 180_000)
+  const rounds = Math.max(1, Number(maxRounds) || 5)
+  const forThink = think * Math.min(rounds, 3) + 60_000
+  return Math.min(Math.max(base, forThink), MAX_AGENT_HARD_TIMEOUT_MS)
+}
+
 /**
  * 统一解析 web.host / web.port：
  * - 某些 YAML 解析器会把裸写 host: 0.0.0.0 解析成数字 0；这里做归一化

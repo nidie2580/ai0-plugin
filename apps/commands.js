@@ -1532,12 +1532,21 @@ export class AICommands extends plugin {
     // 先回占位提示，避免长时间等待无反馈
     await e.reply('开始执行 Agent 任务，请稍候…（可在日志中查看进度）')
 
-    // 外层 AbortController + 总时限（15 分钟兜底，防止 runAgentLoop 自身超时失败时死锁）
+    const modelCfg = cfg.loadConfig().model || {}
+    const defaultKey = modelCfg.default || 'openai-compatible'
+    const deepThink = cfg.getDeepThinkConfig(defaultKey)
+    const agentConf = cfg.get('agent', {}) || {}
+    const outerMs = Math.max(900_000, cfg.resolveAgentHardTimeoutMs({
+      enabled: deepThink.enabled,
+      timeout: deepThink.timeout,
+      hardTimeoutMs: agentConf.hardTimeoutMs,
+      maxRounds: agentConf.maxRounds,
+    }))
     const outerAc = new AbortController()
     const outerTimer = setTimeout(() => {
       try { outerAc.abort() } catch (_) {}
-      safeLogger.warn('[ai0-plugin] Agent 任务总时限触发（15 分钟），已强制终止')
-    }, 900_000).unref?.()
+      safeLogger.warn(`[ai0-plugin] Agent 任务总时限触发（${outerMs}ms），已强制终止`)
+    }, outerMs).unref?.()
     // 将 outerAc 与 signal 关联：若外层触发 abort，传递到 agent 内部
     const origSignal = (typeof e?.signal !== 'undefined' && e?.signal) || null
     if (origSignal) {
@@ -1551,6 +1560,7 @@ export class AICommands extends plugin {
     try {
       result = await agent.runAgentLoop({
         task,
+        modelKey: defaultKey,
         signal: outerAc.signal,
         audit: { userId, groupId: e?.group_id ? String(e.group_id) : undefined },
         onThinking: async (reasoning) => {

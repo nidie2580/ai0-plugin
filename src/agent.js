@@ -828,8 +828,13 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
   // 严格读取配置（网页端/config.yaml 可写任意 ≥1 的值），无硬上限截断，受 API 配额与超时自然约束
   const rounds = Math.max(1, Number(maxRounds) || Number(conf.maxRounds) || DEFAULT_MAX_ROUNDS)
 
-  // 硬超时（整次 Agent 任务最长期限），10 分钟兜底
-  const AGENT_HARD_TIMEOUT_MS = Number(conf.hardTimeoutMs) || 600_000
+  const deepThink = cfg.getDeepThinkConfig(modelKey)
+  const AGENT_HARD_TIMEOUT_MS = cfg.resolveAgentHardTimeoutMs({
+    enabled: deepThink.enabled,
+    timeout: deepThink.timeout,
+    hardTimeoutMs: conf.hardTimeoutMs,
+    maxRounds: rounds,
+  })
   const ac = new AbortController()
   let timedOutByHardTimer = false
   // 若外部 signal 提前 aborted，则同步到内部 ac
@@ -971,8 +976,13 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
   // 安全审计发射器：携带审计上下文，记录命令执行/拒绝/异常事件
   const emitAudit = (kind, extra = {}) => securityLog.recordSecurityEvent({ kind, ...(audit || {}), ...extra })
 
-  // 为此继续流程也设立硬超时，并且将外部 signal 与内部 ac 关联
-  const AGENT_HARD_TIMEOUT_MS = Number(conf.hardTimeoutMs) || 600_000
+  const deepThink = cfg.getDeepThinkConfig(modelKey)
+  const AGENT_HARD_TIMEOUT_MS = cfg.resolveAgentHardTimeoutMs({
+    enabled: deepThink.enabled,
+    timeout: deepThink.timeout,
+    hardTimeoutMs: conf.hardTimeoutMs,
+    maxRounds: cap,
+  })
   const ac = new AbortController()
   let timedOutByHardTimer = false
   let hardTimer = null

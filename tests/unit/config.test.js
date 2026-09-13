@@ -78,6 +78,34 @@ describe('config: getDeepThinkConfig 深度思考全局开关', () => {
   })
 })
 
+describe('config: 深度思考超时放宽', () => {
+  it('普通对话：深度思考用 deepThinkTimeout+30s，盖住 model.timeout', () => {
+    assert.equal(cfg.resolveChatHardTimeoutMs({
+      enabled: true, timeout: 300_000, modelTimeout: 60_000,
+    }), 330_000)
+    assert.equal(cfg.resolveChatHardTimeoutMs({
+      enabled: false, modelTimeout: 60_000,
+    }), 83_000)
+    assert.equal(cfg.resolveChatHardTimeoutMs({ enabled: false }), 90_000)
+  })
+
+  it('Agent 硬超时：深度思考按 timeout×min(轮数,3)+60s，且不低于 10 分钟、封顶 30 分钟', () => {
+    assert.equal(cfg.resolveAgentHardTimeoutMs({ enabled: false }), 600_000)
+    assert.equal(cfg.resolveAgentHardTimeoutMs({
+      enabled: true, timeout: 300_000, maxRounds: 5,
+    }), 960_000)
+    assert.equal(cfg.resolveAgentHardTimeoutMs({
+      enabled: true, timeout: 180_000, maxRounds: 1,
+    }), 600_000)
+    assert.equal(cfg.resolveAgentHardTimeoutMs({
+      enabled: true, timeout: 600_000, maxRounds: 8,
+    }), 1_800_000)
+    assert.equal(cfg.resolveAgentHardTimeoutMs({
+      enabled: false, hardTimeoutMs: 120_000,
+    }), 120_000)
+  })
+})
+
 describe('config: restoreMaskedSecrets 占位符还原', () => {
   it('同名平台把 ******** 还原为磁盘真实 key', () => {
     const target = { model: { kimi: { apiKey: '********', apiBase: 'https://a' } } }
