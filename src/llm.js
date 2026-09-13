@@ -501,6 +501,16 @@ export async function chatCompletions(messages, {
     throw new Error('apiBase URL 未通过安全校验（禁止访问私有/回环/链路本地地址）')
   }
 
+  // 协议防呆：apiBase 指向 Anthropic 兼容端点（/v1/messages 协议，供 Claude Code 等使用）时，
+  // OpenAI 协议的 /chat/completions 在该网关上得不到有效回复（实测现象：HTTP 200 但解析不到
+  // 内容，对话表现为"(空)"）。直接给出可执行的配置建议，而不是让用户对着空回复排查。
+  if (/\/anthropic\/?$/i.test(normalizedBase)) {
+    const swapHint = normalizedBase.includes('open.bigmodel.cn')
+      ? 'https://open.bigmodel.cn/api/paas/v4'
+      : 'https://api.z.ai/api/paas/v4'
+    throw new Error(`apiBase 是 Anthropic 兼容端点（${sanitizeLog(normalizedBase)}），走 /v1/messages 协议；本插件使用 OpenAI 协议（/chat/completions），二者不兼容。请把 apiBase 改为 ${swapHint} 后重试。`)
+  }
+
   const model = String(m.model || 'gpt-3.5-turbo').trim() || 'gpt-3.5-turbo'
   // 支持上下文压缩场景覆盖 max_tokens / temperature
   // 防御式读取：配置值非数值/NaN/越界时兜底默认值，避免把 NaN/非法值发给上游 API
@@ -691,6 +701,27 @@ export async function chatCompletions(messages, {
   let text = contentToText(choice?.message?.content)
   if (!text) text = contentToText(choice?.delta?.content)
   if (!text) text = contentToText(resp.data?.content)
+  // 协议错配诊断：HTTP 200 但响应既无 choices 也无 content —— 响应不是 OpenAI 结构。
+  // 常见原因：apiBase 填成 Anthropic 兼容端点（网关对不存在的 /chat/completions 可能
+  // 返回 200 + 非 OpenAI 错误体），插件解析不到内容，上层只会显示"(空)"。
+  // 这里把响应体片段带出来，给出可直接执行的配置建议。
+  if (!text && !resp.data?.choices && resp.data?.content == null) {
+    let preview = ''
+    try {
+      preview = typeof resp.data === 'string'
+        ? resp.data.slice(0, 300)
+        : JSON.stringify(resp.data || {}).slice(0, 300)
+    } catch (_) {}
+    safeLogger.warn(`[ai0-plugin] LLM 返回 200 但无 OpenAI 结构（choices/content 缺失），疑似 apiBase 协议不匹配。响应体: ${sanitizeLog(preview)}`)
+    const err = new Error(
+      '模型返回 HTTP 200，但响应不是 OpenAI 格式（缺少 choices/content 字段）。' +
+      '最常见原因：apiBase 填成了 Anthropic 兼容端点（如 https://api.z.ai/api/anthropic，走 /v1/messages 协议）。' +
+      '请改用 OpenAI 兼容端点：智谱国内 https://open.bigmodel.cn/api/paas/v4，Z.ai/海外 https://api.z.ai/api/paas/v4。' +
+      (preview ? `\n响应体片段: ${sanitizeLog(preview)}` : '')
+    )
+    err.protocolMismatch = true
+    throw err
+  }
   // 内容被安全策略拦截（content_filter）或仅有推理而无正文 → 说明输出为空，
   // 记一条日志便于排查，text 保持空串由上层给出友好提示。
   if (!text && choice?.finish_reason === 'content_filter') {
