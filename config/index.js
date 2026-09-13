@@ -60,6 +60,11 @@ chat:
   maxSessionsPerUser: 3
   # 对话过期时间（毫秒），-1 为永不过期
   sessionTimeout: 1800000
+  # 私聊速率限制：同一用户在窗口内最多回复 N 次，超出则静默跳过（防刷 API）
+  privateRateLimit:
+    enabled: true
+    windowMs: 60000
+    maxReplies: 20
 
   # --- 仅艾特机器人默认回复 ---
   # 群聊里如果消息内容只有"@机器人"（去掉@后文本为空，或无文字仅带表情），就直接用下方默认回复，

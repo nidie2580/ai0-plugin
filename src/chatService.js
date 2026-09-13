@@ -95,8 +95,9 @@ export function getMultiModelConfig() {
   return cfg.get('chat.multiModel', {}) || {}
 }
 
-function getUserSessionKey(userId) {
-  return `current:${userId}`
+function getUserSessionKey(userId, groupId = null) {
+  const gid = groupId != null && groupId !== '' ? String(groupId) : 'p'
+  return `current:${userId}:${gid}`
 }
 
 // 从对话历史中抽取以 "[*] 模型名：正文" 形式存在的机器人（其他模型）发言，按模型名分组。
@@ -183,9 +184,9 @@ export function buildMultiChatRequest({ reqHistory, archiveReplies, modelKey, mo
   return next
 }
 
-export function getCurrentSession(userId) {
+export function getCurrentSession(userId, groupId = null) {
   pruneMapToSize(userSession, MAX_USER_SESSION_MAP)
-  const k = getUserSessionKey(userId)
+  const k = getUserSessionKey(userId, groupId)
   let sid = userSession.get(k)
   if (!sid) {
     sid = randomUUID()
@@ -194,8 +195,7 @@ export function getCurrentSession(userId) {
   return sid
 }
 
-export function newSession(userId) {
-  // 新会话 → 顺便取消该用户之前所有正在飞的请求
+export function newSession(userId, groupId = null) {
   for (const [k, v] of inflightChat) {
     if (k.startsWith(`${userId}/`)) {
       try { v?.controller?.abort?.('new-session') } catch (_) {}
@@ -203,7 +203,7 @@ export function newSession(userId) {
     }
   }
   const sid = randomUUID()
-  userSession.set(getUserSessionKey(userId), sid)
+  userSession.set(getUserSessionKey(userId, groupId), sid)
   return sid
 }
 
@@ -427,6 +427,36 @@ async function sendOnlyAtDefaultReply(e, config) {
 /* -------------------------------------------------------------------------- */
 const loopGuardState = new Map()   // key=`${groupId}/${userId}` → { times:[...], suppressedUntil }
 const LOOPGUARD_MAX_ENTRIES = 2000
+const privateRateState = new Map()
+const PRIVATE_RATE_MAX_ENTRIES = 2000
+
+function privateRateConfig() {
+  return {
+    enabled: cfg.get('chat.privateRateLimit.enabled', true) !== false,
+    windowMs: Math.max(1000, Number(cfg.get('chat.privateRateLimit.windowMs', 60000)) || 60000),
+    maxReplies: Math.max(1, Number(cfg.get('chat.privateRateLimit.maxReplies', 20)) || 20),
+  }
+}
+
+export function privateRateReport(userId, now = Date.now()) {
+  const opt = privateRateConfig()
+  if (!opt.enabled || userId == null) return { suppressed: false }
+  const key = String(userId)
+  let rec = privateRateState.get(key)
+  if (!rec) {
+    rec = { times: [] }
+    privateRateState.set(key, rec)
+  }
+  const cutoff = now - opt.windowMs
+  rec.times = rec.times.filter((t) => t >= cutoff)
+  if (rec.times.length >= opt.maxReplies) return { suppressed: true }
+  rec.times.push(now)
+  if (privateRateState.size > PRIVATE_RATE_MAX_ENTRIES) {
+    const first = privateRateState.keys().next().value
+    if (first) privateRateState.delete(first)
+  }
+  return { suppressed: false }
+}
 
 function loopGuardConfig() {
   return {
@@ -474,8 +504,7 @@ function loopGuardReport(groupId, userId, now = Date.now()) {
 function userFacingLLMError(msg) {
   const s = String(msg || '').replace(/\s+/g, ' ').trim()
   if (!s) return '未知原因'
-  // 原始错误里通常已含 HTTP 码；若只有原始错误文本，则原样保留
-  return s.length > 210 ? s.slice(0, 210) + '…' : s
+  return s.length > 210 ? helper.truncateUnicodeSafe(s, 210) + '…' : s
 }
 
 /**
@@ -652,6 +681,7 @@ export async function handleChat(e) {
   // 防 AI 互聊循环：确认要回复前登记一次触发；若判定循环冷却中则静默跳过，
   // 避免与同群的其他机器人互相 @ 无限互答烧 token/余额。
   if (loopGuardReport(groupId, userId).suppressed) return false
+  if (!isGroup && privateRateReport(userId).suppressed) return false
 
   // 直连点歌命令（"点歌"/"点歌 歌名"/"#点歌 xxx"）——遵守触发规则，命中即不再走 AI
   if (musicService.isMusicEnabled?.()) {
@@ -732,7 +762,7 @@ export async function handleChat(e) {
   const sysPrompt = (rawCfg.system && rawCfg.system.prompt !== undefined)
     ? String(rawCfg.system.prompt)
     : (DEFAULT_SYSTEM_PROMPT)
-  const sessionId = getCurrentSession(userId)
+  const sessionId = getCurrentSession(userId, groupId)
 
   const maxSessions = cfg.get('chat.maxSessionsPerUser', 3)
   const timeoutMs = cfg.get('chat.sessionTimeout', 1800000)
@@ -1221,7 +1251,7 @@ export async function handleChat(e) {
           try {
             // 一次性汇总发送；prefix 标注这是汇总，避免与普通深度思考混淆
             const summary = agentReasonings.join('\n\n')
-            await helper.replyReasoningAsChat(e, summary.length > 20000 ? summary.slice(0, 20000) + '\n\n……（思考过程过长，已截断）' : summary, { prefix: '🔎 深度思考汇总：' })
+            await helper.replyReasoningAsChat(e, summary.length > 20000 ? helper.truncateUnicodeSafe(summary, 20000) + '\n\n……（思考过程过长，已截断）' : summary, { prefix: '🔎 深度思考汇总：' })
           } catch (_) {}
         }
         agentReasonings.length = 0
@@ -1294,7 +1324,7 @@ export async function handleChat(e) {
         chatLog.appendChatLog({
           userId,
           sessionId,
-          question: String(pureText || '').slice(0, 4000),
+          question: helper.truncateUnicodeSafe(String(pureText || ''), 4000),
           replies: loggedReplies,
         })
       }

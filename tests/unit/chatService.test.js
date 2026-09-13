@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { escapeUntrusted, injectContextIntoHistory } from '../../src/chatService.js'
+import { escapeUntrusted, injectContextIntoHistory, getCurrentSession, newSession, privateRateReport } from '../../src/chatService.js'
 
 describe('chatService: escapeUntrusted', () => {
   test('转义 < >', () => {
@@ -132,5 +132,40 @@ describe('chatService: N7 system 头替换而非追加', () => {
     })
     const head = out[0]
     assert.ok(!head || head.role !== 'system' || !head.content.includes('身份A'), '遗留注入段被清理')
+  })
+})
+
+describe('chatService: 会话按群/私聊隔离', () => {
+  test('同一用户群聊与私聊使用不同会话', () => {
+    const uid = 'sess-iso-' + Date.now()
+    const groupSid = getCurrentSession(uid, '10001')
+    const privSid = getCurrentSession(uid, null)
+    assert.ok(groupSid)
+    assert.ok(privSid)
+    assert.notEqual(groupSid, privSid)
+    assert.equal(getCurrentSession(uid, '10001'), groupSid)
+    assert.equal(getCurrentSession(uid, '10002'), getCurrentSession(uid, '10002'))
+    assert.notEqual(getCurrentSession(uid, '10002'), groupSid)
+  })
+
+  test('#ai新会话只重置当前窗口', () => {
+    const uid = 'sess-reset-' + Date.now()
+    const g1 = getCurrentSession(uid, '20001')
+    const p1 = getCurrentSession(uid, null)
+    const g1b = newSession(uid, '20001')
+    assert.notEqual(g1b, g1)
+    assert.equal(getCurrentSession(uid, null), p1)
+  })
+})
+
+describe('chatService: 私聊速率限制', () => {
+  test('窗口内超过 maxReplies 后静默抑制', () => {
+    const uid = 'prate-' + Date.now() + Math.random()
+    const now = Date.now()
+    let suppressed = 0
+    for (let i = 0; i < 25; i++) {
+      if (privateRateReport(uid, now + i).suppressed) suppressed++
+    }
+    assert.ok(suppressed >= 5, `超限后应抑制，实际抑制 ${suppressed}`)
   })
 })

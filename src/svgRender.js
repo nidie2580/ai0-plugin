@@ -112,12 +112,13 @@ function writeSvg(svgText, prefix) {
 export function cleanupOldTmp(maxAgeMs = 2 * 60 * 60 * 1000) {
   try {
     const now = Date.now()
+    if (!fs.existsSync(TMP_DIR)) return
     for (const f of fs.readdirSync(TMP_DIR)) {
       const fp = path.join(TMP_DIR, f)
-      const st = fs.statSync(fp)
-      if (now - st.mtimeMs > maxAgeMs) {
-        try { fs.unlinkSync(fp) } catch (_) {}
-      }
+      try {
+        const st = fs.statSync(fp)
+        if (st.isFile() && now - st.mtimeMs > maxAgeMs) fs.unlinkSync(fp)
+      } catch (_) {}
     }
   } catch (_) {}
 }

@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260906a'
+window.__AI0_BUILD__ = '20260913a'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -117,18 +117,24 @@ if (route === 'login') {
   }
 
   async function pollClaim(pendingId) {
-    // 等到管理员放行后签收会话并进入控制台
+    // 等到管理员放行后签收会话并进入控制台；离开页面必须清掉 interval
+    if (window.__ai0ClaimTimer) { clearInterval(window.__ai0ClaimTimer); window.__ai0ClaimTimer = null }
     const timer = setInterval(async () => {
       try {
         const st = await api('/api/login/code/need-verify', { method: 'POST', body: { pendingId } })
         if (st && st.approved) {
           clearInterval(timer)
+          if (window.__ai0ClaimTimer === timer) window.__ai0ClaimTimer = null
           const cl = await api('/api/login/code/claim', { method: 'POST', body: { pendingId } })
           if (cl && cl.ok) { location.href = '/'; return }
           err.textContent = cl?.msg || '放行失败，请稍后重试'
         }
       } catch (_) {}
     }, 2500)
+    window.__ai0ClaimTimer = timer
+    window.addEventListener('beforeunload', () => {
+      if (window.__ai0ClaimTimer) { clearInterval(window.__ai0ClaimTimer); window.__ai0ClaimTimer = null }
+    }, { once: true })
   }
 
   async function doLogin() {
@@ -220,8 +226,8 @@ if (route === 'dashboard') {
     }
     // 立即轮询一次，并每 2.5s 刷新
     poll()
-    setInterval(poll, 2500)
-    window.addEventListener('beforeunload', () => { closing = true })
+    const guardTimer = setInterval(poll, 2500)
+    window.addEventListener('beforeunload', () => { closing = true; clearInterval(guardTimer) })
   })()
 
   // ---- Home（首页模型详情）----
@@ -393,6 +399,10 @@ if (route === 'dashboard') {
     $('#chat_loopGuard_windowMs').value = lgCfg.windowMs ?? 20000
     $('#chat_loopGuard_maxReplies').value = lgCfg.maxReplies ?? 4
     $('#chat_loopGuard_cooldownMs').value = lgCfg.cooldownMs ?? 60000
+    const prCfg = resp.config.chat?.privateRateLimit || {}
+    $('#chat_privateRate_enabled').value = String(prCfg.enabled ?? true)
+    $('#chat_privateRate_windowMs').value = prCfg.windowMs ?? 60000
+    $('#chat_privateRate_maxReplies').value = prCfg.maxReplies ?? 20
 
     const muCfg = resp.config.chat?.music || {}
     $('#chat_music_enabled').value = String(muCfg.enabled ?? false)
@@ -509,10 +519,10 @@ if (route === 'dashboard') {
       ...prevChat,
       groupAtReply: $('#chat_groupAtReply').value === 'true',
       privateReply: $('#chat_privateReply').value === 'true',
-      contextSize: parseInt($('#chat_contextSize').value, 10) || 10,
-      maxSessionsPerUser: parseInt($('#chat_maxSessionsPerUser').value, 10) || 3,
+      contextSize: parseIntOr($('#chat_contextSize').value, 10),
+      maxSessionsPerUser: parseIntOr($('#chat_maxSessionsPerUser').value, 3),
       triggerPrefix: splitCsv($('#chat_triggerPrefix').value),
-      sessionTimeout: parseInt($('#chat_sessionTimeout').value, 10) || -1,
+      sessionTimeout: parseIntOr($('#chat_sessionTimeout').value, -1),
       multiModel: {
         ...prevMM,
         enabled: $('#chat_multiModel_enabled').value === 'true',
@@ -524,14 +534,20 @@ if (route === 'dashboard') {
       },
       loopGuard: {
         enabled: $('#chat_loopGuard_enabled').value === 'true',
-        windowMs: parseInt($('#chat_loopGuard_windowMs').value, 10) || 20000,
-        maxReplies: parseInt($('#chat_loopGuard_maxReplies').value, 10) || 4,
-        cooldownMs: parseInt($('#chat_loopGuard_cooldownMs').value, 10) || 60000
+        windowMs: parseIntOr($('#chat_loopGuard_windowMs').value, 20000),
+        maxReplies: parseIntOr($('#chat_loopGuard_maxReplies').value, 4),
+        cooldownMs: parseIntOr($('#chat_loopGuard_cooldownMs').value, 60000)
+      },
+      privateRateLimit: {
+        ...(prevChat.privateRateLimit || {}),
+        enabled: $('#chat_privateRate_enabled').value === 'true',
+        windowMs: parseIntOr($('#chat_privateRate_windowMs').value, 60000),
+        maxReplies: parseIntOr($('#chat_privateRate_maxReplies').value, 20)
       },
       music: {
         enabled: $('#chat_music_enabled').value === 'true',
         source: $('#chat_music_source').value === 'qq' ? 'qq' : 'netease',
-        maxResults: Math.min(5, Math.max(1, parseInt($('#chat_music_maxResults').value, 10) || 3)),
+        maxResults: Math.min(5, Math.max(1, parseIntOr($('#chat_music_maxResults').value, 3))),
         tryPlayUrl: $('#chat_music_tryPlayUrl').value !== 'false'
       }
     }
@@ -560,14 +576,14 @@ if (route === 'dashboard') {
     }
     c.response = {
       useForwardMsg: $('#resp_useForwardMsg').value === 'true',
-      forwardThreshold: parseInt($('#resp_forwardThreshold').value, 10) || 500,
+      forwardThreshold: parseIntOr($('#resp_forwardThreshold').value, 500),
       showModelTag: $('#resp_showModelTag').value === 'true',
-      typingDelay: parseInt($('#resp_typingDelay').value, 10) || 0,
+      typingDelay: parseIntOr($('#resp_typingDelay').value, 0),
       deepThink: $('#resp_deepThink').value === 'true',
-      deepThinkTimeout: parseInt($('#resp_deepThinkTimeout').value, 10) || 300000
+      deepThinkTimeout: parseIntOr($('#resp_deepThinkTimeout').value, 300000)
     }
     c.web = {
-      port: parseInt($('#web_port').value, 10) || 12580,
+      port: parseIntOr($('#web_port').value, 12580),
       host: $('#web_host').value.trim() || '127.0.0.1',
       trustProxy: $('#web_trustProxy').checked === true
     }
@@ -1250,7 +1266,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const p = providersList[idx]
     if (!p) return
     // 先保存当前编辑（避免探测的是旧 key）
-    const box = $(`#providersList .provider-probe[data-idx="${idx}"]`)
+    let box = $(`#providersList .provider-probe[data-idx="${idx}"]`)
     if (box) {
       box.classList.remove('hidden')
       box.innerHTML = '<span class="hint">🔍 正在探测 /models ...</span>'
@@ -1272,10 +1288,14 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       || exist.apiBase !== apiBase
       || (keyActuallyModified && exist.apiKey !== apiKeyRaw)
     if (needSave) {
-      // 临时保存一下，方便后端用最新的 key 探测
+      // 临时保存一下，方便后端用最新的 key 探测；保存会重绘卡片，必须重新取节点
       await saveProviders()
     }
+    const liveBox = $(`#providersList .provider-probe[data-idx="${idx}"]`) || box
     const r = await api('/api/providers/probe', { method: 'POST', body: { modelKey: key } })
+    if (liveBox) {
+      box = liveBox
+    }
     if (box) {
       if (r.ok && r.info?.ok) {
         const models = r.info.models || []
@@ -1434,6 +1454,10 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     return String(s ?? '').replace(/[&<>"'/]/g, c => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '/': '&#x2F;'
     }[c]))
+  }
+  function parseIntOr(v, fallback) {
+    const n = parseInt(v, 10)
+    return Number.isFinite(n) ? n : fallback
   }
   function splitCsv(v) {
     return String(v || '').split(/[,，\s]+/).map(s => s.trim()).filter(Boolean)

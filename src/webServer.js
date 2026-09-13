@@ -116,7 +116,7 @@ async function buildUserSessionRecord(ud, userId) {
       const arr = JSON.parse(raw)
       msgCount = Array.isArray(arr) ? arr.length : 0
       const last = Array.isArray(arr) ? arr[arr.length - 1] : null
-      if (last) preview = (last.content || '').slice(0, 60)
+      if (last) preview = helper.truncateUnicodeSafe(last.content || '', 60)
     } catch {}
     // 会话安全元数据（agentUsed / risks）：Web 会话列表标注哪些会话用过 Agent、哪些有风险
     let agentUsed = false, risks = []
@@ -464,10 +464,18 @@ export function createApp() {
   const APP_CSS_RE = /\/assets\/app\.css(?:\?[^"]*)?"/g
   const _hashedJs = '/assets/app.' + (crypto.createHash('sha256').update(fs.readFileSync(path.join(WEB_DIR, 'assets', 'app.js'))).digest('hex').slice(0, 12)) + '.js'
   const _hashedCss = '/assets/app.' + (crypto.createHash('sha256').update(fs.readFileSync(path.join(WEB_DIR, 'assets', 'app.css'))).digest('hex').slice(0, 12)) + '.css'
-  // 在启动时给两份资源各做一份指纹副本（保证 URL 真实可下载）
+  // 在启动时给两份资源各做一份指纹副本（保证 URL 真实可下载），并清掉过期指纹文件
   try {
-    fs.copyFileSync(path.join(WEB_DIR, 'assets', 'app.js'), path.join(WEB_DIR, 'assets', _hashedJs.replace(/^\/assets\//, '')))
-    fs.copyFileSync(path.join(WEB_DIR, 'assets', 'app.css'), path.join(WEB_DIR, 'assets', _hashedCss.replace(/^\/assets\//, '')))
+    const assetsDir = path.join(WEB_DIR, 'assets')
+    const keepJs = _hashedJs.replace(/^\/assets\//, '')
+    const keepCss = _hashedCss.replace(/^\/assets\//, '')
+    fs.copyFileSync(path.join(assetsDir, 'app.js'), path.join(assetsDir, keepJs))
+    fs.copyFileSync(path.join(assetsDir, 'app.css'), path.join(assetsDir, keepCss))
+    for (const f of fs.readdirSync(assetsDir)) {
+      if (/^app\.[0-9a-f]{12}\.(js|css)$/.test(f) && f !== keepJs && f !== keepCss) {
+        try { fs.unlinkSync(path.join(assetsDir, f)) } catch (_) {}
+      }
+    }
   } catch (_) {}
   // HTML 响应在 sendFile 之前重写资源 URL 到指纹版
   app.use((req, res, next) => {
@@ -509,9 +517,11 @@ export function createApp() {
       return res.send('链接无效或已过期')
     }
     // verifyMagicLink 已原子标记为已消费；若 session 发放失败则回滚
+    // 直链仅主人可生成：登录绑定/沿用 primaryIdentity，避免无身份会话绕过守卫
+    const identity = loginGuard.adoptPrimaryForMasterLogin('master-magic')
     let session
     try {
-      session = auth.issueSession(req.clientIp)
+      session = auth.issueSession(req.clientIp, identity)
     } catch (e) {
       auth.rollbackMagicLink(token)
       const f = path.join(WEB_DIR, 'login.html')
@@ -786,6 +796,9 @@ export function createApp() {
         'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout', 'vision', 'thinking', 'thinkingTimeout', 'web'
       ])
       for (const [key, val] of Object.entries(config.model)) {
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+          return res.json({ ok: false, msg: `模型配置含有不允许的键: ${key}` })
+        }
         if (key === 'default') continue
         if (val && typeof val === 'object' && !Array.isArray(val)) {
           const bad = Object.keys(val).filter(k => !ALLOWED_MODEL_FIELDS.has(k))
@@ -800,6 +813,9 @@ export function createApp() {
     //     与 /api/image-config 保持一致，防止通过 web 后台写入内网/回环 apiBase 导致 apiKey 泄漏
     if (config.model && typeof config.model === 'object') {
       for (const [key, val] of Object.entries(config.model)) {
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+          return res.json({ ok: false, msg: `模型配置含有不允许的键: ${key}` })
+        }
         if (key === 'default' || !val || typeof val !== 'object') continue
         const apiBase = String(val.apiBase || '').trim()
         if (!apiBase) continue
@@ -857,6 +873,18 @@ export function createApp() {
         }
         if (lg.cooldownMs != null && (typeof lg.cooldownMs !== 'number' || lg.cooldownMs < 1000 || lg.cooldownMs > 3600000)) {
           return res.json({ ok: false, msg: 'chat.loopGuard.cooldownMs 必须为 1000-3600000 之间的数字' })
+        }
+      }
+      const pr = chat.privateRateLimit
+      if (pr) {
+        if (pr.enabled != null && typeof pr.enabled !== 'boolean') {
+          return res.json({ ok: false, msg: 'chat.privateRateLimit.enabled 必须为布尔值' })
+        }
+        if (pr.windowMs != null && (typeof pr.windowMs !== 'number' || pr.windowMs < 1000 || pr.windowMs > 3600000)) {
+          return res.json({ ok: false, msg: 'chat.privateRateLimit.windowMs 必须为 1000-3600000 之间的数字' })
+        }
+        if (pr.maxReplies != null && (typeof pr.maxReplies !== 'number' || !Number.isInteger(pr.maxReplies) || pr.maxReplies < 1 || pr.maxReplies > 200)) {
+          return res.json({ ok: false, msg: 'chat.privateRateLimit.maxReplies 必须为 1-200 之间的整数' })
         }
       }
       // 多模型并行回答 + 模型间互聊
@@ -1297,6 +1325,7 @@ export function createApp() {
 export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
   // 安装一次 stdin 放行监听（幂等）：管理员可在 XRK-Yunzai 运行终端输入「继续操作 <码>」
   loginGuard.installStdinWatcher()
+  try { helper.cleanupStaleRuntimeFiles({ force: true }) } catch (_) {}
   return new Promise((resolve, reject) => {
     // ------ 输入规范化（防止 YAML 把 0.0.0.0 解析成数字 0 或其他脏值） ------
     const bind = cfg.normalizeWebBind ? cfg.normalizeWebBind({ host, port }) : null

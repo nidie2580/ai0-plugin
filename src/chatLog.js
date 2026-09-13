@@ -13,7 +13,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { scrubSensitiveTokens } from './helper.js'
+import { scrubSensitiveTokens, truncateUnicodeSafe } from './helper.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -62,11 +62,11 @@ export function appendChatLog(entry) {
       ts: Date.now(),
       userId: String(entry?.userId ?? ''),
       sessionId: String(entry?.sessionId ?? ''),
-      question: scrubSensitiveTokens(String(entry?.question ?? '')).slice(0, 4000),
+      question: truncateUnicodeSafe(scrubSensitiveTokens(String(entry?.question ?? '')), 4000),
       replies: Array.isArray(entry?.replies)
         ? entry.replies.map((r) => ({
             model: String(r?.model ?? ''),
-            text: scrubSensitiveTokens(String(r?.text ?? '')).slice(0, 8000),
+            text: truncateUnicodeSafe(scrubSensitiveTokens(String(r?.text ?? '')), 8000),
           }))
         : [],
     }

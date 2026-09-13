@@ -58,6 +58,21 @@ describe('模型互聊记录(chatLog)', () => {
     assert.ok(top.replies[0].text.length <= 8000)
   })
 
+  it('C4b: 超长内容含 emoji 时不切断 surrogate', () => {
+    const q = '😀'.repeat(2500)
+    chatLog.appendChatLog({
+      userId: '10001',
+      sessionId: 'session-1',
+      question: q,
+      replies: [{ model: 'm', text: 'ok' }],
+    })
+    const { items } = chatLog.queryChatLog({ limit: 1, offset: 0 })
+    const cut = items[0].question
+    assert.ok(cut.length <= 4000)
+    assert.equal(cut.length % 2, 0)
+    assert.ok(cut.endsWith('😀'))
+  })
+
   it('C5: 超过上限裁剪旧记录（仅保留最新）', () => {
     for (let i = 0; i < 250; i++) appendOne('q' + i, 'm', 'r' + i)
     const { total, items } = chatLog.queryChatLog({ limit: 500 })

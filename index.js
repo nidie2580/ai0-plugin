@@ -22,6 +22,7 @@ if (typeof segment === 'undefined' || !segment) {
 }
 
 setTimeout(() => {
+  try { helper.cleanupStaleRuntimeFiles({ force: true }) } catch (_) {}
   try {
     const s = helper.listMasterSources()
     const all = helper.listMasters()

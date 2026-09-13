@@ -35,10 +35,18 @@ function prune() {
   }
 }
 
-/** 标记当前主身份（首个通过验证码登录的用户） */
+/** 标记当前主身份（首个通过验证码/免登录直链登录的用户） */
 export function setPrimaryIdentity(identity) {
   if (identity == null) return
   if (primaryIdentity == null) primaryIdentity = String(identity)
+}
+
+/** 已有主身份时，把 magic link 登录视为该主人本人（直链仅主人可生成） */
+export function adoptPrimaryForMasterLogin(identityHint = 'master-magic') {
+  if (primaryIdentity == null) {
+    primaryIdentity = String(identityHint || 'master-magic')
+  }
+  return primaryIdentity
 }
 
 export function getPrimaryIdentity() {

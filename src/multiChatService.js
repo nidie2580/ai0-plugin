@@ -18,6 +18,7 @@ import * as chatLog from './chatLog.js'
 import * as chatService from './chatService.js'
 import * as deliberate from './deliberate.js'
 import { safeLogger } from './globals.js'
+import { truncateUnicodeSafe } from './helper.js'
 
 const DEFAULT_SYSTEM_PROMPT = [
   '你是一个友善、乐于助人的AI助手，正在通过"模型互聊"界面与用户交流。',
@@ -185,10 +186,10 @@ export async function runWebMultiChat({ userId, userLabel, question, modelKeys, 
           chatLog.appendChatLog({
             userId,
             sessionId: 'web:' + userId,
-            question: questionStr.slice(0, 4000),
+            question: truncateUnicodeSafe(questionStr, 4000),
             replies: [
-              ...bubbleReplies.map((r) => ({ model: `[轮${r.round}] ${r.model}`, text: r.text.slice(0, 8000) })),
-              { model: '多模型协同结论', text: delib.finalText.slice(0, 8000) },
+              ...bubbleReplies.map((r) => ({ model: `[轮${r.round}] ${r.model}`, text: truncateUnicodeSafe(r.text, 8000) })),
+              { model: '多模型协同结论', text: truncateUnicodeSafe(delib.finalText, 8000) },
             ],
           })
         }
@@ -267,8 +268,8 @@ export async function runWebMultiChat({ userId, userLabel, question, modelKeys, 
         chatLog.appendChatLog({
           userId,
           sessionId: 'web:' + userId,
-          question: questionStr.slice(0, 4000),
-          replies: replies.map((r) => ({ model: r.model, text: r.text.slice(0, 8000) })),
+          question: truncateUnicodeSafe(questionStr, 4000),
+          replies: replies.map((r) => ({ model: r.model, text: truncateUnicodeSafe(r.text, 8000) })),
         })
       }
     } catch (logErr) {

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeApiBase, replyReasoningAsChat } from '../../src/helper.js'
+import { normalizeApiBase, replyReasoningAsChat, truncateUnicodeSafe } from '../../src/helper.js'
 
 globalThis.logger = {
   info: () => {}, warn: () => {}, error: () => {}, mark: () => {}
@@ -72,6 +72,24 @@ describe('helper: replyReasoningAsChat 深度思考聊天记录发送', () => {
     const out = await replyReasoningAsChat(e, '   ')
     assert.equal(out, null)
     assert.equal(replies.length, 0)
+  })
+})
+
+describe('helper: truncateUnicodeSafe', () => {
+  test('短文本原样返回', () => {
+    assert.equal(truncateUnicodeSafe('hello', 10), 'hello')
+  })
+
+  test('不切断 UTF-16 surrogate pair', () => {
+    const s = 'ab😀cd'
+    const cut = truncateUnicodeSafe(s, 3)
+    assert.equal(cut, 'ab')
+    assert.ok(!cut.includes('\uD83D') || cut.includes('😀'))
+  })
+
+  test('上限非法时返回空串', () => {
+    assert.equal(truncateUnicodeSafe('abc', 0), '')
+    assert.equal(truncateUnicodeSafe('abc', NaN), '')
   })
 })
 

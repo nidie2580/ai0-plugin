@@ -264,7 +264,7 @@ export class AICommands extends plugin {
     if (this.e?.post_type === 'message_sent' || this.e?.user_id === this.e?.self_id) return false
     const userId = helper.getUserId(this.e)
     if (!userId) return false
-    chatSvc.newSession(userId)
+    chatSvc.newSession(userId, helper.getGroupId(this.e))
     return this.e.reply('✅ 已开启新的会话，上下文已清空。')
   }
 

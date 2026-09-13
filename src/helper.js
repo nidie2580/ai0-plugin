@@ -116,23 +116,51 @@ function isPathWithinAllowedRoots(filePath) {
   }
 }
 
-// 临时文件清理：只保留近 1 小时内的，避免长期运行堆积
+// 临时文件清理：只保留近 1 小时内的，避免长期运行堆积；重启后扫遗留 .tmp / 音频 / SVG
 let _cleanupRan = 0
-function cleanupTmpDir() {
-  const now = Date.now()
-  if (now - _cleanupRan < 10 * 60 * 1000) return  // 每 10 分钟最多跑一次
-  _cleanupRan = now
+function unlinkStaleFilesInDir(dir, now, maxAgeMs, nameRe = null) {
   try {
-    const files = fs.readdirSync(TMP_DIR)
-    for (const f of files) {
-      if (!f.startsWith('stk-')) continue
-      const fp = path.join(TMP_DIR, f)
+    if (!fs.existsSync(dir)) return
+    for (const f of fs.readdirSync(dir)) {
+      if (nameRe && !nameRe.test(f)) continue
+      const fp = path.join(dir, f)
       try {
         const st = fs.statSync(fp)
-        if (now - st.mtimeMs > 60 * 60 * 1000) fs.unlinkSync(fp)
+        if (st.isFile() && now - st.mtimeMs > maxAgeMs) fs.unlinkSync(fp)
       } catch (_) {}
     }
   } catch (_) {}
+}
+
+export function cleanupStaleRuntimeFiles({ maxAgeMs = 60 * 60 * 1000, force = false } = {}) {
+  const now = Date.now()
+  if (!force && now - _cleanupRan < 10 * 60 * 1000) return
+  _cleanupRan = now
+  const age = force ? 0 : maxAgeMs
+  unlinkStaleFilesInDir(TMP_DIR, now, age)
+  unlinkStaleFilesInDir(path.join(DATA_DIR, 'tmp'), now, age)
+  try {
+    const histDir = path.join(DATA_DIR, 'history')
+    if (fs.existsSync(histDir)) {
+      for (const u of fs.readdirSync(histDir)) {
+        const ud = path.join(histDir, u)
+        try {
+          if (!fs.statSync(ud).isDirectory()) continue
+        } catch (_) { continue }
+        unlinkStaleFilesInDir(ud, now, age, /\.tmp(\.|$)/)
+      }
+    }
+  } catch (_) {}
+  for (const f of ['sessions.json.tmp', 'sessions.key.tmp']) {
+    const fp = path.join(DATA_DIR, f)
+    try {
+      if (fs.existsSync(fp) && now - fs.statSync(fp).mtimeMs > age) fs.unlinkSync(fp)
+    } catch (_) {}
+  }
+}
+
+function cleanupTmpDir() {
+  cleanupStaleRuntimeFiles()
 }
 
 function readFrameworkMasters() {
@@ -454,7 +482,7 @@ function safeName(raw) {
   if (raw == null) return ''
   let s = typeof raw === 'string' ? raw : String(raw)
   s = s.replace(/[\r\n\t]+/g, ' ').trim()
-  if (s.length > 24) s = s.slice(0, 24)
+  if (s.length > 24) s = truncateUnicodeSafe(s, 24)
   return s
 }
 
@@ -810,7 +838,7 @@ export async function replyReasoningAsChat(e, reasoning, options = {}) {
     }
   }
   const prefix = options.prefix ?? '💭 深度思考：'
-  return e.reply(prefix + text.slice(0, 3000))
+  return e.reply(prefix + truncateUnicodeSafe(text, 3000))
 }
 
 /**
@@ -820,6 +848,17 @@ export async function replyReasoningAsChat(e, reasoning, options = {}) {
  *  - Markdown 边界：尽量不在代码块 ```、表格 |、链接 []()、**粗体**、*斜体*、~~删除线~~ 的中间切
  *    （只做轻量启发式：若当前分段内存在未闭合的 ```/`，就尽量往后多找点，直到闭合或达到上限）
  */
+export function truncateUnicodeSafe(text, maxLen) {
+  const s = String(text ?? '')
+  const n = Number(maxLen)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  if (s.length <= n) return s
+  let end = Math.floor(n)
+  const code = s.charCodeAt(end)
+  if (code >= 0xDC00 && code <= 0xDFFF && end > 0) end -= 1
+  return s.slice(0, end)
+}
+
 export function splitUnicodeSafe(text, targetChunk = 3000, options = {}) {
   if (!text) return []
   const maxChunk = options.maxChunk || Math.max(targetChunk * 2, 6000)

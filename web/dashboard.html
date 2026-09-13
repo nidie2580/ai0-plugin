@@ -95,6 +95,15 @@
       <p class="hint">群里同时存在多个机器人时，它们可能互相 @ 形成无限互答烧 token。此机制在「同群同账号短窗口内连续回复达上限」时判定为疑似循环，进入冷却静默。正常人类间歇聊天几乎不会误判。关闭总开关即停用该保护。</p>
 
       <hr>
+      <h3>私聊速率限制</h3>
+      <div class="grid-2">
+        <label>总开关 <select id="chat_privateRate_enabled"><option value="true">开启</option><option value="false">关闭</option></select></label>
+        <label>窗口(ms) <input id="chat_privateRate_windowMs" type="number" min="1000" max="3600000"/></label>
+        <label>窗口内最多回复次数 <input id="chat_privateRate_maxReplies" type="number" min="1" max="200"/></label>
+      </div>
+      <p class="hint">同一用户在窗口内私聊触发超过上限则静默跳过，避免刷 API。群聊不受此项限制。</p>
+
+      <hr>
       <h3>点歌设置</h3>
       <div class="grid-2">
         <label>点歌开关 <select id="chat_music_enabled"><option value="false">关闭</option><option value="true">开启</option></select></label>
