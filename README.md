@@ -285,13 +285,6 @@ ai0-plugin/
 欢迎提交 Issue 反馈 Bug、建议新功能,或直接提交 Pull Request。
 
 - 提交 Issue:[Gitee Issues](https://gitee.com/nidie2580/ai0-plugin/issues) / [GitHub Issues](https://github.com/nidie2580/ai0-plugin/issues)
-- 版本更新记录请见 `CHANGELOG.md`(建议新建)。
-
----
-
-## ⚠️ 免责声明
-
-本项目仅供学习与研究用途。AI 生成内容可能存在偏差,使用本项目所产生的任何后果由使用者自行承担。请遵守所在地区法律法规及 QQ 平台使用规范,合理使用、友善交流。
 
 ---
 
