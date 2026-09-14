@@ -14,7 +14,7 @@ import axios from 'axios'
  * IPv4-mapped（解包转 IPv4 判断）、fc00::/7 ULA、fe80::/10 链路本地、
  * ff00::/8 组播。
  */
-function isPrivateIp(ip) {
+export function isPrivateIp(ip) {
   if (!ip) return false
   const v = net.isIP(ip)
   if (v === 4) return isPrivateIpv4(ip)

