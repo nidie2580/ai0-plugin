@@ -19,8 +19,9 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { safeLogger } from './globals.js'
 import { safeAxiosRequest } from './security.js'
-import { safeSegmentImage } from './helper.js'
+import { safeSegmentImage, safeSegmentImageWithFallback } from './helper.js'
 import { renderSongCard } from './svgRender.js'
+import { getUserPremiumInstance } from './userPremium.js'
 
 const MUSIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
 const HTTP_TIMEOUT_MS = 8000
@@ -577,6 +578,21 @@ function getBotName(e) {
  * @returns {Promise<{ok:boolean, sentCard:boolean, voiceSent:boolean, text?:string, msg?:string}>}
  */
 export async function sendSongsResultRich(e, songs, opts = {}) {
+  // 付费权限检查：启用付费后，点歌作为付费功能仅对付费用户开放（检查失败不阻塞点歌）
+  try {
+    const premium = getUserPremiumInstance()
+    if (premium.isPaymentEnabled()) {
+      const userId = String(e.user_id || e.sender?.user_id || '').trim()
+      if (userId && !premium.canUseFeature(userId, 'song_request')) {
+        const t = opts.premiumText || '点歌功能需要付费订阅，请联系管理员开通。'
+        try { await e.reply(t) } catch (_) {}
+        return { ok: false, sentCard: false, voiceSent: false, text: t, msg: 'premium_required' }
+      }
+    }
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 付费权限检查失败，跳过检查: ${err?.message || err}`)
+  }
+
   const list = Array.isArray(songs) ? songs : []
   if (!list.length) {
     const t = opts.emptyText || '没有找到相关歌曲，换个关键词试试？'
@@ -608,8 +624,8 @@ export async function sendSongsResultRich(e, songs, opts = {}) {
 
   // ② SVG 点歌卡片图 + ③ 纯链接（版权受限时附一句说明；图内链接不可点）
   try {
-    const svgPath = renderSongCard(item, getBotName(e))
-    await e.reply(safeSegmentImage(svgPath))
+    const svgPath = await renderSongCard(item, getBotName(e))
+    await e.reply(safeSegmentImageWithFallback(svgPath))
     if (item.pageUrl) {
       const linkText = voiceSent || !dl?.copyright
         ? String(item.pageUrl)
