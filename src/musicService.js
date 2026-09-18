@@ -19,15 +19,15 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { safeLogger } from './globals.js'
 import { safeAxiosRequest } from './security.js'
-import { safeSegmentImage, safeSegmentImageWithFallback } from './helper.js'
+import { safeSegmentImage } from './helper.js'
 import { renderSongCard } from './svgRender.js'
-import { getUserPremiumInstance } from './userPremium.js'
 
 const MUSIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
 const HTTP_TIMEOUT_MS = 8000
 
 const AUDIO_TMP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'tmp')
 const AUDIO_MAX_BYTES = 20 * 1024 * 1024
+const AUDIO_MAX_REDIRECTS = 5
 
 /** 读取 chat.music 配置（含缺省补齐） */
 export function getMusicConfig() {
@@ -526,29 +526,31 @@ export async function downloadAudioForVoice(item) {
     const resp = await safeAxiosRequest('get', url, null, {
       headers: {
         'User-Agent': MUSIC_UA,
-        Referer: /qq\.com/.test(url) ? 'https://y.qq.com/' : 'https://music.163.com/',
+        Referer: /qq\.com/i.test(url) ? 'https://y.qq.com/' : 'https://music.163.com/',
       },
       timeout: HTTP_TIMEOUT_MS * 2,
       responseType: 'arraybuffer',
       maxContentLength: AUDIO_MAX_BYTES,
       maxBodyLength: AUDIO_MAX_BYTES,
-    })
+    }, AUDIO_MAX_REDIRECTS)
     if (resp.status !== 200) {
       // 302 已被 safeAxiosRequest 跟随；此处非 200 多为版权 404/403
-      return { ok: false, reason: `音频下载失败(HTTP ${resp.status})`, copyright: true }
+      const copyright = resp.status === 403 || resp.status === 404
+      return { ok: false, reason: `音频下载失败(HTTP ${resp.status})`, copyright }
     }
     const ct = String(resp.headers?.['content-type'] || '')
     const buf = Buffer.from(resp.data || Buffer.alloc(0))
-    if (/text\/html/i.test(ct)) {
+    if (/text\/html/i.test(ct) || /^\s*</.test(buf.slice(0, 64).toString('utf8'))) {
       // 网易云版权 302 的落点是 200 的 HTML 占位页，按版权受限处理
-      return { ok: false, reason: `响应为 HTML 占位页(content-type=${ct})`, copyright: true }
+      return { ok: false, reason: `响应为 HTML 占位页(content-type=${ct || 'unknown'})`, copyright: true }
     }
-    if (!looksLikeAudioBuffer(buf)) {
+    const looksAudio = /^(audio|video)\//i.test(ct) || looksLikeAudioBuffer(buf)
+    if (!looksAudio) {
       return { ok: false, reason: `响应非音频格式(${ct || 'content-type 缺失'}, ${buf.length}B)`, copyright: true }
     }
-    if (!fs.existsSync(AUDIO_TMP_DIR)) fs.mkdirSync(AUDIO_TMP_DIR, { recursive: true })
+    if (!fs.existsSync(AUDIO_TMP_DIR)) fs.mkdirSync(AUDIO_TMP_DIR, { recursive: true, mode: 0o700 })
     const filePath = path.join(AUDIO_TMP_DIR, `song-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}.mp3`)
-    fs.writeFileSync(filePath, buf)
+    fs.writeFileSync(filePath, buf, { mode: 0o600 })
     // 5 分钟后清理（语音发送链路已完成）
     setTimeout(() => {
       try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath) } catch (_) {}
@@ -575,25 +577,6 @@ function getBotName(e) {
  * @returns {Promise<{ok:boolean, sentCard:boolean, voiceSent:boolean, text?:string, msg?:string}>}
  */
 export async function sendSongsResultRich(e, songs, opts = {}) {
-  // 检查付费权限（如果启用付费功能）
-  try {
-    const premium = getUserPremiumInstance()
-    
-    if (premium.isPaymentEnabled()) {
-      // 获取用户ID
-      const userId = String(e.user_id || e.sender?.user_id || '').trim()
-      
-      // 检查是否可以使用点歌功能
-      if (userId && !premium.canUseFeature(userId, 'song_request')) {
-        const t = opts.premiumText || '点歌功能需要付费订阅，请联系管理员开通。'
-        try { await e.reply(t) } catch (_) {}
-        return { ok: false, sentCard: false, voiceSent: false, text: t, msg: 'premium_required' }
-      }
-    }
-  } catch (err) {
-    safeLogger.warn(`[ai0-plugin] 付费权限检查失败，跳过检查: ${err?.message || err}`)
-  }
-
   const list = Array.isArray(songs) ? songs : []
   if (!list.length) {
     const t = opts.emptyText || '没有找到相关歌曲，换个关键词试试？'
@@ -625,8 +608,8 @@ export async function sendSongsResultRich(e, songs, opts = {}) {
 
   // ② SVG 点歌卡片图 + ③ 纯链接（版权受限时附一句说明；图内链接不可点）
   try {
-    const svgPath = await renderSongCard(item, getBotName(e))
-    await e.reply(safeSegmentImageWithFallback(svgPath))
+    const svgPath = renderSongCard(item, getBotName(e))
+    await e.reply(safeSegmentImage(svgPath))
     if (item.pageUrl) {
       const linkText = voiceSent || !dl?.copyright
         ? String(item.pageUrl)
@@ -691,6 +674,20 @@ export async function handleSongCommand(e, pureText, ctx = {}) {
   return true
 }
 
+/** 待歌名状态下如何解释下一条消息：keep=不当作歌名 / cancel / empty / search */
+export function resolvePendingSongInput(text) {
+  const kw = String(text || '').trim()
+  const songCmd = matchSongCommand(kw)
+  if (songCmd) {
+    if (!songCmd.keyword) return { kind: 'keep' }
+    return { kind: 'search', keyword: songCmd.keyword }
+  }
+  if (/^[#／/]/.test(kw)) return { kind: 'keep' }
+  if (!kw) return { kind: 'empty' }
+  if (/^取消$/.test(kw)) return { kind: 'cancel' }
+  return { kind: 'search', keyword: kw.slice(0, 100) }
+}
+
 /**
  * 消费待歌名状态：命中时把这条消息当歌名执行点歌（"取消"退出）。未命中返回 false。
  * 在触发规则之前调用（问完歌名后直接回歌名，不需要再 @/前缀）。
@@ -698,16 +695,17 @@ export async function handleSongCommand(e, pureText, ctx = {}) {
 export async function consumePendingSongReply(e, { groupId, userId, text } = {}) {
   if (!isMusicEnabled()) return false
   if (!peekPendingSongRequest(groupId, userId)) return false
+  const parsed = resolvePendingSongInput(text)
+  if (parsed.kind === 'keep') return false
   clearPendingSongRequest(groupId, userId)
-  const kw = String(text || '').trim()
-  if (!kw) {
+  if (parsed.kind === 'empty') {
     try { await e.reply('没有拿到歌名，点歌已取消。') } catch (_) {}
     return true
   }
-  if (/^取消$/.test(kw)) {
+  if (parsed.kind === 'cancel') {
     try { await e.reply('已取消点歌。') } catch (_) {}
     return true
   }
-  await searchAndSendSongs(e, kw.slice(0, 100))
+  await searchAndSendSongs(e, parsed.keyword)
   return true
 }
