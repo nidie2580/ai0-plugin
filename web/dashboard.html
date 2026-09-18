@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI0-Plugin · 控制台</title>
-<link rel="stylesheet" href="/assets/app.css?v=20260905b" />
+<link rel="stylesheet" href="/assets/app.css?v=20260918c" />
 </head>
 <body>
 <header class="topbar">
@@ -16,34 +16,34 @@
     <a class="nav-item active" data-view="home">🏠 首页</a>
     <a class="nav-item" data-view="config">📝 配置</a>
     <a class="nav-item" data-view="providers">🔌 多API平台</a>
+    <a class="nav-item" data-view="payment">💰 付费配置</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="chatlog">💭 模型互聊</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
     <a class="nav-item" data-view="image">🎨 图片管理</a>
     <a class="nav-item" data-view="about">ℹ️ 关于</a>
   </nav>
-  <button id="themeToggle" class="btn ghost sm" title="切换深色/浅色模式">🌓</button>
   <button id="logoutBtn" class="btn ghost sm">退出登录</button>
 </header>
 
 <main class="container">
-  <!-- ==================== 首页：模型详情 ==================== -->
+  <!-- ==================== 首页：全屏英雄区 + 模型健康 ==================== -->
   <section id="view-home" class="view active">
-    <div class="card">
-      <div class="row justify">
-        <div>
-          <h2>🏠 模型健康一览 <span class="tag" id="homeTag">加载中…</span></h2>
-          <p class="hint">展示当前所有已配置模型的连通状态。点击任一模型卡片可直接跳转到「多API平台」对应配置页。</p>
-        </div>
-        <div class="actions">
-          <button class="btn" id="homeRefresh">🔄 刷新</button>
-        </div>
+    <div class="hero-band">
+      <img class="hero-bg" src="/assets/hero-bg.svg" alt="" aria-hidden="true" />
+      <div class="hero-overlay"></div>
+      <div class="hero-content">
+        <span class="hero-badge">🤖 AI0-Plugin 管理后台</span>
+        <h1 class="hero-headline">模型健康一览 <span class="tag" id="homeTag">加载中…</span></h1>
+        <p class="hero-sub">展示当前所有已配置模型的连通状态，点击下方任一模型卡片可直接跳转到「多API平台」对应配置页。</p>
+        <div id="homeSummary" class="home-summary"></div>
+        <button class="btn primary" id="homeRefresh">🔄 刷新状态</button>
       </div>
+      <div class="scroll-hint" aria-hidden="true">⌄</div>
+    </div>
 
-      <div id="homeSummary" class="home-summary"></div>
-      <div id="homeModelList" class="home-models">
-        <p class="empty">加载中…</p>
-      </div>
+    <div id="homeModelList" class="home-models">
+      <p class="empty">加载中…</p>
     </div>
   </section>
 
@@ -124,7 +124,7 @@
       <hr>
       <h3>系统提示词</h3>
       <textarea id="system_prompt" rows="6"></textarea>
-      <div class="hint" style="font-size:12px;color:#888;margin-top:4px;line-height:1.6;">
+      <div class="hint" style="margin-top:4px;">
         支持动态变量（发送给模型时替换）：<code>&lt;master&gt;</code> 主人QQ、<code>&lt;user&gt;</code> 当前发送者、<code>&lt;bot&gt;</code> 机器自身、<code>&lt;admin&gt;</code> 管理员列表。
       </div>
 
@@ -154,7 +154,7 @@
         <label>网页后台绑定地址 <input id="web_host" placeholder="127.0.0.1 / 0.0.0.0"/></label>
       </div>
       <div class="hint" style="margin-top:4px">
-        <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-weight:500">
+        <label class="inline-toggle" style="margin-top:2px">
           <input type="checkbox" id="web_trustProxy"/>
           信任反向代理头 (web.trustProxy) — 部署在 Nginx/Caddy/Cloudflare 后时勾选；直接裸端口对外请勿勾选。
         </label>
@@ -322,6 +322,55 @@
     </div>
   </section>
 
+  <!-- ==================== 付费配置 ==================== -->
+  <section id="view-payment" class="view">
+    <div class="card">
+      <h2>💰 付费功能配置 <span class="tag" id="paymentTag">加载中…</span></h2>
+      <p class="hint">配置易支付平台集成和付费用户管理功能。启用后点歌等付费功能仅对付费用户开放。</p>
+
+      <div class="grid-2">
+        <label>启用付费功能
+          <select id="payment_enabled"><option value="false">关闭</option><option value="true">开启</option></select>
+        </label>
+        <label>&nbsp;</label>
+        <label>平台地址 <input id="payment_platformUrl" placeholder="https://pay.example.com/api"/></label>
+        <label>商户ID <input id="payment_merchantId" placeholder="your_merchant_id"/></label>
+        <label>商户私钥 <input id="payment_privateKey" placeholder="your_private_key" autocomplete="off"/></label>
+        <label>&nbsp;</label>
+        <label>月度订阅价格(元) <input id="payment_prices_monthly" type="number" step="0.1"/></label>
+        <label>年度订阅价格(元) <input id="payment_prices_yearly" type="number" step="0.1"/></label>
+      </div>
+
+      <hr>
+      <h3>付费功能开关</h3>
+      <div class="feature-config">
+        <label><input type="checkbox" id="payment_feature_song_request"/> 点歌功能</label>
+        <label><input type="checkbox" id="payment_feature_high_quality_audio"/> 高音质音频</label>
+        <label><input type="checkbox" id="payment_feature_lyrics_display"/> 歌词显示</label>
+        <label><input type="checkbox" id="payment_feature_playlist_management"/> 歌单管理</label>
+        <label><input type="checkbox" id="payment_feature_premium_models"/> 付费专属模型</label>
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" id="savePaymentConfig">💾 保存付费配置</button>
+        <span id="paymentSaveMsg" class="save-msg"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>付费用户管理 <span class="tag" id="paymentUsersTag">-</span>
+        <button class="btn sm right" id="refreshPaymentUsers">🔄 刷新</button>
+      </h2>
+      <div class="row space-between">
+        <p class="hint">管理已付费用户列表，支持手动添加/删除用户。</p>
+        <button class="btn primary" id="addPaymentUserBtn">➕ 手动添加用户</button>
+      </div>
+      <div id="paymentUsersList" class="payment-users-list">
+        <p class="empty">加载中…</p>
+      </div>
+    </div>
+  </section>
+
   <!-- ==================== 关于 ==================== -->
   <section id="view-about" class="view">
     <div class="card">
@@ -351,6 +400,6 @@
   </div>
 </div>
 
-<script src="/assets/app.js?v=20260830b" data-route="dashboard"></script>
+<script src="/assets/app.js?v=20260918c" data-route="dashboard"></script>
 </body>
 </html>

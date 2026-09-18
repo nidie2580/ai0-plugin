@@ -64,11 +64,16 @@ describe('敏感令牌脱敏', () => {
     assert.equal(scrubSensitiveTokens(undefined), '')
   })
 
-  it('S6: 原文含固定占位字面量时仍能还原脱敏标记', () => {
+  it('S6: 原文含 %__PLACEHOLDER__% 字面量时脱敏标记不错位', () => {
     const fakePat = 'ghp_' + 'a'.repeat(36)
-    const out = scrubSensitiveTokens('前 %__PLACEHOLDER__% 中 ' + fakePat + ' 后')
-    assert.match(out, /\[已脱敏:github-pat:ghp_…aaaa\]/)
-    assert.ok(out.includes('%__PLACEHOLDER__%'))
-    assert.ok(!out.includes(fakePat))
+    const outPat = scrubSensitiveTokens('前 %__PLACEHOLDER__% 中 ' + fakePat + ' 后')
+    assert.match(outPat, /\[已脱敏:github-pat:ghp_…aaaa\]/)
+    assert.ok(outPat.includes('%__PLACEHOLDER__%'))
+    assert.ok(!outPat.includes(fakePat))
+
+    const fakeSk = 'sk-' + 'c'.repeat(36)
+    const outSk = scrubSensitiveTokens('示例 %__PLACEHOLDER__% 记号，key是 ' + fakeSk)
+    assert.ok(outSk.includes('%__PLACEHOLDER__%'), '原文字面量必须原样保留')
+    assert.match(outSk, /\[已脱敏:openai-sk:sk-c…cccc\]/)
   })
 })

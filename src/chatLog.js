@@ -70,9 +70,16 @@ function appendChatLogSync(entry) {
       : [],
   }
   const next = [rec, ...list].slice(0, MAX_ENTRIES)
-  const tmp = CHATLOG_FILE + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600 })
-  fs.renameSync(tmp, CHATLOG_FILE)
+  // 原子写：先写唯一 tmp 再 rename。直接写目标文件时进程中断会留下半截 JSON，
+  // 之后 readChatLog 解析失败返回空数组，下一次追加会把整份互聊历史洗成仅剩 1 条。
+  const tmp = `${CHATLOG_FILE}.tmp.${randomUUID()}`
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600 })
+    fs.renameSync(tmp, CHATLOG_FILE)
+  } catch (err) {
+    try { fs.unlinkSync(tmp) } catch (_) {}
+    throw err
+  }
   return true
 }
 

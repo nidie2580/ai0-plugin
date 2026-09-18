@@ -378,7 +378,7 @@ export class AICommands extends plugin {
     const text = helper.getMessageText(this.e)
     const match = text.match(/^#ai添加主人\s+(\d+)/)
     if (!match) return this.e.reply('用法：#ai添加主人 <QQ号>')
-    // QQ 号格式与群操作目标一致：5-12 位纯数字
+    // QQ 号格式校验（5-12 位纯数字，与定时禁言/拉黑/groupOps 成员校验保持一致）
     const newMaster = match[1]
     if (!/^\d{5,12}$/.test(newMaster)) {
       return this.e.reply(`❌ QQ号格式不合法：应为 5-12 位纯数字（收到 ${newMaster.length} 位）`)

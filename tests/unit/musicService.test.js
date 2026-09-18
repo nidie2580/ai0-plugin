@@ -161,6 +161,16 @@ describe('parse*SearchList', () => {
     assert.equal(songs[0].artist, '周杰伦')
     assert.equal(songs[0].album, '叶惠美')
   })
+
+  it('M1e2：QQ 非数组 singer 且带专辑名时歌手名不丢失', () => {
+    const json = { data: { song: { list: [
+      { songname: '倒带', songmid: 'mid_dd', songid: 9002, albumname: '魔力', singer: { name: '蔡依林' }, interval: 240 },
+    ] } } }
+    const songs = music.parseQQSearchList(json)
+    assert.equal(songs.length, 1)
+    assert.equal(songs[0].artist, '蔡依林')
+    assert.equal(songs[0].album, '魔力')
+  })
 })
 
 describe('searchSongs', () => {

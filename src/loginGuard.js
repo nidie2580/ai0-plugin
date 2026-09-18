@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { safeLogger } from './globals.js'
+import { safeCompare } from './auth.js'
 
 // 登录守卫：多身份二次确认机制。
 //   - 首个有效登录成为「主身份」（primaryIdentity）。
@@ -103,17 +104,6 @@ export function claimPending(pendingId) {
   return { identity: rec.identity, ip: rec.ip }
 }
 
-function safeCompare(a, b) {
-  try {
-    const KEY = 'ai0-login-guard-compare-v1'
-    const ha = crypto.createHmac('sha256', KEY).update(String(a)).digest()
-    const hb = crypto.createHmac('sha256', KEY).update(String(b)).digest()
-    return ha.length === hb.length && crypto.timingSafeEqual(ha, hb)
-  } catch (_) {
-    return false
-  }
-}
-
 /**
  * 通过放行凭据审批：支持 10 位放行码 或 请求人 QQ/stdin 身份。
  * @param {string} secret 管理员在终端输入的放行码 / QQ / stdin
@@ -125,6 +115,7 @@ export function approve(secret) {
   let matched = 0
   for (const rec of pending.values()) {
     if (rec.approved) continue
+    // 放行码用恒时 HMAC 比较（此前普通 === 存在时序侧信道）；identity 是 QQ/stdin 标识非机密，保持 === 即可
     if (safeCompare(rec.code, s) || rec.identity === s) {
       rec.approved = true
       matched++

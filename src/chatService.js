@@ -210,6 +210,8 @@ export function buildMultiChatRequest({ reqHistory, archiveReplies, modelKey, mo
   const next = [...base]
   const lastIdx = next.length - 1
   if (lastIdx >= 0 && next[lastIdx].role === 'user') {
+    // 多模态数组 content 不能用字符串拼接（会变成 "[object Object]"）：
+    // 追加到已有 text 部分，保留原有 image_url。
     const last = next[lastIdx]
     const suffix = `\n\n${others}`
     if (typeof last.content === 'string') {
@@ -551,34 +553,17 @@ function userFacingLLMError(msg) {
 }
 
 /**
- * 把当前用户消息里的图片段接入"发给主模型的 history"：
- * - 主模型 vision=true  → 把最后一条 user 消息的 content 改成多模态数组，
- *                        在 text 基础上追加 image_url（base64 data URL）。
- * - 主模型 vision=false → 若 imageInput.ocrToText 开启，调用 imageInput.ocr
- *                        模型做图片转文字，再把文字附到该 user 消息上（"间接看图"）。
- * 只改造"用于本次请求"的 history 副本，绝不写回持久化 history（避免 base64 撑爆历史/上下文）。
- * @returns {Promise<Array>} 新的 history（无图片或失败时原样返回）
+ * 从当前用户消息提取图片资产（dataUrl 数组 + 按需 OCR 文本），供各模型独立注入。
+ * 图片只解析一次；OCR 只在「有图 && ocrToText 开启 && 目标模型中存在非 vision」时执行一次，
+ * 避免"按每个模型重复 OCR"或"主模型是 vision 也白跑 OCR"。
+ * @param {string[]} [opts.modelKeys] 本轮参与回答的模型 key 列表（多模型模式传入）
+ * @returns {Promise<{dataUrls:string[], ocrText:string}|null>} 无图片/功能关闭/全部解析失败返回 null
  */
-export async function enrichHistoryWithImages(history, e, { modelKey }) {
+export async function prepareImageAssets(e, { modelKeys = [] } = {}) {
   const segs = helper.getImageSegments(e)
-  if (!Array.isArray(segs) || segs.length === 0) return history
-  if (cfg.get('imageInput.enabled', true) === false) return history
-  if (!Array.isArray(history) || history.length === 0) return history
+  if (!Array.isArray(segs) || segs.length === 0) return null
+  if (cfg.get('imageInput.enabled', true) === false) return null
 
-  // 找"当前这一轮"的 user 消息：正常是 history 里最后一条 role==='user'。
-  // 若无（极端情况），就作为新 user 消息垫在末尾。
-  let userIdx = -1
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i]?.role === 'user') { userIdx = i; break }
-  }
-
-  const modelCfgAll = cfg.loadConfig().model || {}
-  const defaultKey = modelCfgAll.default || 'openai-compatible'
-  const modelConf = modelCfgAll[modelKey || defaultKey] || modelCfgAll[defaultKey] || {}
-  const mainVision = modelConf.vision === true
-  const ocrToText = cfg.get('imageInput.ocrToText', true) !== false
-
-  // 逐张图解析为 base64 data URL（失败则跳过该张）
   const dataUrls = []
   for (const seg of segs) {
     try {
@@ -590,12 +575,59 @@ export async function enrichHistoryWithImages(history, e, { modelKey }) {
   }
   if (dataUrls.length === 0) {
     safeLogger.warn('[ai0-plugin] 图片段全部解析失败，未注入图片，回退文本链路')
-    return history
+    return null
+  }
+
+  const ocrToText = cfg.get('imageInput.ocrToText', true) !== false
+  const m = cfg.loadConfig().model || {}
+  const defKey = m.default || 'openai-compatible'
+  const keys = Array.isArray(modelKeys) && modelKeys.length ? modelKeys : [defKey]
+  const needOcr = ocrToText && keys.some((k) => (m[k]?.vision === true) !== true)
+
+  let ocrText = ''
+  if (needOcr) {
+    // 图片转文字：串行 OCR（多图时串联）
+    for (const u of dataUrls) {
+      try {
+        const t = await llm.transcribeImage(u)
+        if (t && t.trim() && t.trim() !== '<无文字>') ocrText += (ocrText ? '\n' : '') + t.trim()
+      } catch (err) {
+        safeLogger.warn(`[ai0-plugin] OCR 执行异常: ${err.message}`)
+      }
+    }
+  }
+  return { dataUrls, ocrText }
+}
+
+/**
+ * 依据指定模型自身 vision 配置，把图片资产注入 history 副本（同步纯函数）：
+ * - 模型 vision=true  → 最后一条 user 消息的 content 改成多模态数组（text + image_url）。
+ * - 模型 vision=false → 附上资产中的 OCR 文本（有则）；否则维持 [图片] 占位。
+ * 只改造"用于该模型请求"的 history 副本，绝不写回持久化 history（避免 base64 撑爆上下文）。
+ * @returns {Array} 新 history（未注入时原样返回）
+ */
+export function applyImagesToHistory(history, assets, modelKey) {
+  if (!assets || !Array.isArray(assets.dataUrls) || assets.dataUrls.length === 0) return history
+  if (!Array.isArray(history) || history.length === 0) return history
+
+  const m = cfg.loadConfig().model || {}
+  const defKey = m.default || 'openai-compatible'
+  const modelConf = m[modelKey || defKey] || m[defKey] || {}
+  const mainVision = modelConf.vision === true
+
+  // 找"当前这一轮"的 user 消息：正常是 history 里最后一条 role==='user'。
+  let userIdx = -1
+  for (let i = history.length - 1; i >= 0; i--) {
+    if (history[i]?.role === 'user') { userIdx = i; break }
   }
 
   const from = userIdx >= 0 ? history[userIdx] : null
   let baseText = ''
   if (from && typeof from.content === 'string') baseText = from.content
+  else if (from && Array.isArray(from.content)) {
+    const t = from.content.find((p) => p && p.type === 'text')
+    if (t) baseText = String(t.text || '')
+  }
   // 清理正文里已有的 [图片:...] 占位，避免和实际图片重复
   const cleanText = baseText.replace(/\[图片(?::[^\]]*)?\]/g, '').trim()
 
@@ -606,32 +638,60 @@ export async function enrichHistoryWithImages(history, e, { modelKey }) {
     // 多模态：text + 若干 image_url
     const contentParts = []
     if (cleanText) contentParts.push({ type: 'text', text: cleanText })
-    for (const u of dataUrls) contentParts.push({ type: 'image_url', image_url: { url: u } })
+    for (const u of assets.dataUrls) contentParts.push({ type: 'image_url', image_url: { url: u } })
     if (contentParts.length === 0) contentParts.push({ type: 'text', text: '（用户发送了一张图片）' })
     newUser.content = contentParts
-  } else if (ocrToText) {
-    // 图片转文字：串行 OCR（多图时串联）
-    let ocrText = ''
-    for (const u of dataUrls) {
-      try {
-        const t = await llm.transcribeImage(u)
-        if (t && t.trim() && t.trim() !== '<无文字>') ocrText += (ocrText ? '\n' : '') + t.trim()
-      } catch (err) {
-        safeLogger.warn(`[ai0-plugin] OCR 执行异常: ${err.message}`)
-      }
-    }
+  } else if (assets.ocrText) {
     const parts = []
     if (cleanText) parts.push(cleanText)
-    if (ocrText) parts.push(ocrText)
-    newUser.content = parts.length ? parts.join('\n') : '[图片]'
+    parts.push(assets.ocrText)
+    newUser.content = parts.join('\n')
   } else {
-    // 不看图也不 OCR：维持占位
+    // 不看图也无 OCR 文本：维持占位
     newUser.content = cleanText || '[图片]'
   }
 
   if (userIdx >= 0) newHistory[userIdx] = newUser
   else newHistory.push(newUser)
   return newHistory
+}
+
+/**
+ * 兼容旧接口：解析图片资产并按指定模型 vision 配置注入 history 副本。
+ * @returns {Promise<Array>} 新的 history（无图片或失败时原样返回）
+ */
+export async function enrichHistoryWithImages(history, e, { modelKey } = {}) {
+  const assets = await prepareImageAssets(e)
+  if (!assets) return history
+  return applyImagesToHistory(history, assets, modelKey)
+}
+
+// —— 艾特追问文本改写 ——
+// 多模型模式下 "/<模型名> 追问" 需把末条 user 消息替换成"去前缀后的追问"：
+// 字符串 content 直接替换；多模态数组此前会整条跳过（追问文本丢失），
+// 这里改为替换其中第一个 text 部分并保留 image_url，无 text 部分则在最前补一条。
+function applyAtUserTextToContent(content, atUserText) {
+  if (typeof content === 'string') return atUserText
+  if (Array.isArray(content)) {
+    const idx = content.findIndex((p) => p && p.type === 'text')
+    if (idx >= 0) {
+      const next = content.slice()
+      next[idx] = { ...content[idx], text: atUserText }
+      return next
+    }
+    return [{ type: 'text', text: atUserText }, ...content]
+  }
+  return atUserText
+}
+
+export function applyAtUserText(history, atUserText) {
+  if (!Array.isArray(history) || !history.length) return history
+  return history.map((msg, i, arr) => {
+    if (i === arr.length - 1 && msg && msg.role === 'user') {
+      return { ...msg, content: applyAtUserTextToContent(msg.content, atUserText) }
+    }
+    return msg
+  })
 }
 
 export async function handleChat(e) {
@@ -1019,35 +1079,23 @@ export async function handleChat(e) {
       }
     }
 
-    // 图片输入：按模型 vision 能力分别注入（不改持久化 history）。
-    // 旧实现只用 defaultKey：多模型时支持视觉的非主模型收不到图。
-    const visionKey = pickVisionModelKey(activeModelKeys, defaultKey)
-    const textKey = activeModelKeys.find((k) => !isModelVision(k)) || defaultKey
-    let visionHistory = history
-    let textHistory = history
+    // 图片输入：本轮图片解析/OCR 只做一次（imgAssets），再按各模型自身 vision 配置
+    // 分别注入各自的请求副本（此前只按默认模型判定，多模型下其余视觉模型收不到图）。
+    // 不写回持久化 history（避免 base64 污染上下文）。
+    let imgAssets = null
+    let reqHistory = history
     try {
-      visionHistory = await enrichHistoryWithImages(history, e, { modelKey: visionKey })
+      imgAssets = await prepareImageAssets(e, { modelKeys: activeModelKeys })
+      if (imgAssets) reqHistory = applyImagesToHistory(history, imgAssets, defaultKey)
     } catch (imgErr) {
       safeLogger.warn(`[ai0-plugin] 图片注入失败（回退文本链路）: ${imgErr?.message || imgErr}`)
-      visionHistory = history
+      imgAssets = null
+      reqHistory = history
     }
-    if (textKey && textKey !== visionKey) {
-      try {
-        textHistory = await enrichHistoryWithImages(history, e, { modelKey: textKey })
-      } catch (_) {
-        textHistory = history
-      }
-    } else if (!isModelVision(textKey)) {
-      textHistory = visionHistory
-    } else {
-      textHistory = history
-    }
-    if (atUserText) {
-      visionHistory = rewriteLastUserContent(visionHistory, atUserText)
-      textHistory = rewriteLastUserContent(textHistory, atUserText)
-    }
-    const reqHistoryFor = (k) => (isModelVision(k) ? visionHistory : textHistory)
-    let reqHistory = reqHistoryFor(activeModelKeys[0] || defaultKey)
+
+    // 艾特：只改写本轮待发请求副本的末条 user 消息，让被艾特模型收到"去前缀后的追问"；
+    // 持久化 history 不动（完整记录带前缀的原文）。
+    if (atUserText) reqHistory = applyAtUserText(reqHistory, atUserText)
 
     // 多模型协同（先商量→统一回复）：取代"各自作答+拼接"，群聊只发收敛后的一条最终回复。
     // 触发：multiModel.enabled 且 deliberate=true 且 >=2 个参与模型，且本轮不是"/模型"艾特单点。
@@ -1086,8 +1134,15 @@ export async function handleChat(e) {
       // 并行调用所有目标模型。每个模型彼此独立，失败互不影响；互聊时注入其他模型的 [*] 历史发言。
       // 视觉模型走 visionHistory（含 image_url），其余走 OCR/文本副本。
       const tasks = activeModelKeys.map(async (k) => {
+        // 多模型下按各模型自身 vision 配置注入图片（默认模型之外的视觉模型此前收不到图）。
+        // 艾特追问改写按"每个模型的最终副本"再做一次（幂等：默认模型副本已在上方改写过）。
+        let modelHistory = reqHistory
+        if (imgAssets && k !== defaultKey) {
+          try { modelHistory = applyImagesToHistory(history, imgAssets, k) } catch (_) { modelHistory = reqHistory }
+        }
+        if (atUserText) modelHistory = applyAtUserText(modelHistory, atUserText)
         const modelReq = buildMultiChatRequest({
-          reqHistory: reqHistoryFor(k),
+          reqHistory: modelHistory,
           archiveReplies,
           modelKey: k,
           modelDisplay,

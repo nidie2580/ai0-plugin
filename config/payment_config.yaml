@@ -1,0 +1,120 @@
+# 易支付集成配置
+# 此文件配置易支付平台集成和付费功能
+
+payment:
+  # 是否启用付费功能
+  enabled: false
+  
+  # 易支付平台地址
+  platformUrl: "https://pay.example.com/api"
+  
+  # 商户ID
+  merchantId: "your_merchant_id"
+  
+  # 商户私钥（请妥善保管）
+  privateKey: "your_private_key"
+  
+  # 支付回调URL（需要根据实际部署配置）
+  callbackUrl: "/api/payment/callback"
+  
+  # 支付成功跳转URL
+  successUrl: "/payment/success"
+  
+  # 支付失败跳转URL
+  failUrl: "/payment/fail"
+  
+  # 支付价格配置
+  prices:
+    # 月度订阅价格（元）
+    monthly: 19.9
+    
+    # 年度订阅价格（元）
+    yearly: 199
+    
+    # 其他价格配置（可选）
+    # custom: 9.9
+  
+  # 付费用户功能权限配置
+  features:
+    # 高音质音频（无损音质）
+    - name: "high_quality_audio"
+      enabled: true
+      description: "享受无损音质音频播放"
+      requiredPermissions: []
+    
+    # 歌词显示
+    - name: "lyrics_display"
+      enabled: true
+      description: "显示歌曲歌词"
+      requiredPermissions: []
+    
+    # 歌单管理
+    - name: "playlist_management"
+      enabled: true
+      description: "创建和管理个人歌单"
+      requiredPermissions: []
+    
+    # 特定模型（付费用户专用模型）
+    - name: "premium_models"
+      enabled: true
+      description: "使用付费专属AI模型"
+      requiredPermissions: []
+    
+    # 点歌功能
+    - name: "song_request"
+      enabled: true
+      description: "使用点歌功能"
+      requiredPermissions: []
+    
+    # 其他功能（示例）
+    - name: "custom_feature"
+      enabled: false
+      description: "自定义付费功能"
+      requiredPermissions: []
+  
+  # 付费提示信息
+  messages:
+    # 付费功能提示
+    premium_required: "此功能需要付费订阅，请联系管理员开通。"
+    
+    # 订阅到期提示
+    subscription_expired: "您的订阅已到期，请续费以继续使用付费功能。"
+    
+    # 支付成功提示
+    payment_success: "支付成功！您已获得付费功能权限。"
+    
+    # 支付失败提示
+    payment_failed: "支付失败，请重试或联系管理员。"
+  
+  # 付费用户管理
+  user_management:
+    # 是否允许手动添加付费用户
+    allow_manual_add: true
+    
+    # 是否自动清理过期用户
+    auto_cleanup_expired: true
+    
+    # 过期用户清理频率（天）
+    cleanup_frequency: 1
+  
+  # 安全设置
+  security:
+    # 支付回调签名验证
+    enable_signature_verification: true
+    
+    # 支付金额限制（元）
+    max_payment_amount: 1000
+    
+    # 最小支付金额（元）
+    min_payment_amount: 0.01
+  
+  # 日志设置
+  logging:
+    # 是否记录支付日志
+    enable_payment_logging: true
+    
+    # 是否记录用户访问日志
+    enable_access_logging: true
+    
+    # 日志级别
+    log_level: "info"
