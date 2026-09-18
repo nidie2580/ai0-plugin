@@ -6,8 +6,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { safeAxiosRequest } from './helper.js'
-import { loadConfig, saveConfig } from './config/index.js'
+import { fileURLToPath } from 'node:url'
+import { safeAxiosRequest } from './security.js'
+import { loadConfig, saveConfig } from '../config/index.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const PLUGIN_ROOT = path.join(__dirname, '..')
 
 // 易支付API配置
 const PAYMENT_CONFIG = {
@@ -23,8 +27,8 @@ const PAYMENT_CONFIG = {
   failUrl: '/payment/fail'
 }
 
-// 付费用户数据存储
-const PREMIUM_USERS_FILE = path.join(process.cwd(), 'data', 'premium_users.json')
+// 付费用户数据存储（落在插件自身 data 目录，不依赖运行时 cwd）
+const PREMIUM_USERS_FILE = path.join(PLUGIN_ROOT, 'data', 'premium_users.json')
 
 /**
  * 易支付核心类
@@ -55,6 +59,9 @@ export class YiPayment {
    */
   savePremiumUsers() {
     try {
+      if (!fs.existsSync(path.dirname(PREMIUM_USERS_FILE))) {
+        fs.mkdirSync(path.dirname(PREMIUM_USERS_FILE), { recursive: true })
+      }
       const data = Object.fromEntries(this.premiumUsers)
       fs.writeFileSync(PREMIUM_USERS_FILE, JSON.stringify(data, null, 2))
     } catch (err) {
