@@ -4,7 +4,7 @@
  */
 
 import { getUserPremiumInstance } from './userPremium.js'
-import { safeLogger } from './globals.js'
+import { safeLogger } from './helper.js'
 
 /**
  * 群体广播管理类
