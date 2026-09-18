@@ -5,7 +5,7 @@
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/Node.js-%3E%3D16-green)
-![Version](https://img.shields.io/badge/version-1.1.0-brightgreen)
+![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)
 ![Mirror](https://img.shields.io/badge/mirror-Gitee%20%2F%20GitHub%20%2F%20GitCode-orange)
 
 [🌎 Gitee](https://gitee.com/nidie2580/ai0-plugin) · [🌍 GitHub](https://github.com/nidie2580/ai0-plugin) · [🌐 GitCode](https://gitcode.com/ndnb/ai0-plugin)

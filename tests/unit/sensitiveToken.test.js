@@ -63,4 +63,13 @@ describe('敏感令牌脱敏', () => {
     assert.equal(scrubSensitiveTokens(null), '')
     assert.equal(scrubSensitiveTokens(undefined), '')
   })
+
+  it('S6: 原文含 %__PLACEHOLDER__% 字面量时脱敏标记不错位', () => {
+    // 回归：旧实现用 %__PLACEHOLDER__% 作内部还原标记，原文恰含该字面量时
+    // 标记被误认为占位符，导致原文字面量被吞/脱敏标记串位
+    const fakeSk = 'sk-' + 'c'.repeat(36)
+    const out = scrubSensitiveTokens('示例 %__PLACEHOLDER__% 记号，key是 ' + fakeSk)
+    assert.ok(out.includes('%__PLACEHOLDER__%'), '原文字面量必须原样保留')
+    assert.match(out, /\[已脱敏:openai-sk:sk-c…cccc\]/)
+  })
 })

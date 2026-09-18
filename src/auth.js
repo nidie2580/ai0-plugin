@@ -57,7 +57,7 @@ function randomAlphanumeric(len = 16) {
  *  避免长度不匹配导致 timingSafeEqual 退化为 false（产生时序差异）。
  *  返回 true 当且仅当两个值完全一致。
  */
-function safeCompare(a, b) {
+export function safeCompare(a, b) {
   try {
     const KEY = 'ai0-auth-compare-v1'
     const ha = crypto.createHmac('sha256', KEY).update(String(a)).digest()

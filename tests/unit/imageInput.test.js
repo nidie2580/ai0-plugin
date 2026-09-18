@@ -250,4 +250,60 @@ describe('图片输入', () => {
       assert.equal(t, '')
     })
   })
+
+  describe('G7: 多模型下按各模型 vision 配置注入', () => {
+    it('非默认模型的 vision=true 也能拿到 image_url（此前只按默认模型判定）', async () => {
+      writeConfig({ model: {
+        default: 'openai-compatible',
+        'openai-compatible': { apiBase: 'https://api.openai.com/v1', apiKey: 'k', model: 'gpt-3.5-turbo', vision: false },
+        'vlm': { apiBase: 'https://api.openai.com/v1', apiKey: 'k', model: 'gpt-4o', vision: true },
+      } })
+      const e = { message: [{ type: 'image', file: TMP_PNG }] }
+      const history = [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: '看看这张图 [图片:https://x.com/a.png]' },
+      ]
+      // modelKeys=[vlm]：vlm 是 vision 模型 → 不触发 OCR，无网络调用
+      const assets = await chatService.prepareImageAssets(e, { modelKeys: ['vlm'] })
+      assert.ok(assets && assets.dataUrls.length === 1)
+      assert.equal(assets.ocrText, '')
+
+      const outDefault = chatService.applyImagesToHistory(history, assets, 'openai-compatible')
+      assert.equal(typeof outDefault[1].content, 'string', '非 vision 模型保持文本链路')
+
+      const outVlm = chatService.applyImagesToHistory(history, assets, 'vlm')
+      const last = outVlm[1]
+      assert.ok(Array.isArray(last.content), 'vision 模型应拿到多模态数组')
+      assert.ok(last.content.some((p) => p.type === 'image_url' && p.image_url.url.startsWith('data:image/')))
+      assert.ok(last.content.some((p) => p.type === 'text' && p.text === '看看这张图'))
+      // 持久化 history 不被污染
+      assert.equal(typeof history[1].content, 'string')
+    })
+  })
+
+  describe('G8: 艾特追问改写支持多模态数组 content', () => {
+    it('数组 content 替换 text 部分、保留 image_url（此前整条跳过，追问文本丢失）', () => {
+      const history = [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: [
+          { type: 'text', text: '/vlm 原始提问' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } },
+        ] },
+      ]
+      const out = chatService.applyAtUserText(history, '去前缀后的追问')
+      const last = out[out.length - 1]
+      assert.ok(Array.isArray(last.content))
+      assert.equal(last.content[0].type, 'text')
+      assert.equal(last.content[0].text, '去前缀后的追问')
+      assert.equal(last.content[1].type, 'image_url')
+      // 原 history 不被污染
+      assert.equal(history[1].content[0].text, '/vlm 原始提问')
+    })
+
+    it('字符串 content 直接替换（原行为不变）', () => {
+      const history = [{ role: 'user', content: '/vlm 原始提问' }]
+      const out = chatService.applyAtUserText(history, '追问')
+      assert.equal(out[0].content, '追问')
+    })
+  })
 })
