@@ -17,6 +17,9 @@ import * as multiChatService from './multiChatService.js'
 import { isAllowedOutboundUrl } from './security.js'
 import { safeLogger } from './globals.js'
 import * as loginGuard from './loginGuard.js'
+import { getYiPaymentInstance, PaymentConfig } from './payment.js'
+import { getUserPremiumInstance } from './userPremium.js'
+import { getGroupBroadcastInstance } from './broadcast.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -116,7 +119,7 @@ async function buildUserSessionRecord(ud, userId) {
       const arr = JSON.parse(raw)
       msgCount = Array.isArray(arr) ? arr.length : 0
       const last = Array.isArray(arr) ? arr[arr.length - 1] : null
-      if (last) preview = helper.truncateUnicodeSafe(last.content || '', 60)
+      if (last) preview = (last.content || '').slice(0, 60)
     } catch {}
     // 会话安全元数据（agentUsed / risks）：Web 会话列表标注哪些会话用过 Agent、哪些有风险
     let agentUsed = false, risks = []
@@ -157,25 +160,19 @@ function requireAuth(req, res, next) {
 }
 
 function safeCompare(a, b) {
-  try {
-    const KEY = 'ai0-web-compare-v1'
-    const ha = crypto.createHmac('sha256', KEY).update(String(a ?? '')).digest()
-    const hb = crypto.createHmac('sha256', KEY).update(String(b ?? '')).digest()
-    return ha.length === hb.length && crypto.timingSafeEqual(ha, hb)
-  } catch (_) {
-    return false
-  }
-}
-
-function requireApiRate(scope, maxAttempts, windowMs) {
-  return (req, res, next) => {
-    const id = String(req.clientIp || req.ip || 'unknown')
-    const r = auth.checkRateLimit(scope, id, maxAttempts, windowMs)
-    if (!r.ok) {
-      return res.status(429).json({ ok: false, msg: '请求过于频繁，请稍后再试' })
-    }
-    next()
-  }
+  const x = Buffer.from(String(a || ''), 'utf-8')
+  const y = Buffer.from(String(b || ''), 'utf-8')
+  // P3-2: 长度不匹配时，不能提前 return——直接返回会泄露"长度不同"的时序信号。
+  // 策略：把较短的 Buffer 用 zero-fill 对齐到较长 Buffer 的长度，再做一次
+  // timingSafeEqual，再把 length 不匹配的情况强制 return false。攻击者无法通过
+  // 耗时分辨"长度不符 → false" 与"长度相符但内容不符 → false"。
+  const maxLen = Math.max(x.length, y.length, 1)
+  const xp = Buffer.alloc(maxLen, 0)
+  const yp = Buffer.alloc(maxLen, 0)
+  x.copy(xp)
+  y.copy(yp)
+  const contentEq = crypto.timingSafeEqual(xp, yp)
+  return x.length === y.length && contentEq
 }
 
 function requireCsrf(req, res, next) {
@@ -429,29 +426,6 @@ export function createApp() {
     next()
   })
 
-  // —— 登录守卫锁定态的服务端强制（2026-09 安全审查）——
-  // loginGuard 的设计是"异身份登录待审批期间锁定所有已登录控制台"，但旧实现只有前端
-  // CSS 遮罩 + 弹窗，服务端不拦截任何请求 → 已登录会话（或持有 cookie 的攻击者）在
-  // "锁定"期间照样能读写配置/删除历史。这里把它变成真的：锁定期间只放行
-  // 状态查询、登出与登录类接口，其余 API 一律 423。
-  const GUARD_LOCK_ALLOWLIST = new Set(['/api/guard/status', '/api/me', '/api/logout'])
-  app.use((req, res, next) => {
-    try {
-      if (!loginGuard.isLocked()) return next()
-      const p = req.path || ''
-      if (GUARD_LOCK_ALLOWLIST.has(p)) return next()
-      if (p.startsWith('/api/login/')) return next()
-      if (req.method === 'GET' && !p.startsWith('/api/')) return next() // 页面/静态资源：让前端能渲染锁定遮罩
-      return res.status(423).json({
-        ok: false,
-        locked: true,
-        msg: '检测到异身份登录申请，控制台已锁定。请在机器人运行终端输入「继续操作 <放行码或请求人QQ>」解锁。',
-      })
-    } catch (_) {
-      return next()
-    }
-  })
-
   // 静态资源与页面一律禁用缓存：避免升级/重装后浏览器继续用旧版 app.js/app.css
   // 与新版 dashboard.html/login.html 错配，导致控制台初始化异常而「卡在配置加载中」。
   app.use((req, res, next) => {
@@ -470,18 +444,10 @@ export function createApp() {
   const APP_CSS_RE = /\/assets\/app\.css(?:\?[^"]*)?"/g
   const _hashedJs = '/assets/app.' + (crypto.createHash('sha256').update(fs.readFileSync(path.join(WEB_DIR, 'assets', 'app.js'))).digest('hex').slice(0, 12)) + '.js'
   const _hashedCss = '/assets/app.' + (crypto.createHash('sha256').update(fs.readFileSync(path.join(WEB_DIR, 'assets', 'app.css'))).digest('hex').slice(0, 12)) + '.css'
-  // 在启动时给两份资源各做一份指纹副本（保证 URL 真实可下载），并清掉过期指纹文件
+  // 在启动时给两份资源各做一份指纹副本（保证 URL 真实可下载）
   try {
-    const assetsDir = path.join(WEB_DIR, 'assets')
-    const keepJs = _hashedJs.replace(/^\/assets\//, '')
-    const keepCss = _hashedCss.replace(/^\/assets\//, '')
-    fs.copyFileSync(path.join(assetsDir, 'app.js'), path.join(assetsDir, keepJs))
-    fs.copyFileSync(path.join(assetsDir, 'app.css'), path.join(assetsDir, keepCss))
-    for (const f of fs.readdirSync(assetsDir)) {
-      if (/^app\.[0-9a-f]{12}\.(js|css)$/.test(f) && f !== keepJs && f !== keepCss) {
-        try { fs.unlinkSync(path.join(assetsDir, f)) } catch (_) {}
-      }
-    }
+    fs.copyFileSync(path.join(WEB_DIR, 'assets', 'app.js'), path.join(WEB_DIR, 'assets', _hashedJs.replace(/^\/assets\//, '')))
+    fs.copyFileSync(path.join(WEB_DIR, 'assets', 'app.css'), path.join(WEB_DIR, 'assets', _hashedCss.replace(/^\/assets\//, '')))
   } catch (_) {}
   // HTML 响应在 sendFile 之前重写资源 URL 到指纹版
   app.use((req, res, next) => {
@@ -523,11 +489,9 @@ export function createApp() {
       return res.send('链接无效或已过期')
     }
     // verifyMagicLink 已原子标记为已消费；若 session 发放失败则回滚
-    // 直链仅主人可生成：登录绑定/沿用 primaryIdentity，避免无身份会话绕过守卫
-    const identity = loginGuard.adoptPrimaryForMasterLogin('master-magic')
     let session
     try {
-      session = auth.issueSession(req.clientIp, identity)
+      session = auth.issueSession(req.clientIp)
     } catch (e) {
       auth.rollbackMagicLink(token)
       const f = path.join(WEB_DIR, 'login.html')
@@ -540,14 +504,12 @@ export function createApp() {
       httpOnly: true,
       sameSite: 'strict',
       secure: !!secure,
-      path: '/',
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     res.cookie('ai0_csrf', session.csrf, {
       httpOnly: false,
       sameSite: 'strict',
       secure: !!secure,
-      path: '/',
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     return res.redirect('/')
@@ -566,14 +528,12 @@ export function createApp() {
         httpOnly: true,
         sameSite: 'strict',
         secure: !!secure,
-        path: '/',
         maxAge: auth.AUTH_CFG.tokenExpireMs
       })
       res.cookie('ai0_csrf', csrf, {
         httpOnly: false,
         sameSite: 'strict',
         secure: !!secure,
-        path: '/',
         maxAge: auth.AUTH_CFG.tokenExpireMs
       })
     }
@@ -610,14 +570,12 @@ export function createApp() {
       httpOnly: true,
       sameSite: 'strict',
       secure: !!secure,
-      path: '/',
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     res.cookie('ai0_csrf', session.csrf, {
       httpOnly: false,
       sameSite: 'strict',
       secure: !!secure,
-      path: '/',
       maxAge: auth.AUTH_CFG.tokenExpireMs
     })
     res.json({ ok: true })
@@ -733,7 +691,7 @@ export function createApp() {
     res.json({ ok: true, config: safe })
   })
 
-  app.post('/api/config', requireAuth, requireCsrf, requireApiRate('cfg', 30, 60_000), async (req, res) => {
+  app.post('/api/config', requireAuth, requireCsrf, async (req, res) => {
     try {
     const { config } = req.body || {}
     if (!config || typeof config !== 'object') {
@@ -808,9 +766,6 @@ export function createApp() {
         'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout', 'vision', 'thinking', 'thinkingTimeout', 'web'
       ])
       for (const [key, val] of Object.entries(config.model)) {
-        if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-          return res.json({ ok: false, msg: `模型配置含有不允许的键: ${key}` })
-        }
         if (key === 'default') continue
         if (val && typeof val === 'object' && !Array.isArray(val)) {
           const bad = Object.keys(val).filter(k => !ALLOWED_MODEL_FIELDS.has(k))
@@ -825,9 +780,6 @@ export function createApp() {
     //     与 /api/image-config 保持一致，防止通过 web 后台写入内网/回环 apiBase 导致 apiKey 泄漏
     if (config.model && typeof config.model === 'object') {
       for (const [key, val] of Object.entries(config.model)) {
-        if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-          return res.json({ ok: false, msg: `模型配置含有不允许的键: ${key}` })
-        }
         if (key === 'default' || !val || typeof val !== 'object') continue
         const apiBase = String(val.apiBase || '').trim()
         if (!apiBase) continue
@@ -885,18 +837,6 @@ export function createApp() {
         }
         if (lg.cooldownMs != null && (typeof lg.cooldownMs !== 'number' || lg.cooldownMs < 1000 || lg.cooldownMs > 3600000)) {
           return res.json({ ok: false, msg: 'chat.loopGuard.cooldownMs 必须为 1000-3600000 之间的数字' })
-        }
-      }
-      const pr = chat.privateRateLimit
-      if (pr) {
-        if (pr.enabled != null && typeof pr.enabled !== 'boolean') {
-          return res.json({ ok: false, msg: 'chat.privateRateLimit.enabled 必须为布尔值' })
-        }
-        if (pr.windowMs != null && (typeof pr.windowMs !== 'number' || pr.windowMs < 1000 || pr.windowMs > 3600000)) {
-          return res.json({ ok: false, msg: 'chat.privateRateLimit.windowMs 必须为 1000-3600000 之间的数字' })
-        }
-        if (pr.maxReplies != null && (typeof pr.maxReplies !== 'number' || !Number.isInteger(pr.maxReplies) || pr.maxReplies < 1 || pr.maxReplies > 200)) {
-          return res.json({ ok: false, msg: 'chat.privateRateLimit.maxReplies 必须为 1-200 之间的整数' })
         }
       }
       // 多模型并行回答 + 模型间互聊
@@ -969,18 +909,11 @@ export function createApp() {
     // 把脱敏的 apiKey 还原：收到 **** 时，从原配置读取
     const old = cfg.loadConfig()
     const cleaned = JSON.parse(JSON.stringify(config))
-    const keyMap = (cleaned._providerKeyMap && typeof cleaned._providerKeyMap === 'object')
-      ? cleaned._providerKeyMap
-      : null
-    delete cleaned._providerKeyMap
     if (cleaned.model && old.model) {
       for (const k of Object.keys(cleaned.model)) {
-        if (k === 'default') continue
         const newVal = cleaned.model[k]?.apiKey
-        const lookupKey = (keyMap && typeof keyMap[k] === 'string' && keyMap[k]) || k
-        const oldVal = old.model[lookupKey]?.apiKey
+        const oldVal = old.model[k]?.apiKey
         // 精确比对：仅当值完全匹配占位符时还原（防止误还原包含 **** 的真实 Key）
-        // 改名时用 _providerKeyMap 找到旧 key，避免把 ******** 当真实密钥落盘
         if (typeof newVal === 'string' && newVal === API_KEY_PLACEHOLDER && typeof oldVal === 'string') {
           cleaned.model[k].apiKey = oldVal
         }
@@ -1022,7 +955,7 @@ export function createApp() {
     res.json({ ok: true, data })
   })
 
-  app.delete('/api/sessions/:userId/:sessionId?', requireAuth, requireCsrf, requireApiRate('sess-del', 30, 60_000), (req, res) => {
+  app.delete('/api/sessions/:userId/:sessionId?', requireAuth, requireCsrf, (req, res) => {
     const { userId, sessionId } = req.params
     if (!isValidUserId(userId)) {
       return res.status(400).json({ ok: false, msg: '非法 userId' })
@@ -1061,7 +994,7 @@ export function createApp() {
   })
 
   // ---- 多 API 平台：探测某 provider 的 /models ----
-  app.post('/api/providers/probe', requireAuth, requireCsrf, requireApiRate('probe', 20, 60_000), async (req, res) => {
+  app.post('/api/providers/probe', requireAuth, requireCsrf, async (req, res) => {
     const { modelKey = null } = req.body || {}
     if (modelKey && (typeof modelKey !== 'string' || modelKey.length > 128)) {
       return res.json({ ok: false, msg: 'modelKey 格式无效' })
@@ -1077,7 +1010,7 @@ export function createApp() {
   })
 
   // ---- 多 API 平台：并发探测所有 provider 的 /models ----
-  app.post('/api/providers/probe-all', requireAuth, requireCsrf, requireApiRate('probe-all', 6, 60_000), async (req, res) => {
+  app.post('/api/providers/probe-all', requireAuth, requireCsrf, async (req, res) => {
     try {
       const c = cfg.loadConfig()
       const modelCfg = c.model || {}
@@ -1162,7 +1095,7 @@ export function createApp() {
     }
   })
 
-  app.post('/api/test-model', requireAuth, requireCsrf, requireApiRate('test-model', 8, 60_000), async (req, res) => {
+  app.post('/api/test-model', requireAuth, requireCsrf, async (req, res) => {
     let { message = '请用一句话介绍你自己', modelKey = null } = req.body || {}
     if (typeof message !== 'string') message = String(message)
     if (message.length > 10000) {
@@ -1205,7 +1138,7 @@ export function createApp() {
   app.get('/api/multi-chat', requireAuth, (req, res) => {
     res.json({ ok: true, identity: getWebIdentity(req) })
   })
-  app.post('/api/multi-chat', requireAuth, requireCsrf, requireApiRate('multi-chat', 12, 60_000), async (req, res) => {
+  app.post('/api/multi-chat', requireAuth, requireCsrf, async (req, res) => {
     let { question = '', modelKeys = null, multiChat = null, deliberate = null, clear = false } = req.body || {}
     const identity = getWebIdentity(req)
     const userId = identity || multiChatService.resolveUserLabel(null, null)
@@ -1307,7 +1240,7 @@ export function createApp() {
     res.json({ ok, msg: ok ? '图片配置已保存' : '保存失败' })
   })
 
-  app.post('/api/test-image', requireAuth, requireCsrf, requireApiRate('test-image', 6, 60_000), async (req, res) => {
+  app.post('/api/test-image', requireAuth, requireCsrf, async (req, res) => {
     const { prompt } = req.body || {}
     if (!prompt || typeof prompt !== 'string') {
       return res.json({ ok: false, msg: '请提供测试提示词' })
@@ -1324,6 +1257,235 @@ export function createApp() {
     }
   })
 
+  // ==================== 付费功能 API ====================
+  
+  // 获取付费配置
+  app.get('/api/payment/config', requireAuth, (req, res) => {
+    try {
+      const paymentConfig = new PaymentConfig()
+      const config = paymentConfig.getPaymentConfig()
+      // 脱敏敏感信息
+      const safeConfig = { ...config }
+      if (safeConfig.privateKey) {
+        safeConfig.privateKey = '****' // 脱敏私钥
+      }
+      res.json({ ok: true, config: safeConfig })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 获取付费配置失败: ${err.message}`)
+      res.json({ ok: false, msg: '获取付费配置失败' })
+    }
+  })
+
+  // 更新付费配置
+  app.post('/api/payment/config', requireAuth, requireCsrf, (req, res) => {
+    try {
+      const { config } = req.body || {}
+      if (!config || typeof config !== 'object') {
+        return res.json({ ok: false, msg: '配置格式错误' })
+      }
+
+      // 验证必填字段
+      if (config.enabled === true) {
+        if (!config.platformUrl || !config.merchantId || !config.privateKey) {
+          return res.json({ ok: false, msg: '启用付费功能时，必须填写平台地址、商户ID和商户私钥' })
+        }
+
+        // 验证平台URL格式
+        try {
+          const url = new URL(config.platformUrl)
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+            return res.json({ ok: false, msg: '平台地址必须是http或https协议' })
+          }
+        } catch (_) {
+          return res.json({ ok: false, msg: '平台地址格式错误' })
+        }
+
+        // 验证价格配置
+        if (config.prices) {
+          const { monthly, yearly } = config.prices
+          if (monthly !== undefined && (typeof monthly !== 'number' || monthly <= 0)) {
+            return res.json({ ok: false, msg: '月度价格必须为正数' })
+          }
+          if (yearly !== undefined && (typeof yearly !== 'number' || yearly <= 0)) {
+            return res.json({ ok: false, msg: '年度价格必须为正数' })
+          }
+        }
+
+        // 验证功能配置
+        if (config.features && !Array.isArray(config.features)) {
+          return res.json({ ok: false, msg: '功能配置必须是数组' })
+        }
+      }
+
+      // 保存配置
+      const paymentConfig = new PaymentConfig()
+      paymentConfig.updatePaymentConfig(config)
+
+      res.json({ ok: true, msg: '付费配置已保存' })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 保存付费配置失败: ${err.message}`)
+      res.json({ ok: false, msg: '保存付费配置失败' })
+    }
+  })
+
+  // 获取付费用户列表
+  app.get('/api/payment/users', requireAuth, (req, res) => {
+    try {
+      const premium = getUserPremiumInstance()
+      const userList = premium.getPremiumUserList()
+      const config = new PaymentConfig()
+      const enabled = config.isPaymentEnabled()
+
+      res.json({ 
+        ok: true, 
+        enabled,
+        totalUsers: userList.length,
+        users: userList
+      })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 获取付费用户列表失败: ${err.message}`)
+      res.json({ ok: false, msg: '获取付费用户列表失败' })
+    }
+  })
+
+  // 手动添加付费用户
+  app.post('/api/payment/users', requireAuth, requireCsrf, (req, res) => {
+    try {
+      const { userId, subscription } = req.body || {}
+      if (!userId) {
+        return res.json({ ok: false, msg: '用户ID不能为空' })
+      }
+
+      const premium = getUserPremiumInstance()
+      
+      // 检查是否已存在
+      const existing = premium.getUserSubscription(userId)
+      if (existing) {
+        return res.json({ ok: false, msg: '该用户已是付费用户' })
+      }
+
+      // 创建订阅信息
+      const subscriptionData = subscription || {
+        orderId: 'MANUAL_ADD',
+        amount: 0,
+        expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        paymentTime: new Date().toISOString(),
+        timestamp: Date.now()
+      }
+
+      premium.addPremiumUser(userId, subscriptionData)
+
+      res.json({ ok: true, msg: '付费用户已添加' })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 添加付费用户失败: ${err.message}`)
+      res.json({ ok: false, msg: '添加付费用户失败' })
+    }
+  })
+
+  // 移除付费用户
+  app.delete('/api/payment/users/:userId', requireAuth, requireCsrf, (req, res) => {
+    try {
+      const { userId } = req.params
+      if (!userId) {
+        return res.json({ ok: false, msg: '用户ID不能为空' })
+      }
+
+      const premium = getUserPremiumInstance()
+      premium.removePremiumUser(userId)
+
+      res.json({ ok: true, msg: '付费用户已移除' })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 移除付费用户失败: ${err.message}`)
+      res.json({ ok: false, msg: '移除付费用户失败' })
+    }
+  })
+
+  // 创建支付订单
+  app.post('/api/payment/create-order', requireAuth, requireCsrf, async (req, res) => {
+    try {
+      const { userId, amount, description } = req.body || {}
+      
+      if (!userId || !amount) {
+        return res.json({ ok: false, msg: '用户ID和金额不能为空' })
+      }
+
+      const payment = getYiPaymentInstance()
+      const result = await payment.createOrder(userId, amount, description)
+
+      res.json({ ok: true, ...result })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 创建支付订单失败: ${err.message}`)
+      res.json({ ok: false, msg: '创建支付订单失败' })
+    }
+  })
+
+  // 处理支付回调
+  app.post('/api/payment/callback', async (req, res) => {
+    try {
+      const payment = getYiPaymentInstance()
+      const result = await payment.handleCallback(req.body)
+
+      res.json(result)
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 处理支付回调失败: ${err.message}`)
+      res.json({ ok: false, msg: '处理支付回调失败' })
+    }
+  })
+
+  // 群体广播：向所有群聊发送消息
+  app.post('/api/broadcast', requireAuth, requireCsrf, async (req, res) => {
+    try {
+      const { message, image, senderId } = req.body || {}
+      
+      if (!message) {
+        return res.json({ ok: false, msg: '消息内容不能为空' })
+      }
+
+      // 获取机器人实例
+      const bot = global.Bot || {}
+      const broadcast = getGroupBroadcastInstance(bot)
+
+      // 执行广播
+      const results = await broadcast.broadcastToAllGroups(
+        message, 
+        senderId, 
+        {
+          includeImages: !!image,
+          imagePath: image,
+          skipErrors: true
+        }
+      )
+
+      const successCount = results.filter(r => r.success).length
+      const failCount = results.length - successCount
+
+      res.json({ 
+        ok: true, 
+        total: results.length,
+        success: successCount,
+        failed: failCount,
+        results
+      })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 群体广播失败: ${err.message}`)
+      res.json({ ok: false, msg: '群体广播失败' })
+    }
+  })
+
+  // 获取群聊统计信息
+  app.get('/api/broadcast/stats', requireAuth, async (req, res) => {
+    try {
+      const bot = global.Bot || {}
+      const broadcast = getGroupBroadcastInstance(bot)
+      const stats = await broadcast.getGroupStats()
+
+      res.json({ ok: true, stats })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 获取群聊统计失败: ${err.message}`)
+      res.json({ ok: false, msg: '获取群聊统计失败' })
+    }
+  })
+
   // —— Express 全局错误处理中间件 ——
   app.use((err, req, res, _next) => {
     const msg = err?.message || String(err)
@@ -1337,7 +1499,6 @@ export function createApp() {
 export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
   // 安装一次 stdin 放行监听（幂等）：管理员可在 XRK-Yunzai 运行终端输入「继续操作 <码>」
   loginGuard.installStdinWatcher()
-  try { helper.cleanupStaleRuntimeFiles({ force: true }) } catch (_) {}
   return new Promise((resolve, reject) => {
     // ------ 输入规范化（防止 YAML 把 0.0.0.0 解析成数字 0 或其他脏值） ------
     const bind = cfg.normalizeWebBind ? cfg.normalizeWebBind({ host, port }) : null
