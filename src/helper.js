@@ -76,9 +76,11 @@ export function scrubSensitiveTokens(text) {
     s = s.replace(kp.re, (m, label, value) => `${label}${repl(m, kp.type, value)}`)
   }
 
-  // 还原占位
-  s = s.split(sentinel).join('%__PLACEHOLDER__%')
-  hidden.forEach((h, i) => { s = s.replace('%__PLACEHOLDER__%', h) })
+  // 还原占位：内部标记全程使用 NUL 序列，不经过 %__PLACEHOLDER__% 之类可读字面量，
+  // 防止原文恰含相同字面量时还原错位（原文被吞、脱敏标记串位）。
+  const restoreMark = '\u0000SC1\u0000'
+  s = s.split(sentinel).join(restoreMark)
+  hidden.forEach((h) => { s = s.replace(restoreMark, h) })
 
   return s
 }

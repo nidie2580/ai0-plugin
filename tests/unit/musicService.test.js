@@ -143,6 +143,18 @@ describe('parse*SearchList', () => {
     assert.deepEqual(music.parseQQSearchList({}), [])
     assert.deepEqual(music.parseNeteaseSearchList(null), [])
   })
+
+  it('M1e：QQ 非数组 singer 且带专辑名时歌手名不丢失', () => {
+    // 回归：旧实现 `s.albumname ? s.artist : ...` 在有专辑名时取不存在的 s.artist，
+    // 歌手名显示为空
+    const json = { data: { song: { list: [
+      { songname: '倒带', songmid: 'mid_dd', songid: 9002, albumname: '魔力', singer: { name: '蔡依林' }, interval: 240 },
+    ] } } }
+    const songs = music.parseQQSearchList(json)
+    assert.equal(songs.length, 1)
+    assert.equal(songs[0].artist, '蔡依林')
+    assert.equal(songs[0].album, '魔力')
+  })
 })
 
 describe('searchSongs', () => {

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { safeLogger } from './globals.js'
+import { safeCompare } from './auth.js'
 
 // 登录守卫：多身份二次确认机制。
 //   - 首个有效登录成为「主身份」（primaryIdentity）。
@@ -114,7 +115,8 @@ export function approve(secret) {
   let matched = 0
   for (const rec of pending.values()) {
     if (rec.approved) continue
-    if (rec.code === s || rec.identity === s) {
+    // 放行码用恒时 HMAC 比较（此前普通 === 存在时序侧信道）；identity 是 QQ/stdin 标识非机密，保持 === 即可
+    if (safeCompare(rec.code, s) || rec.identity === s) {
       rec.approved = true
       matched++
     }

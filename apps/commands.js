@@ -378,10 +378,10 @@ export class AICommands extends plugin {
     const text = helper.getMessageText(this.e)
     const match = text.match(/^#ai添加主人\s+(\d+)/)
     if (!match) return this.e.reply('用法：#ai添加主人 <QQ号>')
-    // P3-2: QQ 号格式校验（5-20 位纯数字），防止 push "abc"、空串、超长数字等脏数据
+    // P3-2: QQ 号格式校验（5-12 位纯数字，与定时禁言/拉黑/groupOps 成员校验保持一致），防止 push "abc"、空串、超长数字等脏数据
     const newMaster = match[1]
-    if (!/^\d{5,20}$/.test(newMaster)) {
-      return this.e.reply(`❌ QQ号格式不合法：应为 5-20 位纯数字（收到 ${newMaster.length} 位）`)
+    if (!/^\d{5,12}$/.test(newMaster)) {
+      return this.e.reply(`❌ QQ号格式不合法：应为 5-12 位纯数字（收到 ${newMaster.length} 位）`)
     }
     const config = cfg.loadConfig()
     if (!config.permissions) config.permissions = {}
@@ -824,18 +824,9 @@ export class AICommands extends plugin {
     }
     lines.push('')
 
-    // 3) 手动调用本插件内部封装的 getGroupInfo / getMemberInfo（导出给诊断用）
+    // 3) 说明占位（getGroupInfo/getMemberInfo 为插件内部函数未导出；实际观测见第4/5条适配器返回）
     lines.push('【3. 插件内部封装 getGroupInfo() 结果】')
-    try {
-      const info = await import('../src/groupOps.js').then(async (m) => {
-        // 由于 getGroupInfo 没导出，只能重新调用一次内部函数；这里直接走导出的 _roleOf 路径不适用，
-        // 因此我们直接在下面手动再调 pickGroup 来重现，为了不新增 export 影响 chatService
-        return '(需结合下方第4/5条手动判断)'
-      })
-      lines.push(`  ${info}`)
-    } catch (err) {
-      lines.push(`  错误: ${err.message}`)
-    }
+    lines.push('  (getGroupInfo/getMemberInfo 为插件内部函数，未导出；请结合第4/5条适配器方法返回值判断)')
     lines.push('')
 
     // 4) 手动调用 pickGroup.getInfo / getGroupInfo 等方法
@@ -930,9 +921,9 @@ export class AICommands extends plugin {
       lines.push(`  错误: ${err.message}`)
     }
 
-    // 6) 能力总结
+    // 7) 能力总结
     lines.push('')
-    lines.push('【6. 操作能力检测】')
+    lines.push('【7. 操作能力检测】')
     const caps = [
       ['禁言', typeof group?.muteMember === 'function' || typeof group?.mute === 'function'],
       ['踢出', typeof group?.kickMember === 'function' || typeof group?.kick === 'function'],

@@ -328,7 +328,13 @@ function tokenizeKeepQuoted(seg) {
 // 因此统一为：对每条白名单命令的每个 token（含 --opt=value 拆出的值）做 realpath 边界判定；
 // 无法解析且为绝对路径 / 含 `..` 分量时一律拒绝。
 function workspaceRealRoot() {
-  try { return fs.realpathSync.native(WORKSPACE) } catch (_) { return null } // workspace 缺失时不拦
+  // workspace 缺失时先尝试自动创建（与 initWorkspaceFiles 同权限），仍失败才返回 null。
+  // 返回 null 时 checkPathToken 会按 fail-closed 拒绝路径 token（此前"缺失时不拦"是 fail-open，
+  // 工作区不可解析时任何已存在路径都能绕过边界校验）。
+  try { return fs.realpathSync.native(WORKSPACE) } catch (_) {
+    try { fs.mkdirSync(WORKSPACE, { recursive: true, mode: 0o700 }) } catch (_m) {}
+    try { return fs.realpathSync.native(WORKSPACE) } catch (_r) { return null }
+  }
 }
 
 /**
@@ -353,7 +359,11 @@ function checkPathToken(tk, realRoot) {
     }
     return { ok: true } // 工作区内尚不存在的普通相对路径（如 touch new.txt），交由命令自身报错
   }
-  if (realRoot && real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+  if (realRoot == null) {
+    // workspace 自身无法解析（自动创建也失败）→ 沙箱边界未知，按最严策略拒绝（fail-closed）
+    return { ok: false, reason: `工作区沙箱不可用（workspace 无法解析），按最严策略拒绝：${tk}` }
+  }
+  if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
     return { ok: false, reason: `路径超出工作区沙箱：${tk}` }
   }
   return { ok: true }
@@ -401,7 +411,7 @@ function assertNoShellExpandTokens(cmd) {
     const tokens = tokenizeKeepQuoted(seg)
     for (const tk of tokens) {
       if (!tk || tk === c0) continue
-      if (tk.startsWith('~/') || tk === '~' || tk.startsWith('~/')) {
+      if (tk.startsWith('~/') || tk === '~') {
         return { ok: false, reason: `禁止 shell 展开的 ~ 路径（会被 exec 展开到真实 home）：${tk}` }
       }
       if (tk.startsWith('$') && !/^\$\{[^}]+\}$/.test(tk) && !/\$\{[^}]+\}/.test(tk)) {
