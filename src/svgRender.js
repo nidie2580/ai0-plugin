@@ -14,7 +14,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { createCanvas, Image } from 'canvas'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -39,25 +38,33 @@ function esc(s) {
     .replace(/\//g, '&#x2F;')
 }
 
-// SVG 转 PNG 转换函数
-function svgToPng(svgText, width, height) {
+// SVG 转 PNG 转换函数（canvas 为可选依赖，动态导入，未安装时自动回退 SVG）
+async function svgToPng(svgText, width, height) {
+  let createCanvas, Image
+  try {
+    const canvasMod = await import('canvas')
+    createCanvas = canvasMod.createCanvas
+    Image = canvasMod.Image
+  } catch (_) {
+    throw new Error('canvas 未安装，跳过 PNG 转换')
+  }
   return new Promise((resolve, reject) => {
     const canvas = createCanvas(width, height)
     const ctx = canvas.getContext('2d')
-    
-    // 创建 Image 对象
+
     const img = new Image()
     img.onload = () => {
-      ctx.drawImage(img, 0, 0)
-      canvas.toBuffer((err, buffer) => {
-        if (err) {
-          reject(err)
-        } else {
-          resolve(buffer)
-        }
-      })
+      try {
+        ctx.drawImage(img, 0, 0)
+        canvas.toBuffer((err, buffer) => {
+          if (err) reject(err)
+          else resolve(buffer)
+        })
+      } catch (e) {
+        reject(e)
+      }
     }
-    img.onerror = reject
+    img.onerror = (e) => reject(e || new Error('SVG 加载失败'))
     img.src = 'data:image/svg+xml;base64,' + Buffer.from(svgText).toString('base64')
   })
 }
@@ -146,7 +153,7 @@ export async function writePng(svgText, width, height, prefix = 'img') {
     }, 5 * 60 * 1000).unref?.()
     return filePath
   } catch (err) {
-    safeLogger.warn(`[ai0-plugin] SVG 转 PNG 失败，回退到 SVG: ${err.message}`)
+    console.warn(`[ai0-plugin] SVG 转 PNG 失败，回退到 SVG: ${err?.message || err}`)
     return writeSvg(svgText, prefix)
   }
 }
@@ -552,7 +559,7 @@ export async function renderSongCard(item, botName = 'AI') {
   try {
     return await writePng(svg, W, H, 'song')
   } catch (err) {
-    safeLogger.warn(`[ai0-plugin] 生成PNG卡片失败，回退到SVG: ${err.message}`)
+    console.warn(`[ai0-plugin] 生成PNG卡片失败，回退到SVG: ${err?.message || err}`)
     return writeSvg(svg, 'song')
   }
 }
