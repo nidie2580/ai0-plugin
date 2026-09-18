@@ -15,6 +15,13 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { scrubSensitiveTokens, truncateUnicodeSafe } from './helper.js'
 
+let appendChain = Promise.resolve()
+function withAppendLock(fn) {
+  const run = appendChain.then(fn, fn)
+  appendChain = run.then(() => {}, () => {})
+  return run
+}
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PLUGIN_ROOT = path.join(__dirname, '..')
@@ -46,36 +53,43 @@ export function readChatLog() {
   }
 }
 
+function appendChatLogSync(entry) {
+  ensureDir(CHATLOG_DIR)
+  const list = readChatLog()
+  const rec = {
+    id: randomUUID(),
+    ts: Date.now(),
+    userId: String(entry?.userId ?? ''),
+    sessionId: String(entry?.sessionId ?? ''),
+    question: truncateUnicodeSafe(scrubSensitiveTokens(String(entry?.question ?? '')), 4000),
+    replies: Array.isArray(entry?.replies)
+      ? entry.replies.map((r) => ({
+          model: String(r?.model ?? ''),
+          text: truncateUnicodeSafe(scrubSensitiveTokens(String(r?.text ?? '')), 8000),
+        }))
+      : [],
+  }
+  const next = [rec, ...list].slice(0, MAX_ENTRIES)
+  const tmp = CHATLOG_FILE + '.tmp'
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600 })
+  fs.renameSync(tmp, CHATLOG_FILE)
+  return true
+}
+
 /**
  * 追加一条互聊记录；在数组最前端插入（最新在前），并裁剪超出上限的旧记录。
+ * 读-改-写经 Promise 链串行化，避免并发追加丢记录。
  * @param {{userId:string, sessionId:string, question:string, replies:Array<{model:string,text:string}>}} entry
- * @returns {boolean} 是否写入成功（仅用于日志/测试判断，失败不抛错）
+ * @returns {Promise<boolean>} 是否写入成功（仅用于日志/测试判断，失败不抛错）
  */
 export function appendChatLog(entry) {
-  try {
-    ensureDir(CHATLOG_DIR)
-    const list = readChatLog()
-    // 落盘前脱敏（与 llm.js 的历史存档策略一致）：用户可能把 API Key / Cookie 等
-    // 直接贴进对话，互聊记录会被 Web 后台「互聊记录」页回显，不做脱敏等于明文留存密钥。
-    const rec = {
-      id: randomUUID(),
-      ts: Date.now(),
-      userId: String(entry?.userId ?? ''),
-      sessionId: String(entry?.sessionId ?? ''),
-      question: truncateUnicodeSafe(scrubSensitiveTokens(String(entry?.question ?? '')), 4000),
-      replies: Array.isArray(entry?.replies)
-        ? entry.replies.map((r) => ({
-            model: String(r?.model ?? ''),
-            text: truncateUnicodeSafe(scrubSensitiveTokens(String(r?.text ?? '')), 8000),
-          }))
-        : [],
+  return withAppendLock(() => {
+    try {
+      return appendChatLogSync(entry)
+    } catch (_) {
+      return false
     }
-    const next = [rec, ...list].slice(0, MAX_ENTRIES)
-    fs.writeFileSync(CHATLOG_FILE, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600 })
-    return true
-  } catch (err) {
-    return false
-  }
+  })
 }
 
 /**

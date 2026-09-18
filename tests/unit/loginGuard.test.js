@@ -6,6 +6,9 @@ import {
   getPrimaryIdentity,
   isPrimary,
   hasPrimary,
+  createPending,
+  approve,
+  isApproved,
 } from '../../src/loginGuard.js'
 
 describe('loginGuard: magic link 绑定 primary', () => {
@@ -29,5 +32,23 @@ describe('loginGuard: magic link 绑定 primary', () => {
     assert.equal(adopted, seed)
     assert.equal(getPrimaryIdentity(), seed)
     assert.equal(isPrimary(adopted), true)
+  })
+})
+
+describe('loginGuard: 放行码恒时比较', () => {
+  test('正确放行码能匹配，错误码拒绝', () => {
+    const rec = createPending({ identity: 'qq-10001', ip: '127.0.0.1' })
+    assert.equal(approve('wrong-code').ok, false)
+    assert.equal(isApproved(rec.pendingId), false)
+    const ok = approve(rec.code)
+    assert.equal(ok.ok, true)
+    assert.equal(isApproved(rec.pendingId), true)
+  })
+
+  test('可用 identity 放行', () => {
+    const rec = createPending({ identity: 'qq-20002', ip: '127.0.0.1' })
+    const ok = approve('qq-20002')
+    assert.equal(ok.ok, true)
+    assert.equal(isApproved(rec.pendingId), true)
   })
 })

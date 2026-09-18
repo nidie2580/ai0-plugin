@@ -70,7 +70,7 @@ export function parseQQSearchList(json) {
     if (!songmid || !title) continue
     const artist = Array.isArray(s.singer)
       ? s.singer.map((x) => String(x?.name || '')).filter(Boolean).join('、')
-      : String(s.albumname ? s.artist || '' : (s.artist || s.singer?.name || '') || '')
+      : String((s.singer && typeof s.singer === 'object' ? s.singer.name : '') || s.artist || s.singer || '')
     out.push({
       source: 'qq',
       id: String(s.songid ?? s.id ?? ''),

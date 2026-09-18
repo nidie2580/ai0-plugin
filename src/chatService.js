@@ -90,6 +90,37 @@ export function listConfiguredModels() {
   return keys
 }
 
+export function isModelVision(modelKey) {
+  const modelCfgAll = cfg.loadConfig().model || {}
+  const defaultKey = modelCfgAll.default || 'openai-compatible'
+  const modelConf = modelCfgAll[modelKey || defaultKey] || modelCfgAll[defaultKey] || {}
+  return modelConf.vision === true
+}
+
+export function pickVisionModelKey(keys, fallback) {
+  const list = Array.isArray(keys) ? keys : []
+  const hit = list.find((k) => isModelVision(k))
+  return hit || fallback
+}
+
+/** 改写末条 user 消息的文本；数组（多模态）只替换/插入 text 部分，保留 image_url */
+export function rewriteLastUserContent(history, text) {
+  if (!text || !Array.isArray(history) || !history.length) return history
+  return history.map((msg, i, arr) => {
+    if (i !== arr.length - 1 || !msg || msg.role !== 'user') return msg
+    const c = msg.content
+    if (typeof c === 'string') return { ...msg, content: text }
+    if (Array.isArray(c)) {
+      const parts = c.map((p) => (p && typeof p === 'object' ? { ...p } : p))
+      const ti = parts.findIndex((p) => p && p.type === 'text')
+      if (ti >= 0) parts[ti] = { ...parts[ti], text }
+      else parts.unshift({ type: 'text', text })
+      return { ...msg, content: parts }
+    }
+    return { ...msg, content: text }
+  })
+}
+
 // 返回 chat.multiModel 配置（供其他模块读取，如群操作同行评审门控）。
 export function getMultiModelConfig() {
   return cfg.get('chat.multiModel', {}) || {}
@@ -179,7 +210,19 @@ export function buildMultiChatRequest({ reqHistory, archiveReplies, modelKey, mo
   const next = [...base]
   const lastIdx = next.length - 1
   if (lastIdx >= 0 && next[lastIdx].role === 'user') {
-    next[lastIdx] = { ...next[lastIdx], content: `${String(next[lastIdx].content || '')}\n\n${others}` }
+    const last = next[lastIdx]
+    const suffix = `\n\n${others}`
+    if (typeof last.content === 'string') {
+      next[lastIdx] = { ...last, content: `${last.content}${suffix}` }
+    } else if (Array.isArray(last.content)) {
+      const parts = last.content.map((p) => (p && typeof p === 'object' ? { ...p } : p))
+      const ti = parts.findIndex((p) => p && p.type === 'text')
+      if (ti >= 0) parts[ti] = { ...parts[ti], text: `${parts[ti].text || ''}${suffix}` }
+      else parts.unshift({ type: 'text', text: suffix.trim() })
+      next[lastIdx] = { ...last, content: parts }
+    } else {
+      next[lastIdx] = { ...last, content: `${String(last.content || '')}${suffix}` }
+    }
   }
   return next
 }
@@ -959,15 +1002,6 @@ export async function handleChat(e) {
 
   try {
     armChatTimer(hardTimeout)
-    // 图片输入：把当前轮图片接入"发给主模型的 history"副本（不改持久化 history，避免 base64 污染上下文）
-    let reqHistory = history
-    try {
-      reqHistory = await enrichHistoryWithImages(history, e, { modelKey: defaultKey })
-    } catch (imgErr) {
-      safeLogger.warn(`[ai0-plugin] 图片注入失败（回退文本链路）: ${imgErr?.message || imgErr}`)
-      reqHistory = history
-    }
-
     // 多模型并行回答 + 模型间互聊：
     //   每个模型各用一份"配有 * 标识协商日志"的独立请求历史，互不串扰（各自独立入参）。
     // 艾特：多模型模式下可用 "/<模型名> 追问" 把消息单独转给某模型让其立即回应。
@@ -979,22 +1013,41 @@ export async function handleChat(e) {
       const atKey = resolveAtModel(pureText)
       if (atKey && activeModelKeys.includes(atKey)) {
         activeModelKeys = [atKey]
-        // 去前缀后的"正文"，作为发给被艾特模型的用户消息体。
         const stripped = pureText.replace(/^\/(?:@\s*)?\S+\s*/, '').trim()
         atUserText = stripped || pureText.trim()
-        if (atUserText && Array.isArray(reqHistory) && reqHistory.length) {
-          // 只改写本轮待发请求的末条 user 消息，让被艾特模型收到"去前缀后的追问"；
-          // 持久化 history 不动（完整记录带前缀的原文）。
-          reqHistory = reqHistory.map((msg, i, arr) => {
-            if (i === arr.length - 1 && msg && msg.role === 'user') {
-              return { ...msg, content: typeof msg.content === 'string' ? atUserText : msg.content }
-            }
-            return msg
-          })
-        }
         safeLogger.info(`[ai0-plugin] 多模型艾特：/ 命中模型 key=${atKey}（仅该模型本轮回应）`)
       }
     }
+
+    // 图片输入：按模型 vision 能力分别注入（不改持久化 history）。
+    // 旧实现只用 defaultKey：多模型时支持视觉的非主模型收不到图。
+    const visionKey = pickVisionModelKey(activeModelKeys, defaultKey)
+    const textKey = activeModelKeys.find((k) => !isModelVision(k)) || defaultKey
+    let visionHistory = history
+    let textHistory = history
+    try {
+      visionHistory = await enrichHistoryWithImages(history, e, { modelKey: visionKey })
+    } catch (imgErr) {
+      safeLogger.warn(`[ai0-plugin] 图片注入失败（回退文本链路）: ${imgErr?.message || imgErr}`)
+      visionHistory = history
+    }
+    if (textKey && textKey !== visionKey) {
+      try {
+        textHistory = await enrichHistoryWithImages(history, e, { modelKey: textKey })
+      } catch (_) {
+        textHistory = history
+      }
+    } else if (!isModelVision(textKey)) {
+      textHistory = visionHistory
+    } else {
+      textHistory = history
+    }
+    if (atUserText) {
+      visionHistory = rewriteLastUserContent(visionHistory, atUserText)
+      textHistory = rewriteLastUserContent(textHistory, atUserText)
+    }
+    const reqHistoryFor = (k) => (isModelVision(k) ? visionHistory : textHistory)
+    let reqHistory = reqHistoryFor(activeModelKeys[0] || defaultKey)
 
     // 多模型协同（先商量→统一回复）：取代"各自作答+拼接"，群聊只发收敛后的一条最终回复。
     // 触发：multiModel.enabled 且 deliberate=true 且 >=2 个参与模型，且本轮不是"/模型"艾特单点。
@@ -1028,12 +1081,13 @@ export async function handleChat(e) {
       mmExpectedResponders = activeModelKeys.length
       // 从已持久化 history 中提取"其他模型的 [*] 发言"，聚合成"本轮用户消息之外"的对话背景。
       // 这样开启 multiChat 后，模型在下一轮就能看到彼此此前说过的话 → 形成可持续的多轮 AI 聊天。
-      const archiveReplies = collectArchiveReplies(reqHistory)
+      const archiveReplies = collectArchiveReplies(history)
 
       // 并行调用所有目标模型。每个模型彼此独立，失败互不影响；互聊时注入其他模型的 [*] 历史发言。
+      // 视觉模型走 visionHistory（含 image_url），其余走 OCR/文本副本。
       const tasks = activeModelKeys.map(async (k) => {
         const modelReq = buildMultiChatRequest({
-          reqHistory,
+          reqHistory: reqHistoryFor(k),
           archiveReplies,
           modelKey: k,
           modelDisplay,

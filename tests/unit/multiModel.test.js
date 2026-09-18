@@ -157,5 +157,67 @@ describe('多模型', () => {
       })
       assert.equal(req[0].content, 'hi')
     })
+
+    it('多模态数组 content 注入发言时保留 image_url', () => {
+      const req = chatService.buildMultiChatRequest({
+        reqHistory: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: '看看这张图' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,xx' } },
+          ],
+        }],
+        archiveReplies: archive,
+        modelKey: 'c',
+        modelDisplay: display,
+        multiChatEnabled: true,
+      })
+      const last = req[req.length - 1]
+      assert.ok(Array.isArray(last.content))
+      assert.ok(last.content.some((p) => p.type === 'image_url'))
+      const textPart = last.content.find((p) => p.type === 'text')
+      assert.ok(textPart.text.includes('看看这张图'))
+      assert.ok(textPart.text.includes('[*] 模型A：我选A'))
+    })
+  })
+
+  describe('M4: rewriteLastUserContent / pickVisionModelKey', () => {
+    it('字符串 content 直接替换', () => {
+      const out = chatService.rewriteLastUserContent(
+        [{ role: 'system', content: 's' }, { role: 'user', content: '/gpt 追问原文' }],
+        '追问原文',
+      )
+      assert.equal(out[1].content, '追问原文')
+    })
+
+    it('多模态数组只改 text、保留 image_url', () => {
+      const hist = [{
+        role: 'user',
+        content: [
+          { type: 'text', text: '/vision 这是什么' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,xx' } },
+        ],
+      }]
+      const out = chatService.rewriteLastUserContent(hist, '这是什么')
+      assert.ok(Array.isArray(out[0].content))
+      assert.equal(out[0].content.find((p) => p.type === 'text').text, '这是什么')
+      assert.ok(out[0].content.some((p) => p.type === 'image_url'))
+      assert.ok(Array.isArray(hist[0].content))
+      assert.equal(hist[0].content[0].text, '/vision 这是什么')
+    })
+
+    it('pickVisionModelKey 优先选 vision=true 的模型', () => {
+      writeConfig({
+        model: {
+          default: 'text-only',
+          'text-only': { apiBase: 'https://x/v1', apiKey: 'k', model: 't', vision: false },
+          'vision-m': { apiBase: 'https://x/v1', apiKey: 'k', model: 'v', vision: true },
+        },
+      })
+      const keys = chatService.listConfiguredModels()
+      assert.equal(chatService.pickVisionModelKey(keys, 'text-only'), 'vision-m')
+      assert.equal(chatService.isModelVision('vision-m'), true)
+      assert.equal(chatService.isModelVision('text-only'), false)
+    })
   })
 })

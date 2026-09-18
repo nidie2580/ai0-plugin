@@ -1,7 +1,7 @@
 import { test, describe, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
-import { checkCommand, splitSegments, initWorkspaceFiles, assertAgentUrlsAllowed } from '../../src/agent.js'
+import { checkCommand, splitSegments, initWorkspaceFiles, assertAgentUrlsAllowed, __test__ as agentTest } from '../../src/agent.js'
 
 describe('agent: splitSegments 引号感知拆分', () => {
   test('按 | ; && 拆分', () => {
@@ -420,5 +420,19 @@ describe('agent: 解释器纵深防御（extraAllowed 放开后仍禁内联代�
       else if (fs.existsSync(CONFIG_PATH)) fs.unlinkSync(CONFIG_PATH)
       cfg.setForceLoad(false)
     }
+  })
+})
+
+describe('agent: workspace 缺失时路径校验 fail-closed', () => {
+  test('checkCommand 在 workspace 无法解析时拒绝', () => {
+    try {
+      agentTest.setWorkspaceMissing(true)
+      const r = checkCommand('ls ./README.md')
+      assert.equal(r.ok, false)
+      assert.match(r.reason, /工作区目录不存在/)
+    } finally {
+      agentTest.setWorkspaceMissing(false)
+    }
+    assert.equal(checkCommand('ls ./README.md').ok, true)
   })
 })

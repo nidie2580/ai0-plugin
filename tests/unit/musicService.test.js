@@ -143,6 +143,24 @@ describe('parse*SearchList', () => {
     assert.deepEqual(music.parseQQSearchList({}), [])
     assert.deepEqual(music.parseNeteaseSearchList(null), [])
   })
+
+  it('M1e：QQ 带专辑名时仍取 singer 数组作为歌手', () => {
+    const songs = music.parseQQSearchList({
+      data: {
+        song: {
+          list: [{
+            songname: '晴天',
+            songmid: 'mid_qt',
+            albumname: '叶惠美',
+            singer: [{ name: '周杰伦' }],
+          }],
+        },
+      },
+    })
+    assert.equal(songs.length, 1)
+    assert.equal(songs[0].artist, '周杰伦')
+    assert.equal(songs[0].album, '叶惠美')
+  })
 })
 
 describe('searchSongs', () => {

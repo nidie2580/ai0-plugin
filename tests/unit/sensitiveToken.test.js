@@ -63,4 +63,12 @@ describe('敏感令牌脱敏', () => {
     assert.equal(scrubSensitiveTokens(null), '')
     assert.equal(scrubSensitiveTokens(undefined), '')
   })
+
+  it('S6: 原文含固定占位字面量时仍能还原脱敏标记', () => {
+    const fakePat = 'ghp_' + 'a'.repeat(36)
+    const out = scrubSensitiveTokens('前 %__PLACEHOLDER__% 中 ' + fakePat + ' 后')
+    assert.match(out, /\[已脱敏:github-pat:ghp_…aaaa\]/)
+    assert.ok(out.includes('%__PLACEHOLDER__%'))
+    assert.ok(!out.includes(fakePat))
+  })
 })

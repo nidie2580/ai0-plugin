@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -12,6 +12,7 @@ import { join } from 'node:path'
 //  - C3：readChatLog 面对不存在/损坏文件返回空数组（不抛错）。
 //  - C4：appendChatLog 对空/超长输入做安全截断。
 //  - C5：上限裁剪 —— 超过 MAX_ENTRIES 时保留最新、裁掉最旧。
+//  - C7：并发追加不丢记录（读-改-写串行化）。
 
 const TMP_DIR = join(tmpdir(), 'ai0-chatlog-test-' + Date.now())
 process.env.AI0_CHATLOG_FILE = join(TMP_DIR, 'chat-log.json')
@@ -26,9 +27,9 @@ before(() => { mkdirSync(TMP_DIR, { recursive: true }) })
 after(() => { rmTmp() })
 
 describe('模型互聊记录(chatLog)', () => {
-  it('C1: 写入后按最新在前读取', () => {
-    appendOne('q1', 'm1', 'r1')
-    appendOne('q2', 'm2', 'r2')
+  it('C1: 写入后按最新在前读取', async () => {
+    await appendOne('q1', 'm1', 'r1')
+    await appendOne('q2', 'm2', 'r2')
     const { total, items } = chatLog.queryChatLog()
     assert.ok(total >= 2)
     assert.equal(items[0].question, 'q2')
@@ -39,10 +40,10 @@ describe('模型互聊记录(chatLog)', () => {
     const { total } = chatLog.queryChatLog()
     const page = chatLog.queryChatLog({ limit: 1, offset: 0 })
     assert.equal(page.items.length, 1)
-    assert.equal(page.items[0].question, 'q2')   // 最新的先出
+    assert.equal(page.items[0].question, 'q2')
     const page2 = chatLog.queryChatLog({ limit: 10, offset: 1 })
     assert.ok(page2.items.length >= 1)
-    assert.equal(page2.items[page2.items.length - 1].question, 'q1')  // 前一条在最旧侧
+    assert.equal(page2.items[page2.items.length - 1].question, 'q1')
     assert.ok(Number.isInteger(total))
   })
 
@@ -50,17 +51,17 @@ describe('模型互聊记录(chatLog)', () => {
     assert.ok(Array.isArray(chatLog.readChatLog()))
   })
 
-  it('C4: 空输入与超长内容安全截断', () => {
-    appendOne('', 'm', 'x'.repeat(20000))
+  it('C4: 空输入与超长内容安全截断', async () => {
+    await appendOne('', 'm', 'x'.repeat(20000))
     const { items } = chatLog.queryChatLog({ limit: 1, offset: 0 })
     const top = items[0]
     assert.ok(top.question.length <= 4000)
     assert.ok(top.replies[0].text.length <= 8000)
   })
 
-  it('C4b: 超长内容含 emoji 时不切断 surrogate', () => {
+  it('C4b: 超长内容含 emoji 时不切断 surrogate', async () => {
     const q = '😀'.repeat(2500)
-    chatLog.appendChatLog({
+    await chatLog.appendChatLog({
       userId: '10001',
       sessionId: 'session-1',
       question: q,
@@ -73,21 +74,19 @@ describe('模型互聊记录(chatLog)', () => {
     assert.ok(cut.endsWith('😀'))
   })
 
-  it('C5: 超过上限裁剪旧记录（仅保留最新）', () => {
-    for (let i = 0; i < 250; i++) appendOne('q' + i, 'm', 'r' + i)
+  it('C5: 超过上限裁剪旧记录（仅保留最新）', async () => {
+    for (let i = 0; i < 250; i++) await appendOne('q' + i, 'm', 'r' + i)
     const { total, items } = chatLog.queryChatLog({ limit: 500 })
     assert.ok(total <= 200, '不能超过 MAX_ENTRIES 上限')
     assert.ok(items.length <= 200)
-    // 最新的最旧问题已被淘汰
     assert.ok(!items.some((e) => e.question === 'q1'))
     assert.ok(items.some((e) => e.question === 'q249'))
   })
 
-  it('C6: 落盘前脱敏（用户贴进对话的密钥不得明文留存）', () => {
-    // 合成串，非真实凭据；与 llm.js 历史存档使用同一套脱敏规则
+  it('C6: 落盘前脱敏（用户贴进对话的密钥不得明文留存）', async () => {
     const fakeSk = 'sk-abcdefghijklmnopqrstuvwxyz0123456789'
     const fakeGhp = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-    chatLog.appendChatLog({
+    await chatLog.appendChatLog({
       userId: '10001',
       sessionId: 'session-1',
       question: `我的key是 ${fakeSk} 请帮我看看`,
@@ -100,10 +99,20 @@ describe('模型互聊记录(chatLog)', () => {
     assert.match(top.question, /\[已脱敏:openai-sk:/)
     assert.match(top.replies[0].text, /\[已脱敏:github-pat:/)
   })
+
+  it('C7: 并发追加不丢记录', async () => {
+    const before = chatLog.queryChatLog({ limit: 1 }).total
+    const n = 40
+    await Promise.all(Array.from({ length: n }, (_, i) => appendOne('conc-' + i, 'm', 'r' + i)))
+    const { total, items } = chatLog.queryChatLog({ limit: 200 })
+    assert.equal(total, Math.min(200, before + n))
+    const conc = items.filter((e) => String(e.question).startsWith('conc-'))
+    assert.equal(conc.length, n)
+  })
 })
 
 function appendOne(question, model, text) {
-  chatLog.appendChatLog({
+  return chatLog.appendChatLog({
     userId: '10001',
     sessionId: 'session-1',
     question,

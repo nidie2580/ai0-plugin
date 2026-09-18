@@ -336,7 +336,7 @@ async function getBotRole(groupId) {
  *  同样做多层适配，覆盖 NapCat/LLOneBot/ICQQ 各种字段命名
  *  所有协议端方法调用同样走 5s 超时 + 日志；掉线时快速返回 null，绝不无限 pending。
  */
-async function getGroupInfo(groupId) {
+export async function getGroupInfo(groupId) {
   if (!groupId) return null
   const params = { groupId: String(groupId) }
   let networkTimeout = false // 协议端疑似掉线：跳过后续所有"网络"候选，避免反复空等

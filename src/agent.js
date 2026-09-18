@@ -327,8 +327,12 @@ function tokenizeKeepQuoted(seg) {
 //   3) `..` 前必须是空白才被黑名单命中 → `@../../config/config.yaml`（curl 的 @file）绕过。
 // 因此统一为：对每条白名单命令的每个 token（含 --opt=value 拆出的值）做 realpath 边界判定；
 // 无法解析且为绝对路径 / 含 `..` 分量时一律拒绝。
+// workspace 目录缺失时返回 null，由 assertPathsInWorkspace fail-closed 拒绝（不再放行）。
+let WORKSPACE_ROOT_OVERRIDE = undefined
 function workspaceRealRoot() {
-  try { return fs.realpathSync.native(WORKSPACE) } catch (_) { return null } // workspace 缺失时不拦
+  if (WORKSPACE_ROOT_OVERRIDE === false) return null
+  if (typeof WORKSPACE_ROOT_OVERRIDE === 'string') return WORKSPACE_ROOT_OVERRIDE
+  try { return fs.realpathSync.native(WORKSPACE) } catch (_) { return null }
 }
 
 /**
@@ -370,6 +374,9 @@ function expandLongOption(tk) {
 /** 所有白名单命令：每个 token（含 --opt=value 的值部分）都必须是工作区内路径 */
 function assertPathsInWorkspace(cmd) {
   const realRoot = workspaceRealRoot()
+  if (!realRoot) {
+    return { ok: false, reason: '工作区目录不存在或无法解析，按 fail-closed 拒绝执行' }
+  }
   const segs = splitSegments(cmd)
   for (const seg of segs) {
     const c0 = firstCommand(seg)
@@ -1382,4 +1389,10 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
     }
   }
   return { done: true, finalText, rounds: executed, logs }
+}
+
+export const __test__ = {
+  setWorkspaceMissing(missing) {
+    WORKSPACE_ROOT_OVERRIDE = missing ? false : undefined
+  },
 }

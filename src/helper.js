@@ -62,7 +62,7 @@ export function scrubSensitiveTokens(text) {
 
   // 2) 先把"已脱敏占位"藏起来，避免下面的键值对规则误伤占位里的 token 片段，
   //    再无条件执行键值对规则（幂等：占位已被隐藏，不会被二次替换）。
-  const sentinel = '\u0000SC0\u0000'
+  const sentinel = `\u0000SC0-${crypto.randomBytes(12).toString('hex')}\u0000`
   const hidden = []
   s = s.replace(SCRUB_MARK_RE, (m) => { hidden.push(m); return sentinel })
 
@@ -76,9 +76,9 @@ export function scrubSensitiveTokens(text) {
     s = s.replace(kp.re, (m, label, value) => `${label}${repl(m, kp.type, value)}`)
   }
 
-  // 还原占位
-  s = s.split(sentinel).join('%__PLACEHOLDER__%')
-  hidden.forEach((h, i) => { s = s.replace('%__PLACEHOLDER__%', h) })
+  // 还原占位（哨兵含随机串，避免与原文撞字面量）
+  const parts = s.split(sentinel)
+  s = parts.map((part, i) => (i < hidden.length ? part + hidden[i] : part)).join('')
 
   return s
 }
