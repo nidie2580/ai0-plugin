@@ -11,6 +11,7 @@ import * as chatLog from './chatLog.js'
 import * as groupConfirm from './groupConfirm.js'
 import * as deliberate from './deliberate.js'
 import * as musicService from './musicService.js'
+import * as broadcast from './broadcast.js'
 import { INJECT_BEGIN, INJECT_END } from './helper.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
@@ -754,6 +755,15 @@ export async function handleChat(e) {
       if (await musicService.handleSongCommand(e, pureText, { groupId, userId })) return true
     } catch (err) {
       safeLogger.warn(`[ai0-plugin] 点歌命令处理异常: ${err?.message || err}`)
+    }
+  }
+
+  // 群体广播命令（仅私聊主人）："广播 xxx" 向所有所在群聊发送消息（可附带图片）
+  if (!isGroup) {
+    try {
+      if (await broadcast.handleBroadcastCommand(e, pureText, { groupId, userId })) return true
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 广播命令处理异常: ${err?.message || err}`)
     }
   }
 

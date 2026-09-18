@@ -1267,6 +1267,20 @@ export function safeSegmentImage(filePath) {
   return { type: 'image', file: filePath }
 }
 
+// 图片段发送兼容增强：优先走 segment.image，失败时尝试 file:// 前缀，最后兜底为原始对象
+export function safeSegmentImageWithFallback(filePath) {
+  try {
+    const result = safeSegmentImage(filePath)
+    if (result) return result
+  } catch (_) {}
+  try {
+    const fileUrl = `file://${String(filePath).replace(/\\/g, '/')}`
+    return safeSegmentImage(fileUrl)
+  } catch (_) {
+    return { type: 'image', file: filePath }
+  }
+}
+
 function rand6() {
   return crypto.randomBytes(3).toString('hex')
 }

@@ -17,6 +17,8 @@ import * as multiChatService from './multiChatService.js'
 import { isAllowedOutboundUrl } from './security.js'
 import { safeLogger } from './globals.js'
 import * as loginGuard from './loginGuard.js'
+import { getYiPaymentInstance, PaymentConfig } from './payment.js'
+import { getUserPremiumInstance } from './userPremium.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -1321,6 +1323,117 @@ export function createApp() {
     } catch (err) {
       safeLogger.error(`[ai0-plugin] 图片生成失败: ${err.message}`)
       res.json({ ok: false, error: '图片生成失败，请稍后重试' })
+    }
+  })
+
+  // ==================== 付费功能 API ====================
+
+  // 获取付费配置（私钥脱敏）
+  app.get('/api/payment/config', requireAuth, (req, res) => {
+    try {
+      const paymentConfig = new PaymentConfig()
+      const config = paymentConfig.getPaymentConfig()
+      const safeConfig = { ...(config || {}) }
+      if (safeConfig.privateKey) safeConfig.privateKey = '****'
+      res.json({ ok: true, config: safeConfig })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 获取付费配置失败: ${err.message}`)
+      res.json({ ok: false, msg: '获取付费配置失败' })
+    }
+  })
+
+  // 更新付费配置
+  app.post('/api/payment/config', requireAuth, requireCsrf, (req, res) => {
+    try {
+      const { config } = req.body || {}
+      if (!config || typeof config !== 'object') {
+        return res.json({ ok: false, msg: '配置格式错误' })
+      }
+      const paymentConfig = new PaymentConfig()
+      paymentConfig.updatePaymentConfig(config)
+      res.json({ ok: true, msg: '付费配置已保存' })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 保存付费配置失败: ${err.message}`)
+      res.json({ ok: false, msg: '保存付费配置失败' })
+    }
+  })
+
+  // 获取付费用户列表
+  app.get('/api/payment/users', requireAuth, (req, res) => {
+    try {
+      const premium = getUserPremiumInstance()
+      const userList = premium.getPremiumUserList()
+      const paymentConfig = new PaymentConfig()
+      res.json({ ok: true, enabled: paymentConfig.isPaymentEnabled(), totalUsers: userList.length, users: userList })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 获取付费用户列表失败: ${err.message}`)
+      res.json({ ok: false, msg: '获取付费用户列表失败' })
+    }
+  })
+
+  // 手动添加付费用户
+  app.post('/api/payment/users', requireAuth, requireCsrf, (req, res) => {
+    try {
+      const { userId, days } = req.body || {}
+      const uid = String(userId || '').trim()
+      if (!uid) return res.json({ ok: false, msg: '用户ID不能为空' })
+      const premium = getUserPremiumInstance()
+      const daysNum = Number.isFinite(Number(days)) && Number(days) > 0 ? Number(days) : 30
+      const expiry = new Date(Date.now() + daysNum * 24 * 60 * 60 * 1000)
+      premium.addPremiumUser(uid, {
+        orderId: 'MANUAL_ADD',
+        amount: 0,
+        expiryDate: expiry.toISOString(),
+        paymentTime: new Date().toISOString(),
+        timestamp: Date.now()
+      })
+      res.json({ ok: true, msg: '付费用户已添加' })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 添加付费用户失败: ${err.message}`)
+      res.json({ ok: false, msg: '添加付费用户失败' })
+    }
+  })
+
+  // 移除付费用户
+  app.delete('/api/payment/users/:userId', requireAuth, requireCsrf, (req, res) => {
+    try {
+      const { userId } = req.params
+      if (!userId) return res.json({ ok: false, msg: '用户ID不能为空' })
+      getUserPremiumInstance().removePremiumUser(userId)
+      res.json({ ok: true, msg: '付费用户已移除' })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 移除付费用户失败: ${err.message}`)
+      res.json({ ok: false, msg: '移除付费用户失败' })
+    }
+  })
+
+  // 创建支付订单
+  app.post('/api/payment/create-order', requireAuth, requireCsrf, async (req, res) => {
+    try {
+      const { userId, amount, description } = req.body || {}
+      const uid = String(userId || '').trim()
+      const amt = Number(amount)
+      if (!uid || !Number.isFinite(amt) || amt <= 0) {
+        return res.json({ ok: false, msg: '用户ID和金额不能为空' })
+      }
+      const payment = getYiPaymentInstance()
+      const result = await payment.createOrder(uid, amt, String(description || '订阅付费功能'))
+      res.json({ ok: true, ...result })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 创建支付订单失败: ${err.message}`)
+      res.json({ ok: false, msg: '创建支付订单失败' })
+    }
+  })
+
+  // 支付回调（无需登录态）
+  app.post('/api/payment/callback', async (req, res) => {
+    try {
+      const payment = getYiPaymentInstance()
+      const result = await payment.handleCallback(req.body)
+      res.json(result)
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 处理支付回调失败: ${err.message}`)
+      res.json({ ok: false, msg: '处理支付回调失败' })
     }
   })
 

@@ -16,6 +16,7 @@
     <a class="nav-item active" data-view="home">🏠 首页</a>
     <a class="nav-item" data-view="config">📝 配置</a>
     <a class="nav-item" data-view="providers">🔌 多API平台</a>
+    <a class="nav-item" data-view="payment">💰 付费配置</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="chatlog">💭 模型互聊</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
@@ -319,6 +320,56 @@
       </label>
       <pre id="imgTestOut" class="test-out hidden"></pre>
       <div id="imgTestPreview" class="hidden img-test-preview"></div>
+    </div>
+  </section>
+
+  <!-- ==================== 付费配置 ==================== -->
+  <section id="view-payment" class="view">
+    <div class="card">
+      <h2>💰 付费功能配置 <span class="tag" id="paymentTag">加载中…</span></h2>
+      <p class="hint">配置易支付平台集成和付费用户管理功能。启用后点歌等付费功能仅对付费用户开放。</p>
+
+      <div class="grid-2">
+        <label>启用付费功能
+          <select id="payment_enabled"><option value="false">关闭</option><option value="true">开启</option></select>
+        </label>
+        <label>&nbsp;</label>
+        <label>平台地址 <input id="payment_platformUrl" placeholder="https://pay.example.com/api"/></label>
+        <label>商户ID <input id="payment_merchantId" placeholder="your_merchant_id"/></label>
+        <label>商户私钥 <input id="payment_privateKey" placeholder="your_private_key" autocomplete="off"/></label>
+        <label>&nbsp;</label>
+        <label>月度订阅价格(元) <input id="payment_prices_monthly" type="number" step="0.1"/></label>
+        <label>年度订阅价格(元) <input id="payment_prices_yearly" type="number" step="0.1"/></label>
+      </div>
+
+      <hr>
+      <h3>付费功能开关</h3>
+      <div class="feature-config">
+        <label><input type="checkbox" id="payment_feature_song_request"/> 点歌功能</label>
+        <label><input type="checkbox" id="payment_feature_high_quality_audio"/> 高音质音频</label>
+        <label><input type="checkbox" id="payment_feature_lyrics_display"/> 歌词显示</label>
+        <label><input type="checkbox" id="payment_feature_playlist_management"/> 歌单管理</label>
+        <label><input type="checkbox" id="payment_feature_premium_models"/> 付费专属模型</label>
+        <label><input type="checkbox" id="payment_feature_group_broadcast"/> 群体广播</label>
+      </div>
+
+      <div class="actions">
+        <button class="btn primary" id="savePaymentConfig">💾 保存付费配置</button>
+        <span id="paymentSaveMsg" class="save-msg"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>付费用户管理 <span class="tag" id="paymentUsersTag">-</span>
+        <button class="btn sm right" id="refreshPaymentUsers">🔄 刷新</button>
+      </h2>
+      <div class="row space-between">
+        <p class="hint">管理已付费用户列表，支持手动添加/删除用户。</p>
+        <button class="btn primary" id="addPaymentUserBtn">➕ 手动添加用户</button>
+      </div>
+      <div id="paymentUsersList" class="payment-users-list">
+        <p class="empty">加载中…</p>
+      </div>
     </div>
   </section>
 
