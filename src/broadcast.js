@@ -325,46 +325,109 @@ export async function handleBroadcastCommand(e, pureText, ctx = {}) {
     return true
   }
 
-  // 获取机器人实例：优先当前事件所属 bot（带 gl 才认），回退全局 Bot
-  const bot = (e?.bot && e.bot.gl) ? e.bot : (typeof Bot !== 'undefined' && Bot && Bot.gl ? Bot : null)
-  if (!bot) {
-    try { await e.reply('无法获取机器人实例，广播失败。') } catch (_) {}
-    return true
-  }
-  // Yunzai 的 Bot.gl 是 Map<群号, 群信息>，个别适配器可能是普通对象，两种都兼容
-  const gl = bot.gl
-  const groupIds = []
-  if (gl instanceof Map) {
-    for (const key of gl.keys()) groupIds.push(String(key))
-  } else if (gl && typeof gl === 'object') {
-    for (const key of Object.keys(gl)) groupIds.push(String(key))
-  }
-  if (!groupIds.length) {
-    try { await e.reply('没有找到机器人所在的群聊，无法广播。') } catch (_) {}
-    return true
+  // 收集所有可用的机器人实例（多账号/适配器差异下尽量找全）
+  const bots = []
+  const pushBot = (b) => { if (b && typeof b === 'object' && !bots.includes(b)) bots.push(b) }
+  try {
+    if (typeof Bot !== 'undefined' && Bot) {
+      pushBot(Bot)
+      // 多账号：Bot 可能是数组（Bot[0..n]），或 Bot.adapter 内包含多个实例
+      if (Array.isArray(Bot)) { for (const x of Bot) pushBot(x) }
+      if (Array.isArray(Bot?.adapters)) { for (const x of Bot.adapters) pushBot(x) }
+    }
+  } catch (_) {}
+  try { pushBot(globalThis?.Bot) } catch (_) {}
+  try { pushBot(globalThis?.bot) } catch (_) {}
+  try { pushBot(e?.bot) } catch (_) {}
+  try { pushBot(e?.adapter) } catch (_) {}
+  // icqq / NapCat 底层 client（getGroupList 常在这里）
+  for (const b of [...bots]) {
+    try { pushBot(b?.client) } catch (_) {}
+    try { pushBot(b?.internal) } catch (_) {}
+    try { pushBot(b?.icqq) } catch (_) {}
+    try { pushBot(b?.napcat) } catch (_) {}
   }
 
-  let ok = 0
-  let fail = 0
-  for (const gid of groupIds) {
+  // 从所有实例聚合群号（Bot.gl 是 Map<群号, 群信息>，兼容普通对象与数组）
+  const groupIds = new Set()
+  const addFromGl = (gl) => {
     try {
-      let sent = false
-      const group = typeof bot.pickGroup === 'function' ? bot.pickGroup(gid) : (gl instanceof Map ? gl.get(gid) : gl[gid])
-      if (group && typeof group.sendMsg === 'function') {
-        await group.sendMsg([...textSegs, ...imageSegs])
-        sent = true
-      } else if (typeof bot.sendGroupMsg === 'function') {
-        await bot.sendGroupMsg(gid, [...textSegs, ...imageSegs])
-        sent = true
+      if (gl instanceof Map) {
+        for (const key of gl.keys()) groupIds.add(String(key))
+      } else if (Array.isArray(gl)) {
+        for (const g of gl) {
+          const gid = g?.group_id ?? g?.groupId ?? g?.gc ?? g?.uin ?? g
+          if (gid != null && gid !== '' && String(gid) !== '0') groupIds.add(String(gid))
+        }
+      } else if (gl && typeof gl === 'object') {
+        for (const key of Object.keys(gl)) groupIds.add(String(key))
       }
-      if (sent) { ok++ } else { fail++ }
-    } catch (_) {
-      fail++
+    } catch (_) {}
+  }
+  for (const b of bots) {
+    addFromGl(b?.gl)
+    addFromGl(b?.Group)
+    addFromGl(b?.groups)
+    // icqq 风格：Bot 可能直接是数组实例
+    if (Array.isArray(b)) addFromGl(b)
+  }
+
+  // 仍为空时，尝试异步刷新群列表（getGroupList 常见于 icqq/NapCat 后端）
+  if (!groupIds.size) {
+    for (const b of bots) {
+      try {
+        if (typeof b?.getGroupList === 'function') {
+          const list = await b.getGroupList()
+          if (list instanceof Map) {
+            for (const key of list.keys()) groupIds.add(String(key))
+          } else if (Array.isArray(list)) {
+            for (const g of list) {
+              const gid = g?.group_id ?? g?.groupId ?? g?.gc ?? g?.uin ?? g
+              if (gid != null && String(gid) !== '0') groupIds.add(String(gid))
+            }
+          } else if (list && typeof list === 'object') {
+            for (const key of Object.keys(list)) groupIds.add(String(key))
+          }
+        }
+      } catch (_) {}
     }
   }
 
+  if (!groupIds.size) {
+    try {
+      await e.reply(`没有找到机器人所在的群聊，无法广播。（机器人实例 ${bots.length} 个，请确认协议端已登录并同步群列表）`)
+    } catch (_) {}
+    return true
+  }
+
+  const segs = [...textSegs, ...imageSegs]
+  let ok = 0
+  let fail = 0
+  for (const gid of groupIds) {
+    let sent = false
+    for (const b of bots) {
+      try {
+        const group = typeof b.pickGroup === 'function' ? b.pickGroup(gid)
+          : typeof b.getGroup === 'function' ? b.getGroup(gid)
+          : typeof b.Group?.pick === 'function' ? b.Group.pick(gid)
+          : null
+        if (group && typeof group.sendMsg === 'function') {
+          await group.sendMsg(segs)
+          sent = true
+          break
+        }
+        if (typeof b.sendGroupMsg === 'function') {
+          await b.sendGroupMsg(gid, segs)
+          sent = true
+          break
+        }
+      } catch (_) {}
+    }
+    if (sent) { ok++ } else { fail++ }
+  }
+
   try {
-    await e.reply(`📢 广播完成：共 ${groupIds.length} 个群，成功 ${ok}，失败 ${fail}。`)
+    await e.reply(`📢 广播完成：共 ${groupIds.size} 个群，成功 ${ok}，失败 ${fail}。`)
   } catch (_) {}
   return true
 }
