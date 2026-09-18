@@ -317,36 +317,54 @@ export async function handleBroadcastCommand(e, pureText, ctx = {}) {
   // 提取消息中的图片段（quote/reply 里的图片也认）
   const rawSegs = Array.isArray(e.message) ? e.message : []
   const imageSegs = rawSegs.filter((s) => s && (s.type === 'image' || s.msg_type === 'image'))
-  const textSegs = content ? [{ type: 'text', text: content }] : []
+  // 文字段：标准 OneBot segment 格式（data.text）
+  const textSegs = content ? [{ type: 'text', data: { text: content } }] : []
 
   if (!content && !imageSegs.length) {
     try { await e.reply('📢 广播用法：发送「广播 消息内容」，可附带图片。') } catch (_) {}
     return true
   }
 
-  const bot = e.bot || (typeof Bot !== 'undefined' ? Bot : null)
-  const gl = bot?.gl
-  if (!gl || typeof gl !== 'object') {
-    try { await e.reply('当前适配器不支持获取群列表，无法广播。') } catch (_) {}
+  // 获取机器人实例：优先当前事件所属 bot（带 gl 才认），回退全局 Bot
+  const bot = (e?.bot && e.bot.gl) ? e.bot : (typeof Bot !== 'undefined' && Bot && Bot.gl ? Bot : null)
+  if (!bot) {
+    try { await e.reply('无法获取机器人实例，广播失败。') } catch (_) {}
+    return true
+  }
+  // Yunzai 的 Bot.gl 是 Map<群号, 群信息>，个别适配器可能是普通对象，两种都兼容
+  const gl = bot.gl
+  const groupIds = []
+  if (gl instanceof Map) {
+    for (const key of gl.keys()) groupIds.push(String(key))
+  } else if (gl && typeof gl === 'object') {
+    for (const key of Object.keys(gl)) groupIds.push(String(key))
+  }
+  if (!groupIds.length) {
+    try { await e.reply('没有找到机器人所在的群聊，无法广播。') } catch (_) {}
     return true
   }
 
   let ok = 0
   let fail = 0
-  const total = Object.keys(gl).length
-  for (const gid of Object.keys(gl)) {
+  for (const gid of groupIds) {
     try {
-      const group = bot.pickGroup ? bot.pickGroup(gid) : gl[gid]
-      if (!group || typeof group.sendMsg !== 'function') { fail++; continue }
-      await group.sendMsg([...textSegs, ...imageSegs])
-      ok++
+      let sent = false
+      const group = typeof bot.pickGroup === 'function' ? bot.pickGroup(gid) : (gl instanceof Map ? gl.get(gid) : gl[gid])
+      if (group && typeof group.sendMsg === 'function') {
+        await group.sendMsg([...textSegs, ...imageSegs])
+        sent = true
+      } else if (typeof bot.sendGroupMsg === 'function') {
+        await bot.sendGroupMsg(gid, [...textSegs, ...imageSegs])
+        sent = true
+      }
+      if (sent) { ok++ } else { fail++ }
     } catch (_) {
       fail++
     }
   }
 
   try {
-    await e.reply(`📢 广播完成：共 ${total} 个群，成功 ${ok}，失败 ${fail}。`)
+    await e.reply(`📢 广播完成：共 ${groupIds.length} 个群，成功 ${ok}，失败 ${fail}。`)
   } catch (_) {}
   return true
 }
