@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <radialGradient id="g-purple" cx="22%" cy="18%" r="55%">
+      <stop offset="0%" stop-color="#6c5ce7" stop-opacity="0.55"/>
+      <stop offset="55%" stop-color="#6c5ce7" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#6c5ce7" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-teal" cx="82%" cy="80%" r="60%">
+      <stop offset="0%" stop-color="#4ecdc4" stop-opacity="0.40"/>
+      <stop offset="55%" stop-color="#4ecdc4" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#4ecdc4" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-red" cx="72%" cy="14%" r="34%">
+      <stop offset="0%" stop-color="#ff6b6b" stop-opacity="0.26"/>
+      <stop offset="100%" stop-color="#ff6b6b" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="g-base" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0b0b10"/>
+      <stop offset="60%" stop-color="#050507"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M 64 0 L 0 0 0 64" fill="none" stroke="#ffffff" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1600" height="900" fill="url(#g-base)"/>
+  <rect width="1600" height="900" fill="url(#g-purple)"/>
+  <rect width="1600" height="900" fill="url(#g-teal)"/>
+  <rect width="1600" height="900" fill="url(#g-red)"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+</svg>
