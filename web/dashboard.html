@@ -16,10 +16,8 @@
     <a class="nav-item active" data-view="home">🏠 首页</a>
     <a class="nav-item" data-view="config">📝 配置</a>
     <a class="nav-item" data-view="providers">🔌 多API平台</a>
-    <a class="nav-item" data-view="payment">💰 付费配置</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="chatlog">💭 模型互聊</a>
-    <a class="nav-item" data-view="broadcast">📢 群体广播</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
     <a class="nav-item" data-view="image">🎨 图片管理</a>
     <a class="nav-item" data-view="about">ℹ️ 关于</a>
@@ -95,6 +93,15 @@
         <label>冷却时长(ms) <input id="chat_loopGuard_cooldownMs" type="number" min="1000" max="3600000"/></label>
       </div>
       <p class="hint">群里同时存在多个机器人时，它们可能互相 @ 形成无限互答烧 token。此机制在「同群同账号短窗口内连续回复达上限」时判定为疑似循环，进入冷却静默。正常人类间歇聊天几乎不会误判。关闭总开关即停用该保护。</p>
+
+      <hr>
+      <h3>私聊速率限制</h3>
+      <div class="grid-2">
+        <label>总开关 <select id="chat_privateRate_enabled"><option value="true">开启</option><option value="false">关闭</option></select></label>
+        <label>窗口(ms) <input id="chat_privateRate_windowMs" type="number" min="1000" max="3600000"/></label>
+        <label>窗口内最多回复次数 <input id="chat_privateRate_maxReplies" type="number" min="1" max="200"/></label>
+      </div>
+      <p class="hint">同一用户在窗口内私聊触发超过上限则静默跳过，避免刷 API。群聊不受此项限制。</p>
 
       <hr>
       <h3>点歌设置</h3>
@@ -312,107 +319,6 @@
       </label>
       <pre id="imgTestOut" class="test-out hidden"></pre>
       <div id="imgTestPreview" class="hidden img-test-preview"></div>
-    </div>
-  </section>
-
-  <!-- ==================== 付费配置 ==================== -->
-  <section id="view-payment" class="view">
-    <div class="card">
-      <h2>💰 付费功能配置 <span class="tag" id="paymentTag">加载中…</span></h2>
-      <p class="hint">配置易支付平台集成和付费用户管理功能。</p>
-
-      <hr>
-      <h3>基础配置</h3>
-      <div class="grid-2">
-        <label>启用付费功能
-          <select id="payment_enabled"><option value="false">关闭</option><option value="true">开启</option></select>
-        </label>
-        <label>&nbsp;</label>
-        <label>平台地址 <input id="payment_platformUrl" placeholder="https://pay.example.com/api"/></label>
-        <label>商户ID <input id="payment_merchantId" placeholder="your_merchant_id"/></label>
-        <label>商户私钥 <input id="payment_privateKey" placeholder="your_private_key" autocomplete="off"/></label>
-        <label>&nbsp;</label>
-      </div>
-
-      <hr>
-      <h3>价格配置</h3>
-      <div class="grid-2">
-        <label>月度订阅价格(元) <input id="payment_prices_monthly" type="number" step="0.1"/></label>
-        <label>年度订阅价格(元) <input id="payment_prices_yearly" type="number" step="0.1"/></label>
-      </div>
-
-      <hr>
-      <h3>功能权限配置</h3>
-      <div class="feature-config">
-        <label><input type="checkbox" id="payment_feature_high_quality_audio"/> 高音质音频（无损音质）</label>
-        <label><input type="checkbox" id="payment_feature_lyrics_display"/> 歌词显示</label>
-        <label><input type="checkbox" id="payment_feature_playlist_management"/> 歌单管理</label>
-        <label><input type="checkbox" id="payment_feature_premium_models"/> 特定模型（付费用户专用）</label>
-        <label><input type="checkbox" id="payment_feature_song_request"/> 点歌功能</label>
-        <label><input type="checkbox" id="payment_feature_group_broadcast"/> 群体广播功能</label>
-      </div>
-
-      <div class="actions">
-        <button class="btn primary" id="savePaymentConfig">💾 保存付费配置</button>
-        <span id="paymentSaveMsg" class="save-msg"></span>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>付费用户管理 <span class="tag" id="paymentUsersTag">-</span>
-        <button class="btn sm right" id="refreshPaymentUsers">🔄 刷新</button>
-      </h2>
-
-      <div class="row space-between">
-        <p class="hint">管理已付费用户列表，支持手动添加/删除用户。</p>
-        <button class="btn primary" id="addPaymentUserBtn">➕ 手动添加用户</button>
-      </div>
-
-      <div id="paymentUsersList" class="payment-users-list">
-        <p class="empty">加载中…</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- ==================== 群体广播 ==================== -->
-  <section id="view-broadcast" class="view">
-    <div class="card">
-      <h2>📢 群体广播 <span class="tag" id="broadcastTag">-</span>
-        <button class="btn sm right" id="refreshBroadcastStats">🔄 刷新统计</button>
-      </h2>
-      <p class="hint">主人可以通过私聊向机器人所有所在群聊发送特定消息，支持文字和图片。</p>
-
-      <div id="broadcastStats" class="broadcast-stats">
-        <div class="stat-item">
-          <div class="stat-value" id="broadcastTotalGroups">-</div>
-          <div class="stat-label">群聊总数</div>
-        </div>
-      </div>
-
-      <hr>
-      <h3>发送广播</h3>
-      <div class="row">
-        <label>广播消息
-          <textarea id="broadcastMessage" rows="4" placeholder="输入要发送到所有群聊的消息内容"></textarea>
-        </label>
-      </div>
-
-      <div class="row">
-        <label>图片路径（可选）
-          <input id="broadcastImage" placeholder="图片文件路径"/>
-        </label>
-      </div>
-
-      <div class="actions">
-        <button class="btn primary" id="sendBroadcastBtn">📡 发送广播</button>
-        <span id="broadcastMsg" class="save-msg"></span>
-      </div>
-
-      <hr>
-      <h3>广播结果</h3>
-      <div id="broadcastResults" class="broadcast-results">
-        <p class="empty">暂无广播记录</p>
-      </div>
     </div>
   </section>
 

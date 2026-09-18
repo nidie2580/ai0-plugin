@@ -14,7 +14,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { createCanvas, Image } from 'canvas'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -37,29 +36,6 @@ function esc(s) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
     .replace(/\//g, '&#x2F;')
-}
-
-// SVG 转 PNG 转换函数
-function svgToPng(svgText, width, height) {
-  return new Promise((resolve, reject) => {
-    const canvas = createCanvas(width, height)
-    const ctx = canvas.getContext('2d')
-    
-    // 创建 Image 对象
-    const img = new Image()
-    img.onload = () => {
-      ctx.drawImage(img, 0, 0)
-      canvas.toBuffer((err, buffer) => {
-        if (err) {
-          reject(err)
-        } else {
-          resolve(buffer)
-        }
-      })
-    }
-    img.onerror = reject
-    img.src = 'data:image/svg+xml;base64,' + Buffer.from(svgText).toString('base64')
-  })
 }
 
 function defs() {
@@ -132,35 +108,17 @@ function writeSvg(svgText, prefix) {
   return filePath
 }
 
-export async function writePng(svgText, width, height, prefix = 'img') {
-  try {
-    const pngBuffer = await svgToPng(svgText, width, height)
-    const ts = Date.now().toString(36)
-    const rand = crypto.randomBytes(10).toString('hex')
-    const id = `${prefix}-${ts}-${rand}.png`
-    const filePath = path.join(TMP_DIR, id)
-    fs.writeFileSync(filePath, pngBuffer)
-    // 异步清理：5 分钟后删除临时文件（确保发送链路已完成）
-    setTimeout(() => {
-      try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath) } catch (_) {}
-    }, 5 * 60 * 1000).unref?.()
-    return filePath
-  } catch (err) {
-    safeLogger.warn(`[ai0-plugin] SVG 转 PNG 失败，回退到 SVG: ${err.message}`)
-    return writeSvg(svgText, prefix)
-  }
-}
-
 // ======== 清理过旧临时文件（启动时调用一次） ========
 export function cleanupOldTmp(maxAgeMs = 2 * 60 * 60 * 1000) {
   try {
     const now = Date.now()
+    if (!fs.existsSync(TMP_DIR)) return
     for (const f of fs.readdirSync(TMP_DIR)) {
       const fp = path.join(TMP_DIR, f)
-      const st = fs.statSync(fp)
-      if (now - st.mtimeMs > maxAgeMs) {
-        try { fs.unlinkSync(fp) } catch (_) {}
-      }
+      try {
+        const st = fs.statSync(fp)
+        if (st.isFile() && now - st.mtimeMs > maxAgeMs) fs.unlinkSync(fp)
+      } catch (_) {}
     }
   } catch (_) {}
 }
@@ -502,7 +460,7 @@ function fmtDuration(sec) {
  * item: { title, artist, album, cover, pageUrl, durationSec, source }
  * 失败抛异常，由调用方降级为原生卡片/文本。
  */
-export async function renderSongCard(item, botName = 'AI') {
+export function renderSongCard(item, botName = 'AI') {
   const title = String(item?.title || '未知歌曲').slice(0, 40)
   const artist = String(item?.artist || '未知歌手').slice(0, 40)
   const album = String(item?.album || '').slice(0, 40)
@@ -547,12 +505,5 @@ export async function renderSongCard(item, botName = 'AI') {
   ${rows.join('\n  ')}
   ${link ? `<text x="${W / 2}" y="${H - 18}" text-anchor="middle" font-size="13" fill="#3B82F6">${esc(link)}</text>` : ''}
 </svg>`
-  
-  // 尝试生成PNG格式，如果失败则回退到SVG
-  try {
-    return await writePng(svg, W, H, 'song')
-  } catch (err) {
-    safeLogger.warn(`[ai0-plugin] 生成PNG卡片失败，回退到SVG: ${err.message}`)
-    return writeSvg(svg, 'song')
-  }
+  return writeSvg(svg, 'song')
 }

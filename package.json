@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "web": "node src/standalone-web.js",
-    "test": "node --test \"tests/unit/*.test.js\"",
+    "test": "node --test --test-concurrency=1 \"tests/unit/*.test.js\"",
     "test:integration": "node tests/integration/run_integration_tests.js"
   },
   "keywords": [
@@ -25,7 +25,6 @@
   },
   "dependencies": {
     "axios": "1.19.0",
-    "canvas": "^2.11.2",
     "cookie-parser": "1.4.7",
     "express": "4.22.2",
     "yaml": "2.9.0"
