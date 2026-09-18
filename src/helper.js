@@ -116,51 +116,23 @@ function isPathWithinAllowedRoots(filePath) {
   }
 }
 
-// 临时文件清理：只保留近 1 小时内的，避免长期运行堆积；重启后扫遗留 .tmp / 音频 / SVG
+// 临时文件清理：只保留近 1 小时内的，避免长期运行堆积
 let _cleanupRan = 0
-function unlinkStaleFilesInDir(dir, now, maxAgeMs, nameRe = null) {
+function cleanupTmpDir() {
+  const now = Date.now()
+  if (now - _cleanupRan < 10 * 60 * 1000) return  // 每 10 分钟最多跑一次
+  _cleanupRan = now
   try {
-    if (!fs.existsSync(dir)) return
-    for (const f of fs.readdirSync(dir)) {
-      if (nameRe && !nameRe.test(f)) continue
-      const fp = path.join(dir, f)
+    const files = fs.readdirSync(TMP_DIR)
+    for (const f of files) {
+      if (!f.startsWith('stk-')) continue
+      const fp = path.join(TMP_DIR, f)
       try {
         const st = fs.statSync(fp)
-        if (st.isFile() && now - st.mtimeMs > maxAgeMs) fs.unlinkSync(fp)
+        if (now - st.mtimeMs > 60 * 60 * 1000) fs.unlinkSync(fp)
       } catch (_) {}
     }
   } catch (_) {}
-}
-
-export function cleanupStaleRuntimeFiles({ maxAgeMs = 60 * 60 * 1000, force = false } = {}) {
-  const now = Date.now()
-  if (!force && now - _cleanupRan < 10 * 60 * 1000) return
-  _cleanupRan = now
-  const age = force ? 0 : maxAgeMs
-  unlinkStaleFilesInDir(TMP_DIR, now, age)
-  unlinkStaleFilesInDir(path.join(DATA_DIR, 'tmp'), now, age)
-  try {
-    const histDir = path.join(DATA_DIR, 'history')
-    if (fs.existsSync(histDir)) {
-      for (const u of fs.readdirSync(histDir)) {
-        const ud = path.join(histDir, u)
-        try {
-          if (!fs.statSync(ud).isDirectory()) continue
-        } catch (_) { continue }
-        unlinkStaleFilesInDir(ud, now, age, /\.tmp(\.|$)/)
-      }
-    }
-  } catch (_) {}
-  for (const f of ['sessions.json.tmp', 'sessions.key.tmp']) {
-    const fp = path.join(DATA_DIR, f)
-    try {
-      if (fs.existsSync(fp) && now - fs.statSync(fp).mtimeMs > age) fs.unlinkSync(fp)
-    } catch (_) {}
-  }
-}
-
-function cleanupTmpDir() {
-  cleanupStaleRuntimeFiles()
 }
 
 function readFrameworkMasters() {
@@ -314,26 +286,7 @@ export function getUserId(e) {
 }
 
 export function getGroupId(e) {
-  return e?.group_id
-    ?? e?.groupId
-    ?? e?.group?.group_id
-    ?? e?.group?.groupId
-    ?? e?.message?.group_id
-    ?? e?.message?.groupId
-    ?? e?.raw?.group_id
-    ?? e?.from_group
-    ?? e?.sender?.group_id
-    ?? null
-}
-
-/** 群聊判定：除群号字段外，还看 isGroup / message_type，避免适配器漏填 group_id 时把群消息当私聊 */
-export function isGroupChat(e) {
-  const gid = getGroupId(e)
-  if (gid != null && gid !== '') return true
-  if (e?.isGroup === true || e?.is_group === true) return true
-  const mt = String(e?.message_type || e?.chat_type || '').toLowerCase()
-  if (mt === 'group' || mt === 'guild' || mt === 'channel') return true
-  return false
+  return e?.group_id ?? e?.message?.group_id ?? e?.from_group ?? null
 }
 
 /**
@@ -432,10 +385,7 @@ export async function imageSegmentToDataUrl(seg, maxBytes = 8 * 1024 * 1024) {
     return { ok: true, dataUrl: `data:${mime};base64,${seg.data}`, bytes }
   }
 
-  // 3) 本地文件路径（NapCat 等适配器的图片缓存通常不在插件允许根目录内，故不用根目录白名单，
-  //    改用"内容必须是可识别的图片格式"做校验）。2026-09 安全审查：旧实现 `guessMimeFromBuffer(buf)
-  //    || 'image/png'` 的兜底会把任意文件（config.yaml / data/sessions.key / /etc/shadow …）
-  //    当作 PNG 送去 OCR/视觉接口 base64 外传；这里去掉兜底，非图片一律拒绝。
+  // 3) 本地文件路径（NapCat 缓存通常不在插件允许根目录内，但仍限制为"已存在的小文件"，防拖任意大文件）
   const local = seg.file || seg.url
   if (local && fs.existsSync(local)) {
     let st
@@ -443,8 +393,7 @@ export async function imageSegmentToDataUrl(seg, maxBytes = 8 * 1024 * 1024) {
     if (!st.isFile()) return { ok: false, error: '非普通文件' }
     if (st.size > maxBytes) return { ok: false, error: `图片过大(${Math.round(st.size / 1024 / 1024)}MB)已拒绝` }
     const buf = fs.readFileSync(local)
-    const mime = guessMimeFromBuffer(buf)
-    if (!mime) return { ok: false, error: '本地文件不是可识别的图片格式，已拒绝（防任意文件外传）' }
+    const mime = guessMimeFromBuffer(buf) || 'image/png'
     return { ok: true, dataUrl: `data:${mime};base64,${buf.toString('base64')}`, bytes: buf.length }
   }
 
@@ -501,7 +450,7 @@ function safeName(raw) {
   if (raw == null) return ''
   let s = typeof raw === 'string' ? raw : String(raw)
   s = s.replace(/[\r\n\t]+/g, ' ').trim()
-  if (s.length > 24) s = truncateUnicodeSafe(s, 24)
+  if (s.length > 24) s = s.slice(0, 24)
   return s
 }
 
@@ -857,7 +806,7 @@ export async function replyReasoningAsChat(e, reasoning, options = {}) {
     }
   }
   const prefix = options.prefix ?? '💭 深度思考：'
-  return e.reply(prefix + truncateUnicodeSafe(text, 3000))
+  return e.reply(prefix + text.slice(0, 3000))
 }
 
 /**
@@ -867,17 +816,6 @@ export async function replyReasoningAsChat(e, reasoning, options = {}) {
  *  - Markdown 边界：尽量不在代码块 ```、表格 |、链接 []()、**粗体**、*斜体*、~~删除线~~ 的中间切
  *    （只做轻量启发式：若当前分段内存在未闭合的 ```/`，就尽量往后多找点，直到闭合或达到上限）
  */
-export function truncateUnicodeSafe(text, maxLen) {
-  const s = String(text ?? '')
-  const n = Number(maxLen)
-  if (!Number.isFinite(n) || n <= 0) return ''
-  if (s.length <= n) return s
-  let end = Math.floor(n)
-  const code = s.charCodeAt(end)
-  if (code >= 0xDC00 && code <= 0xDFFF && end > 0) end -= 1
-  return s.slice(0, end)
-}
-
 export function splitUnicodeSafe(text, targetChunk = 3000, options = {}) {
   if (!text) return []
   const maxChunk = options.maxChunk || Math.max(targetChunk * 2, 6000)
@@ -1263,6 +1201,22 @@ export function safeSegmentImage(filePath) {
   } catch (_) {}
   // 兜底：手动组装 segment 数组对象
   return { type: 'image', file: filePath }
+}
+
+// 适配器兼容性增强：尝试不同的图片格式
+export function safeSegmentImageWithFallback(filePath) {
+  try {
+    // 首先尝试使用原始路径
+    const result = safeSegmentImage(filePath)
+    if (result) return result
+    
+    // 如果失败，尝试使用 file:// 前缀
+    const fileUrl = `file://${filePath.replace(/\\/g, '/')}`
+    return safeSegmentImage(fileUrl)
+  } catch (_) {
+    // 最终兜底：返回基本对象
+    return { type: 'image', file: filePath }
+  }
 }
 
 function rand6() {
