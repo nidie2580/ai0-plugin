@@ -17,8 +17,8 @@ import * as multiChatService from './multiChatService.js'
 import { isAllowedOutboundUrl } from './security.js'
 import { safeLogger } from './globals.js'
 import * as loginGuard from './loginGuard.js'
-import { getYiPaymentInstance, PaymentConfig, appendOfficialRecharge, listOfficialRecharges } from './payment.js'
-import { getOfficialMeta, isOfficialKind, normalizeProviderKind, forceOfficialApiBase, omitOfficialApiBase, omitOfficialProbeUrl, redactOfficialText } from './officialApi.js'
+import { getOfficialMeta, isOfficialKind, normalizeProviderKind, forceOfficialApiBase, omitOfficialSecrets, omitOfficialProbeUrl, redactOfficialText } from './officialApi.js'
+import { registerOfficialKey } from './officialRegister.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -701,12 +701,11 @@ export function createApp() {
     if (safe.model) {
       for (const k of Object.keys(safe.model)) {
         if (safe.model[k] && typeof safe.model[k] === 'object') {
-          if (safe.model[k].apiKey) {
+          if (isOfficialKind(safe.model[k].kind)) {
+            safe.model[k] = omitOfficialSecrets(safe.model[k])
+          } else if (safe.model[k].apiKey) {
             const key = safe.model[k].apiKey
             safe.model[k].apiKey = (key && !/^\s*$/.test(key) && !/^\*+$/.test(key)) ? API_KEY_PLACEHOLDER : key
-          }
-          if (isOfficialKind(safe.model[k].kind)) {
-            safe.model[k] = omitOfficialApiBase(safe.model[k])
           }
         }
       }
@@ -820,6 +819,7 @@ export function createApp() {
         }
         if (key === 'default') continue
         if (val && typeof val === 'object' && !Array.isArray(val)) {
+          delete val.keyReady
           const bad = Object.keys(val).filter(k => !ALLOWED_MODEL_FIELDS.has(k))
           if (bad.length) {
             return res.json({ ok: false, msg: `模型 "${key}" 含有不允许的字段: ${bad.join(', ')}` })
@@ -989,11 +989,14 @@ export function createApp() {
         const newVal = cleaned.model[k]?.apiKey
         const lookupKey = (keyMap && typeof keyMap[k] === 'string' && keyMap[k]) || k
         const oldVal = old.model[lookupKey]?.apiKey
+        // 官方 Key 只允许注册接口写入，网页保存一律从磁盘还原
+        if (isOfficialKind(cleaned.model[k]?.kind)) {
+          cleaned.model[k].apiKey = typeof oldVal === 'string' ? oldVal : ''
+          continue
+        }
         // 精确比对：仅当值完全匹配占位符时还原（防止误还原包含 **** 的真实 Key）
         // 改名时用 _providerKeyMap 找到旧 key，避免把 ******** 当真实密钥落盘
-        const incomingEmpty = typeof newVal !== 'string' || !String(newVal).trim()
-        const keepOfficialKey = isOfficialKind(cleaned.model[k]?.kind) && incomingEmpty && typeof oldVal === 'string'
-        if ((typeof newVal === 'string' && newVal === API_KEY_PLACEHOLDER && typeof oldVal === 'string') || keepOfficialKey) {
+        if (typeof newVal === 'string' && newVal === API_KEY_PLACEHOLDER && typeof oldVal === 'string') {
           cleaned.model[k].apiKey = oldVal
         }
       }
@@ -1347,61 +1350,26 @@ export function createApp() {
     res.json({ ok: true, ...getOfficialMeta() })
   })
 
-  app.get('/api/official/recharges', requireAuth, (req, res) => {
+  app.post('/api/official/register', requireAuth, requireCsrf, requireApiRate('official-register', 8, 60_000), async (req, res) => {
     try {
-      res.json({ ok: true, records: listOfficialRecharges(50) })
-    } catch (err) {
-      safeLogger.error(`[ai0-plugin] 读取官方 API 充值记录失败: ${err.message}`)
-      res.json({ ok: false, msg: '读取充值记录失败' })
-    }
-  })
-
-  app.post('/api/official/recharge', requireAuth, requireCsrf, requireApiRate('official-recharge', 10, 60_000), async (req, res) => {
-    try {
-      const { amount, providerKey, description } = req.body || {}
-      const amt = Number(amount)
-      const limits = new PaymentConfig().getAmountLimits()
-      if (!Number.isFinite(amt) || amt < limits.min || amt > limits.max) {
-        return res.json({ ok: false, msg: `充值金额须在 ${limits.min} ~ ${limits.max} 元之间` })
-      }
-      const key = String(providerKey || '').trim()
-      const modelCfg = cfg.loadConfig().model || {}
-      if (key) {
-        const entry = modelCfg[key]
-        if (!entry || typeof entry !== 'object' || !isOfficialKind(entry.kind)) {
-          return res.json({ ok: false, msg: '只能给官方 API 条目充值' })
-        }
-      }
-      const uid = getWebIdentity(req) || 'web-admin'
-      const payment = getYiPaymentInstance()
-      const result = await payment.createOrder(
-        uid,
-        amt,
-        String(description || `官方API充值${key ? ' ' + key : ''}`),
-      )
-      appendOfficialRecharge({
-        orderId: result.orderId,
-        userId: uid,
-        amount: amt,
-        providerKey: key,
-        status: 'CREATED',
-        source: 'official-recharge',
+      const { providerKey, displayName } = req.body || {}
+      const result = await registerOfficialKey({
+        providerKey,
+        displayName,
+        operatorId: getWebIdentity(req),
       })
-      res.json({ ok: true, ...result })
+      if (result.ok) {
+        return res.json({
+          ok: true,
+          providerKey: result.providerKey,
+          keyReady: true,
+          msg: result.msg,
+        })
+      }
+      res.json({ ok: false, msg: result.msg || '官方密钥签发失败', code: result.code })
     } catch (err) {
-      safeLogger.error(`[ai0-plugin] 官方 API 充值下单失败: ${err.message}`)
-      res.json({ ok: false, msg: '创建充值订单失败' })
-    }
-  })
-
-  app.post('/api/payment/callback', async (req, res) => {
-    try {
-      const payment = getYiPaymentInstance()
-      const result = await payment.handleCallback(req.body)
-      res.json(result)
-    } catch (err) {
-      safeLogger.error(`[ai0-plugin] 处理支付回调失败: ${err.message}`)
-      res.json({ ok: false, msg: '处理支付回调失败' })
+      safeLogger.error(`[ai0-plugin] 官方 API 注册失败: ${redactOfficialText(err.message)}`)
+      res.json({ ok: false, msg: '官方密钥签发失败' })
     }
   })
 

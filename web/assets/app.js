@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260919b'
+window.__AI0_BUILD__ = '20260919d'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -1055,7 +1055,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   let officialMeta = {
     displayName: '官方API',
     keyPrefix: 'official',
-    hint: '官方 API 为可选项，地址由服务端管理。',
+    hint: '官方 API 为可选项，地址由服务端管理。请先注册获取密钥，再拉取模型列表。',
   }
   // 与后端 API_KEY_PLACEHOLDER 完全一致（/api/config 返回的脱敏占位符）。
   // 任何时候保存：若 apiKey 是空串或占位符，视为"未修改"，发送占位符让后端还原原值。
@@ -1109,6 +1109,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         name: m.name || '',
         apiBase: m.apiBase || '',
         apiKey: m.apiKey || '',
+        keyReady: !!m.keyReady,
         model: m.model || '',
         temperature: m.temperature ?? 0.8,
         maxTokens: m.maxTokens ?? 2000,
@@ -1133,26 +1134,20 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       const card = document.createElement('div')
       card.className = 'provider-card' + (isDefault ? ' default' : '') + (isOfficial ? ' official' : '')
       const kindTag = isOfficial ? '<span class="tag official-tag">官方</span>' : '<span class="tag">自定义</span>'
-      const rechargeRow = isOfficial ? `
-        <div class="official-recharge">
-          <label>给官方 API 充值（元）
-            <div class="model-row">
-              <input data-idx="${idx}" data-field="rechargeAmount" type="number" min="0.01" step="0.01" placeholder="金额"/>
-              <button class="btn sm" data-act="recharge" data-idx="${idx}">易支付充值</button>
-            </div>
-          </label>
-          <p class="hint">易支付到账后由服务端记账。地址与密钥不在此页展示。</p>
-        </div>` : ''
       const officialBody = `
           <label>显示名称<input data-idx="${idx}" data-field="name" value="${escapeHtml(p.name)}" placeholder="官方API"/></label>
+          <p class="hint">${p.keyReady ? '密钥已就绪（本页不显示明文）。' : '尚未获取密钥，请先注册。'}</p>
+          <div class="model-row official-register-row">
+            <button class="btn sm" data-act="register" data-idx="${idx}">${p.keyReady ? '重新注册密钥' : '注册获取密钥'}</button>
+            <button class="btn sm" data-act="probe" data-idx="${idx}">拉取模型列表</button>
+          </div>
           <label>当前模型
             <div class="model-row">
-              <input data-idx="${idx}" data-field="model" value="${escapeHtml(p.model)}" placeholder="点击右侧拉取" readonly/>
-              <button class="btn sm" data-act="probe" data-idx="${idx}">拉取模型列表</button>
+              <input data-idx="${idx}" data-field="model" value="${escapeHtml(p.model)}" placeholder="${p.keyReady ? '点击右侧拉取' : '请先注册获取密钥'}" readonly/>
             </div>
             <select class="model-select hidden" data-idx="${idx}"></select>
           </label>
-          <p class="hint">${escapeHtml(officialMeta.hint || '官方地址由服务端管理，本页不展示。')}</p>`
+          <p class="hint">${escapeHtml(officialMeta.hint || '官方地址由服务端管理，本页不展示。充值请在合作方网页完成后台关联。')}</p>`
       const customBody = `
           <label>显示名称<input data-idx="${idx}" data-field="name" value="${escapeHtml(p.name)}" placeholder="如 Kimi"/></label>
           <label>API Base<input data-idx="${idx}" data-field="apiBase" value="${escapeHtml(p.apiBase)}" placeholder="https://api.moonshot.cn/v1"/></label>
@@ -1180,7 +1175,6 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         <div class="provider-body">
           ${isOfficial ? officialBody : customBody}
         </div>
-        ${rechargeRow}
         <div class="provider-probe hidden" data-idx="${idx}"></div>
       `
       wrap.appendChild(card)
@@ -1214,7 +1208,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         if (act === 'del') removeProvider(idx)
         else if (act === 'default') setDefaultProvider(idx)
         else if (act === 'probe') probeProvider(idx)
-        else if (act === 'recharge') rechargeOfficial(idx)
+        else if (act === 'register') registerOfficial(idx)
       })
     })
 
@@ -1265,34 +1259,26 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     if (msg) {
       msg.className = 'save-msg'
       msg.textContent = isOfficial
-        ? `已加入官方 API「${key}」。地址由服务端管理；点「拉取模型列表」获取可用模型。`
+        ? `已加入官方 API「${key}」。请先点「注册获取密钥」（合作方签发，本页不显示），再拉取模型列表。`
         : `已新增自定义平台「${key}」，记得填写 API Base / Key 后点击「保存全部」。`
     }
   }
 
-  async function rechargeOfficial(idx) {
+  async function registerOfficial(idx) {
     const p = providersList[idx]
     const msg = $('#provMsg')
     if (!p || p.kind !== 'official') return
-    const card = $$('#providersList .provider-card')[idx]
-    const amtRaw = card?.querySelector(`[data-field="rechargeAmount"]`)?.value
-    const amt = Number(amtRaw)
-    if (!Number.isFinite(amt) || amt <= 0) {
-      if (msg) { msg.className = 'save-msg err'; msg.textContent = '请填写大于 0 的充值金额。' }
-      return
-    }
-    if (msg) { msg.className = 'save-msg'; msg.textContent = '正在创建易支付订单…' }
-    const r = await api('/api/official/recharge', {
+    if (msg) { msg.className = 'save-msg'; msg.textContent = '正在保存并申请密钥…' }
+    await saveProviders()
+    const r = await api('/api/official/register', {
       method: 'POST',
-      body: { amount: amt, providerKey: p.key },
+      body: { providerKey: p.key, displayName: p.name },
     })
-    if (r.ok && r.paymentUrl) {
-      if (msg) { msg.className = 'save-msg ok'; msg.textContent = `订单 ${r.orderId || ''} 已创建，正在打开支付页。` }
-      window.open(r.paymentUrl, '_blank', 'noopener')
-    } else if (r.ok) {
-      if (msg) { msg.className = 'save-msg ok'; msg.textContent = `订单已创建：${r.orderId || ''}（未返回支付链接）` }
+    if (r.ok) {
+      if (msg) { msg.className = 'save-msg ok'; msg.textContent = r.msg || '官方密钥已保存，可拉取模型列表。' }
+      await loadProviders()
     } else {
-      if (msg) { msg.className = 'save-msg err'; msg.textContent = '充值失败：' + (r.msg || '未知错误') }
+      if (msg) { msg.className = 'save-msg err'; msg.textContent = '注册失败：' + (r.msg || '未知错误') }
     }
   }
 
@@ -1383,6 +1369,10 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     }
     const card = $$('#providersList .provider-card')[idx]
     const isOfficial = p.kind === 'official'
+    if (isOfficial && !p.keyReady) {
+      if (box) box.innerHTML = '<span class="hint">请先点「注册获取密钥」，密钥由合作方签发后再拉取模型。</span>'
+      return
+    }
     const apiBase = isOfficial ? '' : (card?.querySelector(`[data-field="apiBase"]`)?.value?.trim() || p.apiBase)
     const apiKeyRaw = isOfficial ? '' : (card?.querySelector(`[data-field="apiKey"]`)?.value?.trim())
     const apiKey = apiKeyRaw || p.apiKey

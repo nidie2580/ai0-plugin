@@ -1,33 +1,19 @@
-# 官方 API 充值（易支付）
+# 官方 API 与非强制收费
 
-插件功能（对话、点歌、模型切换、生图）不因付费状态被拦截。后台已无「付费配置」页。
+插件功能（对话、点歌、模型切换、生图）不因付费状态被拦截。后台已无「付费配置」页。网页「多API平台」官方卡片不再提供易支付充值。充值与扣费由合作方网页处理（可在其后台关联 QQ / 用户）。
 
-易支付只用于给「多API平台」里的官方 API 条目充值。官方 API 与自定义平台可同时存在多条，用「使用此平台」切换。
+官方 API 与自定义平台可同时存在多条，用「使用此平台」切换。
 
 ## 官方 API
 
 - 地址由服务端内置，网页后台与 `/api/config` 不返回 apiBase
 - 配置字段：`model.<key>.kind: official`
 - 添加入口：网页后台「多API平台」→「添加官方 API」
-- 官方卡片只保留拉取模型列表与易支付充值
+- 官方卡片：先「注册获取密钥」（合作方签发，本页不显示明文），再「拉取模型列表」
+- 密钥注册约定见 `docs/OFFICIAL_API_REGISTER.md`（给合作方 Python 后端）
 - 不添加则不会自动成为默认平台
-
-## 易支付商户
-
-在 `config/payment_config.yaml` 填写商户信息：
-
-```yaml
-payment:
-  platformUrl: "https://pay.example.com/api"
-  merchantId: "your_merchant_id"
-  privateKey: "your_private_key"
-```
 
 ## 接口
 
 - `GET /api/official/meta` — 官方显示名与提示（不含地址）
-- `POST /api/official/recharge` — 对官方条目创建易支付订单（需登录）
-- `GET /api/official/recharges` — 最近充值记录
-- `POST /api/payment/callback` — 易支付回调
-
-充值流水落在 `data/official_recharge.json`。回调成功只记账，不锁定任何功能。
+- `POST /api/official/register` — 向合作方中转注册并落盘 Key（响应不含明文 Key）
