@@ -16,6 +16,11 @@ import {
   parseOfficialRegisterResponse,
   officialRegisterErrorForClient,
   officialRegisterUrl,
+  officialAssociateUrl,
+  buildOfficialAssociatePayload,
+  parseOfficialAssociateResponse,
+  sanitizeOfficialUsername,
+  sanitizeOfficialQq,
   OFFICIAL_API_BASE,
 } from '../../src/officialApi.js'
 
@@ -95,12 +100,15 @@ describe('officialApi', () => {
     assert.equal(payload.pluginVersion, '1.2.0')
     assert.equal(payload.plugin_version, '1.2.0')
     assert.equal(payload.operator_id, '10001')
+    assert.equal(payload.qq, '10001')
   })
 
   it('解析合作方签发响应：snake_case / camelCase / data 嵌套', () => {
     assert.equal(parseOfficialRegisterResponse(200, { ok: true, api_key: 'sk-py' }).apiKey, 'sk-py')
     assert.equal(parseOfficialRegisterResponse(201, { success: true, apiKey: 'sk-js' }).apiKey, 'sk-js')
     assert.equal(parseOfficialRegisterResponse(200, { ok: true, data: { api_key: 'sk-nest' } }).apiKey, 'sk-nest')
+    assert.equal(parseOfficialRegisterResponse(200, { ok: true, api_key: 'sk-u', username: 'alice' }).username, 'alice')
+    assert.equal(parseOfficialRegisterResponse(200, { ok: true, api_key: 'sk-u', user_name: 'bob' }).username, 'bob')
     const fail = parseOfficialRegisterResponse(429, { ok: false, message: 'too many' })
     assert.equal(fail.ok, false)
     assert.equal(fail.code, 'RATE_LIMITED')
@@ -112,5 +120,25 @@ describe('officialApi', () => {
     const msg = officialRegisterErrorForClient(new Error(`connect ${OFFICIAL_API_BASE} ECONNREFUSED`))
     assert.equal(msg.includes('djyun'), false)
     assert.equal(msg, '官方服务暂不可达')
+  })
+
+  it('关联请求体带用户名与 QQ，解析回包 username', () => {
+    assert.equal(sanitizeOfficialUsername('alice_01'), 'alice_01')
+    assert.equal(sanitizeOfficialUsername('bad name'), '')
+    assert.equal(sanitizeOfficialQq('10001'), '10001')
+    assert.equal(sanitizeOfficialQq('master-magic'), '')
+    const payload = buildOfficialAssociatePayload({
+      instanceId: 'abc123',
+      providerKey: 'official',
+      username: 'alice',
+      operatorId: '10001',
+      pluginVersion: '1.2.0',
+    })
+    assert.equal(payload.username, 'alice')
+    assert.equal(payload.user_name, 'alice')
+    assert.equal(payload.qq, '10001')
+    assert.match(officialAssociateUrl(), /\/plugin\/associate$/)
+    assert.equal(parseOfficialAssociateResponse(200, { ok: true, username: 'alice' }).ok, true)
+    assert.equal(parseOfficialAssociateResponse(404, { ok: false, message: 'no user' }).code, 'USER_NOT_FOUND')
   })
 })

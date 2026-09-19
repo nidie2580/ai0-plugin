@@ -111,6 +111,14 @@ describe('auth: magic link', () => {
     const r = verifyMagicLink(token, '127.0.0.1')
     assert.equal(r.ok, true)
     assert.equal(r.boundIp, '127.0.0.1')
+    assert.equal(r.identity, null)
+  })
+
+  test('直链写入请求者 QQ，校验后带回 identity', () => {
+    const token = generateMagicLink('198635967')
+    const r = verifyMagicLink(token, '127.0.0.1')
+    assert.equal(r.ok, true)
+    assert.equal(r.identity, '198635967')
   })
 
   test('IP 绑定：首次访问绑定，不同 IP 被拒（原子消费）', () => {

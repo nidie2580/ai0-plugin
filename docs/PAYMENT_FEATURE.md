@@ -9,11 +9,12 @@
 - 地址由服务端内置，网页后台与 `/api/config` 不返回 apiBase
 - 配置字段：`model.<key>.kind: official`
 - 添加入口：网页后台「多API平台」→「添加官方 API」
-- 官方卡片：先「注册获取密钥」（合作方签发，本页不显示明文），再「拉取模型列表」
+- 官方卡片：先「注册获取密钥」（合作方签发，本页不显示明文），再确认平台用户名并关联当前 QQ，然后「拉取模型列表」
 - 密钥注册约定见 `docs/OFFICIAL_API_REGISTER.md`（给合作方 Python 后端）
 - 不添加则不会自动成为默认平台
 
 ## 接口
 
 - `GET /api/official/meta` — 官方显示名与提示（不含地址）
-- `POST /api/official/register` — 向合作方中转注册并落盘 Key（响应不含明文 Key）
+- `POST /api/official/register` — 向合作方中转注册并落盘 Key（响应不含明文 Key，可含 username）
+- `POST /api/official/associate` — 把平台用户名与当前登录 QQ 发给合作方做关联

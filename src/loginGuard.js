@@ -42,12 +42,19 @@ export function setPrimaryIdentity(identity) {
   if (primaryIdentity == null) primaryIdentity = String(identity)
 }
 
-/** 已有主身份时，把 magic link 登录视为该主人本人（直链仅主人可生成） */
+export function isPlaceholderLoginIdentity(identity) {
+  const s = String(identity || '').trim()
+  return !s || s === 'master-magic' || s === 'unknown'
+}
+
+/** 直链登录：会话身份优先用请求者 QQ；占位主身份（master-magic）可被真实 QQ 升级。 */
 export function adoptPrimaryForMasterLogin(identityHint = 'master-magic') {
-  if (primaryIdentity == null) {
-    primaryIdentity = String(identityHint || 'master-magic')
+  const hint = String(identityHint || '').trim()
+  const usable = isPlaceholderLoginIdentity(hint) ? null : hint
+  if (primaryIdentity == null || isPlaceholderLoginIdentity(primaryIdentity)) {
+    primaryIdentity = usable || (primaryIdentity == null ? 'master-magic' : primaryIdentity)
   }
-  return primaryIdentity
+  return usable || primaryIdentity
 }
 
 export function getPrimaryIdentity() {

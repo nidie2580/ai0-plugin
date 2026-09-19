@@ -18,7 +18,7 @@ import { isAllowedOutboundUrl } from './security.js'
 import { safeLogger } from './globals.js'
 import * as loginGuard from './loginGuard.js'
 import { getOfficialMeta, isOfficialKind, normalizeProviderKind, forceOfficialApiBase, omitOfficialSecrets, omitOfficialProbeUrl, redactOfficialText } from './officialApi.js'
-import { registerOfficialKey } from './officialRegister.js'
+import { registerOfficialKey, associateOfficialAccount } from './officialRegister.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -525,8 +525,8 @@ export function createApp() {
       return res.send('链接无效或已过期')
     }
     // verifyMagicLink 已原子标记为已消费；若 session 发放失败则回滚
-    // 直链仅主人可生成：登录绑定/沿用 primaryIdentity，避免无身份会话绕过守卫
-    const identity = loginGuard.adoptPrimaryForMasterLogin('master-magic')
+    // 直链仅主人可生成：会话身份用请求者 QQ（写入 magic link），避免落到 master-magic
+    const identity = loginGuard.adoptPrimaryForMasterLogin(r.identity || 'master-magic')
     let session
     try {
       session = auth.issueSession(req.clientIp, identity)
@@ -1363,6 +1363,9 @@ export function createApp() {
           ok: true,
           providerKey: result.providerKey,
           keyReady: true,
+          username: result.username || '',
+          operatorId: result.operatorId || '',
+          needAssociate: !!result.needAssociate || !result.username,
           msg: result.msg,
         })
       }
@@ -1370,6 +1373,30 @@ export function createApp() {
     } catch (err) {
       safeLogger.error(`[ai0-plugin] 官方 API 注册失败: ${redactOfficialText(err.message)}`)
       res.json({ ok: false, msg: '官方密钥签发失败' })
+    }
+  })
+
+  app.post('/api/official/associate', requireAuth, requireCsrf, requireApiRate('official-associate', 8, 60_000), async (req, res) => {
+    try {
+      const { providerKey, username } = req.body || {}
+      const result = await associateOfficialAccount({
+        providerKey,
+        username,
+        operatorId: getWebIdentity(req),
+      })
+      if (result.ok) {
+        return res.json({
+          ok: true,
+          providerKey: result.providerKey,
+          username: result.username || '',
+          operatorId: result.operatorId || '',
+          msg: result.msg,
+        })
+      }
+      res.json({ ok: false, msg: result.msg || '关联官方账号失败', code: result.code })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 官方账号关联失败: ${redactOfficialText(err.message)}`)
+      res.json({ ok: false, msg: '关联官方账号失败' })
     }
   })
 

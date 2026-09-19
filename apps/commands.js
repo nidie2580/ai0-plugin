@@ -487,7 +487,7 @@ export class AICommands extends plugin {
       return e.reply(`❌ ${err.message}`)
     }
 
-    const token = auth.generateMagicLink()
+    const token = auth.generateMagicLink(userId)
     const baseForMagic = (info.publicUrls && info.publicUrls.length) ? info.publicUrls[0] : info.url
     const url = `${baseForMagic}/magic/${token}`
     // 检测 HTTP 明文场景：对外监听且未走 HTTPS → magic link token 会在网络中明文传输

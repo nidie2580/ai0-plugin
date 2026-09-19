@@ -13,10 +13,15 @@ import {
   forceOfficialApiBase,
   isOfficialKind,
   officialRegisterUrl,
+  officialAssociateUrl,
   buildOfficialRegisterPayload,
+  buildOfficialAssociatePayload,
   parseOfficialRegisterResponse,
+  parseOfficialAssociateResponse,
   officialRegisterErrorForClient,
   redactOfficialText,
+  sanitizeOfficialUsername,
+  sanitizeOfficialQq,
 } from './officialApi.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -116,6 +121,61 @@ export async function registerOfficialKey({ providerKey, displayName, operatorId
     ok: true,
     providerKey: key,
     keyReady: true,
-    msg: '官方密钥已签发并保存，可拉取模型列表',
+    username: parsed.username || '',
+    operatorId: sanitizeOfficialQq(operatorId),
+    needAssociate: !parsed.username,
+    msg: parsed.username
+      ? `官方密钥已签发并保存。平台用户名：${parsed.username}`
+      : '官方密钥已签发并保存。请填写该平台用户名并关联 QQ',
+  }
+}
+
+export async function associateOfficialAccount({ providerKey, username, operatorId } = {}, deps = {}) {
+  const request = typeof deps.request === 'function' ? deps.request : safeAxiosRequest
+  const loadConfig = typeof deps.loadConfig === 'function' ? deps.loadConfig : cfg.loadConfig
+  const instanceId = typeof deps.getInstanceId === 'function' ? deps.getInstanceId() : getOrCreateInstanceId()
+  const user = sanitizeOfficialUsername(username)
+  if (!user) return { ok: false, msg: '请填写有效的平台用户名（1–64 字，勿含空格或尖括号）' }
+  const qq = sanitizeOfficialQq(operatorId)
+  if (!qq) return { ok: false, msg: '当前登录未绑定有效 QQ，请用主人 QQ 发 #ai网页管理 重新打开直链后再关联' }
+  const key = String(providerKey || '').trim()
+  if (!key) return { ok: false, msg: '缺少官方平台 key' }
+  const config = loadConfig() || {}
+  const entry = config.model?.[key]
+  if (!entry || typeof entry !== 'object' || !isOfficialKind(entry.kind)) {
+    return { ok: false, msg: '该平台不是官方 API' }
+  }
+
+  const payload = buildOfficialAssociatePayload({
+    instanceId,
+    providerKey: key,
+    username: user,
+    operatorId: qq,
+    pluginVersion: readPluginVersion(),
+  })
+  let resp
+  try {
+    resp = await request('post', officialAssociateUrl(), payload, {
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      timeout: 20000,
+    })
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 官方账号关联请求失败: ${redactOfficialText(err?.message || err)}`)
+    return { ok: false, msg: officialRegisterErrorForClient(err) }
+  }
+  const parsed = parseOfficialAssociateResponse(resp?.status, resp?.data)
+  if (!parsed.ok) {
+    safeLogger.warn(`[ai0-plugin] 官方账号关联被拒绝: ${parsed.code || ''} ${parsed.message}`)
+    return { ok: false, msg: parsed.message || '关联官方账号失败', code: parsed.code }
+  }
+  return {
+    ok: true,
+    providerKey: key,
+    username: parsed.username || user,
+    operatorId: qq,
+    msg: `已将平台用户「${parsed.username || user}」与 QQ ${qq} 关联`,
   }
 }

@@ -6,6 +6,7 @@ import {
   getPrimaryIdentity,
   isPrimary,
   hasPrimary,
+  isPlaceholderLoginIdentity,
   createPending,
   approve,
   isApproved,
@@ -26,12 +27,25 @@ describe('loginGuard: magic link 绑定 primary', () => {
     assert.equal(isPrimary('other-qq'), false)
   })
 
-  test('已有主身份时 magic 登录沿用该身份', () => {
-    const seed = getPrimaryIdentity() || adoptPrimaryForMasterLogin('seed-primary')
-    const adopted = adoptPrimaryForMasterLogin('should-not-replace')
-    assert.equal(adopted, seed)
-    assert.equal(getPrimaryIdentity(), seed)
-    assert.equal(isPrimary(adopted), true)
+  test('已有真实主身份时不覆盖 primary，会话仍用请求者 QQ', () => {
+    const seed = getPrimaryIdentity() || adoptPrimaryForMasterLogin('10001')
+    const adopted = adoptPrimaryForMasterLogin('20002')
+    assert.equal(adopted, '20002')
+    if (!isPlaceholderLoginIdentity(seed)) {
+      assert.equal(getPrimaryIdentity(), seed)
+    }
+  })
+
+  test('占位主身份可被真实 QQ 升级', () => {
+    if (hasPrimary() && !isPlaceholderLoginIdentity(getPrimaryIdentity())) {
+      const adopted = adoptPrimaryForMasterLogin('198635967')
+      assert.equal(adopted, '198635967')
+      return
+    }
+    adoptPrimaryForMasterLogin('master-magic')
+    const id = adoptPrimaryForMasterLogin('198635967')
+    assert.equal(id, '198635967')
+    assert.equal(getPrimaryIdentity(), '198635967')
   })
 })
 

@@ -42,16 +42,18 @@
 | `instance_id` / `instanceId` | 是 | 该部署的稳定 ID，同一台机器人重复注册应返回同一把 Key |
 | `provider_key` / `providerKey` | 是 | 插件内平台 key，如 `official`、`official-2` |
 | `display_name` / `displayName` | 否 | 展示名 |
-| `operator_id` / `operatorId` | 否 | 后台操作者 QQ；未绑定则省略 |
+| `operator_id` / `operatorId` | 否 | 后台操作者 QQ；未绑定或占位身份（如 `master-magic`）则省略 |
+| `qq` | 否 | 与 `operator_id` 相同，仅当其是合法 QQ 号时带上 |
 
 ## 成功响应
 
-HTTP `200` 或 `201`。必须给出非空 `api_key`（或 `apiKey` / `data.api_key`）。
+HTTP `200` 或 `201`。必须给出非空 `api_key`（或 `apiKey` / `data.api_key`）。**请同时返回平台用户名**（`username` / `user_name` / `userName` / `account` 任一即可）。插件会把用户名展示给管理员做 QQ 关联；不返回时管理员须手动填写。
 
 ```json
 {
   "ok": true,
   "api_key": "sk-合作方签发的密钥",
+  "username": "该平台上的用户名",
   "key_id": "可选，合作方内部 ID",
   "expires_at": null
 }
@@ -93,6 +95,46 @@ HTTP 4xx/5xx，或 `200` 但 `ok/success` 为 false，且没有可用 `api_key`�
 
 `message` 会出现在插件后台。不要写密钥、不要写完整 URL。
 
+## 关联 QQ（本次需要合作方新增）
+
+注册成功后，插件会弹窗让管理员确认平台用户名，再把 **用户名 + 请求者 QQ** 发给你们。请新增：
+
+- Method: `POST`
+- Path: `/v1/plugin/associate`
+- 完整 URL: `https://api.djyun.click/v1/plugin/associate`
+- Content-Type: `application/json; charset=utf-8`
+- 超时：插件侧 20 秒
+
+请求体（同样双写 camelCase / snake_case）：
+
+```json
+{
+  "plugin": "ai0-plugin",
+  "pluginVersion": "1.2.0",
+  "plugin_version": "1.2.0",
+  "instanceId": "32位小写hex",
+  "instance_id": "32位小写hex",
+  "providerKey": "official",
+  "provider_key": "official",
+  "username": "alice",
+  "user_name": "alice",
+  "operatorId": "123456789",
+  "operator_id": "123456789",
+  "qq": "123456789"
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `username` / `user_name` | 是 | 该用户在你们平台上的用户名 |
+| `qq` / `operator_id` | 是 | 插件主人 QQ，用来把扣费/余额记到这个人而不是匿名实例 |
+
+成功：HTTP `200`，例如 `{ "ok": true, "username": "alice", "associated": true }`。
+
+请把该 QQ 绑定到 `username` 对应账号。同一 `instance_id` + `provider_key` + `username` + `qq` 重复调用应幂等成功。
+
+失败建议 `code`：`INVALID_REQUEST` / `USER_NOT_FOUND` / `UNAUTHORIZED` / `RATE_LIMITED` / `ASSOCIATE_FAILED`。
+
 ## 对话 API（注册成功之后）
 
 签发出的 Key 用于 OpenAI 兼容调用：
@@ -119,6 +161,7 @@ app = FastAPI()
 
 # 示例：内存幂等表。生产请换成数据库。
 ISSUED = {}  # (instance_id, provider_key) -> api_key
+USERS = {}   # username -> {qq, instance_id}
 
 
 class RegisterIn(BaseModel):
@@ -130,6 +173,7 @@ class RegisterIn(BaseModel):
     provider_key: str = Field(alias="providerKey")
     display_name: Optional[str] = Field(default=None, alias="displayName")
     operator_id: Optional[str] = Field(default=None, alias="operatorId")
+    qq: Optional[str] = None
 
 
 class RegisterOut(BaseModel):
@@ -137,6 +181,7 @@ class RegisterOut(BaseModel):
 
     ok: bool = True
     api_key: str = Field(serialization_alias="api_key")
+    username: Optional[str] = None
     key_id: Optional[str] = None
     expires_at: Optional[str] = None
 
@@ -165,12 +210,38 @@ def register(body: RegisterIn):
         api_key = issue_key(body.instance_id, body.provider_key)
         ISSUED[slot] = api_key
 
+    username = f"plugin-{body.instance_id[:8]}"
     return {
         "ok": True,
         "api_key": api_key,
+        "username": username,
         "key_id": f"{body.instance_id}:{body.provider_key}",
         "expires_at": None,
     }
+
+
+class AssociateIn(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    plugin: str
+    plugin_version: str = Field(default="", alias="pluginVersion")
+    instance_id: str = Field(alias="instanceId")
+    provider_key: str = Field(alias="providerKey")
+    username: str = Field(alias="user_name")
+    operator_id: Optional[str] = Field(default=None, alias="operatorId")
+    qq: Optional[str] = None
+
+
+@app.post("/v1/plugin/associate")
+def associate(body: AssociateIn):
+    qq = (body.qq or body.operator_id or "").strip()
+    if body.plugin != "ai0-plugin" or not body.username or not qq:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "code": "INVALID_REQUEST", "message": "缺少 username 或 qq"},
+        )
+    USERS[body.username] = {"qq": qq, "instance_id": body.instance_id}
+    return {"ok": True, "username": body.username, "associated": True}
 
 
 @app.get("/v1/models")
@@ -181,12 +252,12 @@ def models():
 
 Flask 等价路径：`@app.post("/v1/plugin/register")`，`request.get_json(silent=True)` 后读 `api_key` 或 `apiKey`。
 
-## 插件侧行为（合作方无需改）
+## 插件侧行为
 
-1. 管理员登录网页后台 → 多 API 平台 →「添加官方 API」→「注册获取密钥」
-2. 插件 `POST /api/official/register`（需登录 + CSRF）
-3. 插件服务端请求本约定的合作方接口
-4. 成功则把 Key 写入本地配置，接口只回 `{ ok, providerKey, keyReady, msg }`
+1. 主人用自己的 QQ 发 `#ai网页管理`，直链登录会话绑定该 QQ
+2. 网页后台 → 多 API 平台 →「添加官方 API」→「注册获取密钥」
+3. 插件 `POST /api/official/register`，把 Key 落盘；响应含 `username`（若合作方返回）
+4. 弹窗确认平台用户名 → 插件 `POST /api/official/associate` → 合作方 `/v1/plugin/associate`
 5. 之后「拉取模型列表」才带 Key 打 `/v1/models`
 
 失败时后台只显示脱敏后的 `message`，不会出现官方域名。

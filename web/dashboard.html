@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI0-Plugin · 控制台</title>
-<link rel="stylesheet" href="/assets/app.css?v=20260919d" />
+<link rel="stylesheet" href="/assets/app.css?v=20260919e" />
 </head>
 <body>
 <header class="topbar">
@@ -171,7 +171,7 @@
   <section id="view-providers" class="view">
     <div class="card">
       <h2>🔌 多API平台管理 <span class="tag" id="provTag">加载中…</span></h2>
-      <p class="hint">官方 API 与自定义平台可同时存在多条，用「使用此平台」切换当前对话所用服务。官方条目不展示地址与密钥。先点「注册获取密钥」（合作方签发，本页不显示），再「拉取模型列表」。充值与扣费由合作方网页处理。点歌/对话不因未付费被拦截。保存后即可在 <code>#切换模型</code> 中按 <b>平台编号.模型编号</b> 切换。</p>
+      <p class="hint">官方 API 与自定义平台可同时存在多条，用「使用此平台」切换当前对话所用服务。官方条目不展示地址与密钥。先点「注册获取密钥」（合作方签发，本页不显示），成功后确认平台用户名并关联当前 QQ，再「拉取模型列表」。请用主人 QQ 发 <code>#ai网页管理</code> 打开直链，以便把请求者 QQ 带进登录会话。点歌/对话不因未付费被拦截。保存后即可在 <code>#切换模型</code> 中按 <b>平台编号.模型编号</b> 切换。</p>
 
       <div class="row space-between">
         <div>
@@ -340,6 +340,23 @@
 </main>
 
 <!-- 登录守卫锁定遮罩：检测到异身份登录时冻结控制台 -->
+<div id="officialAssociateDlg" class="guard-lock hidden" role="dialog" aria-modal="true" aria-labelledby="officialAssociateTitle">
+  <div class="guard-lock-card official-associate-card">
+    <h2 id="officialAssociateTitle">关联官方平台账号</h2>
+    <p class="hint">把当前登录 QQ 关联到合作方平台上的用户名。若注册回包未带用户名，请手动填写你在该平台已注册的用户名。</p>
+    <p class="hint" id="officialAssociateQq">当前登录 QQ：未绑定</p>
+    <label>平台用户名
+      <input id="officialAssociateUser" maxlength="64" placeholder="该 API 平台上的用户名" autocomplete="off" />
+    </label>
+    <p class="hint" id="officialAssociateHint"></p>
+    <div class="actions official-associate-actions">
+      <button class="btn primary" id="officialAssociateOk">关联</button>
+      <button class="btn ghost" id="officialAssociateSkip">稍后</button>
+    </div>
+    <span id="officialAssociateMsg" class="save-msg"></span>
+  </div>
+</div>
+
 <div id="guardLock" class="guard-lock hidden">
   <div class="guard-lock-card">
     <div class="guard-lock-icon">🔐</div>
@@ -351,6 +368,6 @@
   </div>
 </div>
 
-<script src="/assets/app.js?v=20260919d" data-route="dashboard"></script>
+<script src="/assets/app.js?v=20260919e" data-route="dashboard"></script>
 </body>
 </html>

@@ -350,14 +350,16 @@ export function verifyCode(id, code, clientIp = 'unknown') {
   return { ok: true }
 }
 
-export function generateMagicLink() {
+export function generateMagicLink(identity = null) {
   cleanup()
   const token = randomId(40)
+  const id = identity == null ? '' : String(identity).trim()
   MAGIC_LINKS.set(token, {
     expireAt: Date.now() + AUTH_CFG.magicExpireMs,
     used: false,
     createdAt: Date.now(),
     ip: null,
+    identity: id && id !== 'master-magic' && id !== 'unknown' ? id : null,
   })
   return token
 }
@@ -404,7 +406,7 @@ export function verifyMagicLink(token, clientIp = 'unknown') {
   // 原子标记为已消费，消除竞态窗口
   rec.used = true
   equalize()
-  return { ok: true, boundIp: rec.ip }
+  return { ok: true, boundIp: rec.ip, identity: rec.identity || null }
 }
 
 /** 回滚 magic link 消费（session 发放失败时调用） */

@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260919d'
+window.__AI0_BUILD__ = '20260919e'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -1055,7 +1055,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   let officialMeta = {
     displayName: '官方API',
     keyPrefix: 'official',
-    hint: '官方 API 为可选项，地址由服务端管理。请先注册获取密钥，再拉取模型列表。',
+    hint: '官方 API 为可选项，地址由服务端管理。请先注册获取密钥，再确认平台用户名并关联 QQ。',
   }
   // 与后端 API_KEY_PLACEHOLDER 完全一致（/api/config 返回的脱敏占位符）。
   // 任何时候保存：若 apiKey 是空串或占位符，视为"未修改"，发送占位符让后端还原原值。
@@ -1139,6 +1139,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
           <p class="hint">${p.keyReady ? '密钥已就绪（本页不显示明文）。' : '尚未获取密钥，请先注册。'}</p>
           <div class="model-row official-register-row">
             <button class="btn sm" data-act="register" data-idx="${idx}">${p.keyReady ? '重新注册密钥' : '注册获取密钥'}</button>
+            <button class="btn sm" data-act="associate" data-idx="${idx}">关联平台用户名</button>
             <button class="btn sm" data-act="probe" data-idx="${idx}">拉取模型列表</button>
           </div>
           <label>当前模型
@@ -1209,6 +1210,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         else if (act === 'default') setDefaultProvider(idx)
         else if (act === 'probe') probeProvider(idx)
         else if (act === 'register') registerOfficial(idx)
+        else if (act === 'associate') openOfficialAssociate(idx)
       })
     })
 
@@ -1264,6 +1266,61 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     }
   }
 
+  let associateTargetIdx = -1
+
+  function closeOfficialAssociate() {
+    const dlg = $('#officialAssociateDlg')
+    if (dlg) dlg.classList.add('hidden')
+    associateTargetIdx = -1
+  }
+
+  function openOfficialAssociate(idx, preset = {}) {
+    const p = providersList[idx]
+    const dlg = $('#officialAssociateDlg')
+    if (!p || p.kind !== 'official' || !dlg) return
+    associateTargetIdx = idx
+    const qqEl = $('#officialAssociateQq')
+    const userEl = $('#officialAssociateUser')
+    const hintEl = $('#officialAssociateHint')
+    const msgEl = $('#officialAssociateMsg')
+    const qq = String(preset.operatorId || '').trim()
+    if (qqEl) qqEl.textContent = qq ? `当前登录 QQ：${qq}` : '当前登录 QQ：未绑定（请用主人 QQ 发 #ai网页管理 重新打开直链）'
+    if (userEl) userEl.value = String(preset.username || '').trim()
+    if (hintEl) {
+      hintEl.textContent = preset.username
+        ? '注册回包已带平台用户名，确认无误后点关联。'
+        : '请填写你在该 API 平台已注册的用户名，再点关联。'
+    }
+    if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = '' }
+    dlg.classList.remove('hidden')
+    if (userEl) userEl.focus()
+  }
+
+  async function submitOfficialAssociate() {
+    const p = providersList[associateTargetIdx]
+    const msgEl = $('#officialAssociateMsg')
+    const userEl = $('#officialAssociateUser')
+    if (!p || p.kind !== 'official') return
+    const username = String(userEl?.value || '').trim()
+    if (!username) {
+      if (msgEl) { msgEl.className = 'save-msg err'; msgEl.textContent = '请填写平台用户名。' }
+      return
+    }
+    if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = '正在关联…' }
+    const r = await api('/api/official/associate', {
+      method: 'POST',
+      body: { providerKey: p.key, username },
+    })
+    if (r.ok) {
+      if (msgEl) { msgEl.className = 'save-msg ok'; msgEl.textContent = r.msg || '已关联。' }
+      const pageMsg = $('#provMsg')
+      if (pageMsg) { pageMsg.className = 'save-msg ok'; pageMsg.textContent = r.msg || '已关联官方平台用户名。' }
+      closeOfficialAssociate()
+    } else {
+      if (msgEl) { msgEl.className = 'save-msg err'; msgEl.textContent = r.msg || '关联失败' }
+    }
+  }
+
   async function registerOfficial(idx) {
     const p = providersList[idx]
     const msg = $('#provMsg')
@@ -1277,6 +1334,11 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     if (r.ok) {
       if (msg) { msg.className = 'save-msg ok'; msg.textContent = r.msg || '官方密钥已保存，可拉取模型列表。' }
       await loadProviders()
+      const liveIdx = providersList.findIndex((x) => x.key === (r.providerKey || p.key))
+      openOfficialAssociate(liveIdx >= 0 ? liveIdx : idx, {
+        username: r.username || '',
+        operatorId: r.operatorId || '',
+      })
     } else {
       if (msg) { msg.className = 'save-msg err'; msg.textContent = '注册失败：' + (r.msg || '未知错误') }
     }
@@ -1566,6 +1628,11 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       return Number.isNaN(n) ? s : n
     })
   }
+
+  const associateOk = $('#officialAssociateOk')
+  const associateSkip = $('#officialAssociateSkip')
+  if (associateOk) associateOk.addEventListener('click', () => { submitOfficialAssociate() })
+  if (associateSkip) associateSkip.addEventListener('click', () => { closeOfficialAssociate() })
 
   // 初始化（正常路径：块内所有绑定成功 → 最后加载配置并填充表单）
   // 若前面发生未捕获的同步错误，会由文件顶部的全局 window.onerror 弹窗提示并写「初始化失败」，

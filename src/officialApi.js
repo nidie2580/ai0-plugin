@@ -5,6 +5,7 @@ export const OFFICIAL_API_BASE = 'https://api.djyun.click/v1'
 export const OFFICIAL_DISPLAY_NAME = '官方API'
 export const OFFICIAL_KEY_PREFIX = 'official'
 export const OFFICIAL_REGISTER_PATH = '/plugin/register'
+export const OFFICIAL_ASSOCIATE_PATH = '/plugin/associate'
 export const OFFICIAL_PLUGIN_NAME = 'ai0-plugin'
 
 export function isOfficialKind(kind) {
@@ -94,6 +95,25 @@ export function officialRegisterUrl() {
   return `${OFFICIAL_API_BASE}${OFFICIAL_REGISTER_PATH}`
 }
 
+export function officialAssociateUrl() {
+  return `${OFFICIAL_API_BASE}${OFFICIAL_ASSOCIATE_PATH}`
+}
+
+export function sanitizeOfficialUsername(value) {
+  const s = String(value == null ? '' : value).trim()
+  if (!s) return ''
+  if (s.length > 64) return ''
+  if (/[\u0000-\u001f<>]/.test(s)) return ''
+  if (/\s/.test(s)) return ''
+  return s
+}
+
+export function sanitizeOfficialQq(value) {
+  const s = String(value == null ? '' : value).trim()
+  if (!/^[1-9][0-9]{4,11}$/.test(s)) return ''
+  return s
+}
+
 export function buildOfficialRegisterPayload({
   instanceId,
   providerKey,
@@ -107,6 +127,7 @@ export function buildOfficialRegisterPayload({
   const key = String(providerKey || '').trim()
   const name = String(displayName || OFFICIAL_DISPLAY_NAME).trim() || OFFICIAL_DISPLAY_NAME
   const operator = String(operatorId || '').trim()
+  const qq = sanitizeOfficialQq(operator)
   const payload = {
     plugin,
     pluginVersion: version,
@@ -118,7 +139,11 @@ export function buildOfficialRegisterPayload({
     displayName: name,
     display_name: name,
   }
-  if (operator) {
+  if (qq) {
+    payload.operatorId = qq
+    payload.operator_id = qq
+    payload.qq = qq
+  } else if (operator && operator !== 'master-magic' && operator !== 'unknown') {
     payload.operatorId = operator
     payload.operator_id = operator
   }
@@ -136,9 +161,13 @@ export function parseOfficialRegisterResponse(status, data) {
   const explicitFail = body.ok === false || body.success === false
   const httpOk = Number(status) >= 200 && Number(status) < 300
   if (httpOk && apiKey && !explicitFail) {
+    const usernameRaw = pickFirst(body, ['username', 'userName', 'user_name', 'account'])
+      || pickFirst(nested, ['username', 'userName', 'user_name', 'account'])
+      || ''
     return {
       ok: true,
       apiKey,
+      username: sanitizeOfficialUsername(usernameRaw),
       keyId: String(pickFirst(body, ['keyId', 'key_id']) || pickFirst(nested, ['keyId', 'key_id']) || '').trim(),
       expiresAt: pickFirst(body, ['expiresAt', 'expires_at']) || pickFirst(nested, ['expiresAt', 'expires_at']) || null,
     }
@@ -175,6 +204,69 @@ export function getOfficialMeta() {
     connectivityUnconfirmed: true,
     certMayBeInvalid: true,
     hasRegister: true,
-    hint: '官方 API 为可选项，地址由服务端管理，后台不展示。请先点「注册获取密钥」（由合作方签发，本页不显示密钥），成功后再「拉取模型列表」。充值请在合作方网页完成后台关联。',
+    hint: '官方 API 为可选项，地址由服务端管理，后台不展示。请先点「注册获取密钥」（由合作方签发，本页不显示密钥），成功后再确认平台用户名并关联 QQ，然后「拉取模型列表」。充值请在合作方网页处理。',
+  }
+}
+
+export function buildOfficialAssociatePayload({
+  instanceId,
+  providerKey,
+  username,
+  operatorId,
+  pluginVersion,
+} = {}) {
+  const plugin = OFFICIAL_PLUGIN_NAME
+  const version = String(pluginVersion || '').trim()
+  const inst = String(instanceId || '').trim()
+  const key = String(providerKey || '').trim()
+  const user = sanitizeOfficialUsername(username)
+  const operator = sanitizeOfficialQq(operatorId)
+  const payload = {
+    plugin,
+    pluginVersion: version,
+    plugin_version: version,
+    instanceId: inst,
+    instance_id: inst,
+    providerKey: key,
+    provider_key: key,
+    username: user,
+    user_name: user,
+  }
+  if (operator) {
+    payload.operatorId = operator
+    payload.operator_id = operator
+    payload.qq = operator
+  }
+  return payload
+}
+
+export function parseOfficialAssociateResponse(status, data) {
+  const body = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {}
+  const nested = (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) ? body.data : {}
+  const explicitFail = body.ok === false || body.success === false
+  const httpOk = Number(status) >= 200 && Number(status) < 300
+  const usernameRaw = pickFirst(body, ['username', 'userName', 'user_name', 'account'])
+    || pickFirst(nested, ['username', 'userName', 'user_name', 'account'])
+    || ''
+  if (httpOk && !explicitFail) {
+    return {
+      ok: true,
+      username: sanitizeOfficialUsername(usernameRaw),
+      associated: body.associated !== false && nested.associated !== false,
+    }
+  }
+  let code = String(pickFirst(body, ['code', 'errorCode', 'error_code']) || '').trim()
+  if (!code) {
+    if (Number(status) === 429) code = 'RATE_LIMITED'
+    else if (Number(status) === 401 || Number(status) === 403) code = 'UNAUTHORIZED'
+    else if (Number(status) === 404) code = 'USER_NOT_FOUND'
+    else code = 'ASSOCIATE_FAILED'
+  }
+  const rawMsg = pickFirst(body, ['message', 'msg', 'error']) || pickFirst(nested, ['message', 'msg', 'error']) || '关联官方账号失败'
+  return {
+    ok: false,
+    code,
+    message: redactOfficialText(String(rawMsg)),
+    status: Number(status) || 0,
   }
 }

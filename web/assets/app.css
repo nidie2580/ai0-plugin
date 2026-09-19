@@ -782,6 +782,23 @@ input[type="checkbox"] {
 .official-register-row {
   margin: 8px 0 12px;
 }
+.official-associate-card {
+  text-align: left;
+}
+.official-associate-card label {
+  display: block;
+  margin: 12px 0 8px;
+}
+.official-associate-card input {
+  width: 100%;
+  margin-top: 6px;
+}
+.official-associate-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 .provider-head {
   display: flex;
   align-items: center;
