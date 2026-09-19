@@ -17,8 +17,8 @@ import * as multiChatService from './multiChatService.js'
 import { isAllowedOutboundUrl } from './security.js'
 import { safeLogger } from './globals.js'
 import * as loginGuard from './loginGuard.js'
-import { getYiPaymentInstance, PaymentConfig } from './payment.js'
-import { getUserPremiumInstance } from './userPremium.js'
+import { getYiPaymentInstance, PaymentConfig, appendOfficialRecharge, listOfficialRecharges } from './payment.js'
+import { getOfficialMeta, isOfficialKind, normalizeProviderKind, forceOfficialApiBase, omitOfficialApiBase, omitOfficialProbeUrl, redactOfficialText } from './officialApi.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -700,9 +700,14 @@ export function createApp() {
     const safe = JSON.parse(JSON.stringify(c))
     if (safe.model) {
       for (const k of Object.keys(safe.model)) {
-        if (safe.model[k] && typeof safe.model[k] === 'object' && safe.model[k].apiKey) {
-          const key = safe.model[k].apiKey
-          safe.model[k].apiKey = (key && !/^\s*$/.test(key) && !/^\*+$/.test(key)) ? API_KEY_PLACEHOLDER : key
+        if (safe.model[k] && typeof safe.model[k] === 'object') {
+          if (safe.model[k].apiKey) {
+            const key = safe.model[k].apiKey
+            safe.model[k].apiKey = (key && !/^\s*$/.test(key) && !/^\*+$/.test(key)) ? API_KEY_PLACEHOLDER : key
+          }
+          if (isOfficialKind(safe.model[k].kind)) {
+            safe.model[k] = omitOfficialApiBase(safe.model[k])
+          }
         }
       }
     }
@@ -807,7 +812,7 @@ export function createApp() {
     // — P0-2: 模型子键白名单 —
     if (config.model && typeof config.model === 'object') {
       const ALLOWED_MODEL_FIELDS = new Set([
-        'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout', 'vision', 'thinking', 'thinkingTimeout', 'web'
+        'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout', 'vision', 'thinking', 'thinkingTimeout', 'web', 'kind'
       ])
       for (const [key, val] of Object.entries(config.model)) {
         if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
@@ -819,6 +824,8 @@ export function createApp() {
           if (bad.length) {
             return res.json({ ok: false, msg: `模型 "${key}" 含有不允许的字段: ${bad.join(', ')}` })
           }
+          val.kind = normalizeProviderKind(val.kind)
+          if (isOfficialKind(val.kind)) forceOfficialApiBase(val)
         }
       }
     }
@@ -831,6 +838,7 @@ export function createApp() {
           return res.json({ ok: false, msg: `模型配置含有不允许的键: ${key}` })
         }
         if (key === 'default' || !val || typeof val !== 'object') continue
+        if (isOfficialKind(val.kind)) forceOfficialApiBase(val)
         const apiBase = String(val.apiBase || '').trim()
         if (!apiBase) continue
         let normalized
@@ -983,7 +991,9 @@ export function createApp() {
         const oldVal = old.model[lookupKey]?.apiKey
         // 精确比对：仅当值完全匹配占位符时还原（防止误还原包含 **** 的真实 Key）
         // 改名时用 _providerKeyMap 找到旧 key，避免把 ******** 当真实密钥落盘
-        if (typeof newVal === 'string' && newVal === API_KEY_PLACEHOLDER && typeof oldVal === 'string') {
+        const incomingEmpty = typeof newVal !== 'string' || !String(newVal).trim()
+        const keepOfficialKey = isOfficialKind(cleaned.model[k]?.kind) && incomingEmpty && typeof oldVal === 'string'
+        if ((typeof newVal === 'string' && newVal === API_KEY_PLACEHOLDER && typeof oldVal === 'string') || keepOfficialKey) {
           cleaned.model[k].apiKey = oldVal
         }
       }
@@ -1072,7 +1082,9 @@ export function createApp() {
       const t0 = Date.now()
       const info = await llm.listAvailableModels({ modelKey })
       const latencyMs = Date.now() - t0
-      res.json({ ok: true, info: { ...info, latencyMs } })
+      const modelCfg = cfg.loadConfig().model || {}
+      const kind = modelKey ? modelCfg[modelKey]?.kind : modelCfg[modelCfg.default]?.kind
+      res.json({ ok: true, info: { ...omitOfficialProbeUrl({ ...info, latencyMs }, kind) } })
     } catch (e) {
       res.json({ ok: false, msg: e.message || String(e) })
     }
@@ -1090,7 +1102,7 @@ export function createApp() {
         const t0 = Date.now()
         try {
           const info = await llm.listAvailableModels({ modelKey: key })
-          return {
+          const row = {
             key,
             ok: !!info.ok,
             status: info.status,
@@ -1101,6 +1113,7 @@ export function createApp() {
             unsupported: !!info.unsupported,
             error: info.error || null
           }
+          return omitOfficialProbeUrl(row, modelCfg[key]?.kind)
         } catch (e) {
           safeLogger.error(`[ai0-plugin] 模型探测失败(${key}): ${e.message}`)
           return { key, ok: false, models: [], latencyMs: Date.now() - t0, error: '探测失败' }
@@ -1132,10 +1145,12 @@ export function createApp() {
         const m = modelCfg[key] || {}
         const apiBase = String(m.apiBase || '').trim()
         const apiKey = String(m.apiKey || '').trim()
-        const base = { key, name: m.name || m.model || key, model: m.model || '', apiBase }
+        const official = isOfficialKind(m.kind)
+        const base = { key, name: m.name || m.model || key, model: m.model || '', kind: official ? 'official' : 'custom' }
+        if (!official) base.apiBase = apiBase
         // 未配置 apiBase/apiKey → 视为 unconfigured
         if (!apiBase || !apiKey) {
-          return { ...base, configured: false, status: 'unconfigured', latencyMs: null, modelCount: 0, error: '未配置 apiBase 或 apiKey' }
+          return { ...base, configured: false, status: 'unconfigured', latencyMs: null, modelCount: 0, error: official ? '官方 API 尚未就绪' : '未配置 apiBase 或 apiKey' }
         }
         const t0 = Date.now()
         try {
@@ -1144,9 +1159,11 @@ export function createApp() {
           if (info.ok) {
             return { ...base, configured: true, status: 'ok', latencyMs, modelCount: info.count || 0, unsupported: !!info.unsupported, error: null }
           }
-          return { ...base, configured: true, status: 'error', latencyMs, modelCount: 0, error: info.error || `HTTP ${info.status}` }
+          const err = info.error || `HTTP ${info.status}`
+          return { ...base, configured: true, status: 'error', latencyMs, modelCount: 0, error: official ? redactOfficialText(err) : err }
         } catch (e) {
-          return { ...base, configured: true, status: 'error', latencyMs: Date.now() - t0, modelCount: 0, error: e.message || String(e) }
+          const err = e.message || String(e)
+          return { ...base, configured: true, status: 'error', latencyMs: Date.now() - t0, modelCount: 0, error: official ? redactOfficialText(err) : err }
         }
       }))
       const okCount = results.filter((r) => r.status === 'ok').length
@@ -1326,106 +1343,57 @@ export function createApp() {
     }
   })
 
-  // ==================== 付费功能 API ====================
+  app.get('/api/official/meta', requireAuth, (req, res) => {
+    res.json({ ok: true, ...getOfficialMeta() })
+  })
 
-  // 获取付费配置（私钥脱敏）
-  app.get('/api/payment/config', requireAuth, (req, res) => {
+  app.get('/api/official/recharges', requireAuth, (req, res) => {
     try {
-      const paymentConfig = new PaymentConfig()
-      const config = paymentConfig.getPaymentConfig()
-      const safeConfig = { ...(config || {}) }
-      if (safeConfig.privateKey) safeConfig.privateKey = '****'
-      res.json({ ok: true, config: safeConfig })
+      res.json({ ok: true, records: listOfficialRecharges(50) })
     } catch (err) {
-      safeLogger.error(`[ai0-plugin] 获取付费配置失败: ${err.message}`)
-      res.json({ ok: false, msg: '获取付费配置失败' })
+      safeLogger.error(`[ai0-plugin] 读取官方 API 充值记录失败: ${err.message}`)
+      res.json({ ok: false, msg: '读取充值记录失败' })
     }
   })
 
-  // 更新付费配置
-  app.post('/api/payment/config', requireAuth, requireCsrf, (req, res) => {
+  app.post('/api/official/recharge', requireAuth, requireCsrf, requireApiRate('official-recharge', 10, 60_000), async (req, res) => {
     try {
-      const { config } = req.body || {}
-      if (!config || typeof config !== 'object') {
-        return res.json({ ok: false, msg: '配置格式错误' })
-      }
-      const paymentConfig = new PaymentConfig()
-      paymentConfig.updatePaymentConfig(config)
-      res.json({ ok: true, msg: '付费配置已保存' })
-    } catch (err) {
-      safeLogger.error(`[ai0-plugin] 保存付费配置失败: ${err.message}`)
-      res.json({ ok: false, msg: '保存付费配置失败' })
-    }
-  })
-
-  // 获取付费用户列表
-  app.get('/api/payment/users', requireAuth, (req, res) => {
-    try {
-      const premium = getUserPremiumInstance()
-      const userList = premium.getPremiumUserList()
-      const paymentConfig = new PaymentConfig()
-      res.json({ ok: true, enabled: paymentConfig.isPaymentEnabled(), totalUsers: userList.length, users: userList })
-    } catch (err) {
-      safeLogger.error(`[ai0-plugin] 获取付费用户列表失败: ${err.message}`)
-      res.json({ ok: false, msg: '获取付费用户列表失败' })
-    }
-  })
-
-  // 手动添加付费用户
-  app.post('/api/payment/users', requireAuth, requireCsrf, (req, res) => {
-    try {
-      const { userId, days } = req.body || {}
-      const uid = String(userId || '').trim()
-      if (!uid) return res.json({ ok: false, msg: '用户ID不能为空' })
-      const premium = getUserPremiumInstance()
-      const daysNum = Number.isFinite(Number(days)) && Number(days) > 0 ? Number(days) : 30
-      const expiry = new Date(Date.now() + daysNum * 24 * 60 * 60 * 1000)
-      premium.addPremiumUser(uid, {
-        orderId: 'MANUAL_ADD',
-        amount: 0,
-        expiryDate: expiry.toISOString(),
-        paymentTime: new Date().toISOString(),
-        timestamp: Date.now()
-      })
-      res.json({ ok: true, msg: '付费用户已添加' })
-    } catch (err) {
-      safeLogger.error(`[ai0-plugin] 添加付费用户失败: ${err.message}`)
-      res.json({ ok: false, msg: '添加付费用户失败' })
-    }
-  })
-
-  // 移除付费用户
-  app.delete('/api/payment/users/:userId', requireAuth, requireCsrf, (req, res) => {
-    try {
-      const { userId } = req.params
-      if (!userId) return res.json({ ok: false, msg: '用户ID不能为空' })
-      getUserPremiumInstance().removePremiumUser(userId)
-      res.json({ ok: true, msg: '付费用户已移除' })
-    } catch (err) {
-      safeLogger.error(`[ai0-plugin] 移除付费用户失败: ${err.message}`)
-      res.json({ ok: false, msg: '移除付费用户失败' })
-    }
-  })
-
-  // 创建支付订单
-  app.post('/api/payment/create-order', requireAuth, requireCsrf, async (req, res) => {
-    try {
-      const { userId, amount, description } = req.body || {}
-      const uid = String(userId || '').trim()
+      const { amount, providerKey, description } = req.body || {}
       const amt = Number(amount)
-      if (!uid || !Number.isFinite(amt) || amt <= 0) {
-        return res.json({ ok: false, msg: '用户ID和金额不能为空' })
+      const limits = new PaymentConfig().getAmountLimits()
+      if (!Number.isFinite(amt) || amt < limits.min || amt > limits.max) {
+        return res.json({ ok: false, msg: `充值金额须在 ${limits.min} ~ ${limits.max} 元之间` })
       }
+      const key = String(providerKey || '').trim()
+      const modelCfg = cfg.loadConfig().model || {}
+      if (key) {
+        const entry = modelCfg[key]
+        if (!entry || typeof entry !== 'object' || !isOfficialKind(entry.kind)) {
+          return res.json({ ok: false, msg: '只能给官方 API 条目充值' })
+        }
+      }
+      const uid = getWebIdentity(req) || 'web-admin'
       const payment = getYiPaymentInstance()
-      const result = await payment.createOrder(uid, amt, String(description || '订阅付费功能'))
+      const result = await payment.createOrder(
+        uid,
+        amt,
+        String(description || `官方API充值${key ? ' ' + key : ''}`),
+      )
+      appendOfficialRecharge({
+        orderId: result.orderId,
+        userId: uid,
+        amount: amt,
+        providerKey: key,
+        status: 'CREATED',
+        source: 'official-recharge',
+      })
       res.json({ ok: true, ...result })
     } catch (err) {
-      safeLogger.error(`[ai0-plugin] 创建支付订单失败: ${err.message}`)
-      res.json({ ok: false, msg: '创建支付订单失败' })
+      safeLogger.error(`[ai0-plugin] 官方 API 充值下单失败: ${err.message}`)
+      res.json({ ok: false, msg: '创建充值订单失败' })
     }
   })
 
-  // 支付回调（无需登录态）
   app.post('/api/payment/callback', async (req, res) => {
     try {
       const payment = getYiPaymentInstance()

@@ -760,12 +760,39 @@ input[type="checkbox"] {
 .provider-card.default {
   border-color: var(--accent-teal);
 }
+.provider-card.official {
+  border-color: rgba(232, 184, 75, 0.75);
+  background: linear-gradient(180deg, rgba(232, 184, 75, 0.12), rgba(255, 255, 255, 0.06));
+}
+.provider-card.official.default {
+  border-color: var(--accent-teal);
+}
+.official-tag {
+  background: rgba(232, 184, 75, 0.22);
+  color: #f3d48a;
+}
+.official-recharge {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--hairline);
+}
+.official-recharge .hint {
+  margin: 6px 0 0;
+}
 .provider-head {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 12px;
+}
+.provider-key-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: var(--text-80);
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
 }
 .provider-idx {
   font-weight: 700;

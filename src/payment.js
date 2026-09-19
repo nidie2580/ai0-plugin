@@ -7,11 +7,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
+import YAML from 'yaml'
 import { safeAxiosRequest } from './security.js'
-import { loadConfig, saveConfig } from '../config/index.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN_ROOT = path.join(__dirname, '..')
+const PAYMENT_YAML = path.join(PLUGIN_ROOT, 'config', 'payment_config.yaml')
+const RECHARGE_FILE = path.join(PLUGIN_ROOT, 'data', 'official_recharge.json')
 
 // 易支付API配置
 const PAYMENT_CONFIG = {
@@ -157,8 +159,14 @@ export class YiPayment {
         throw new Error(`支付状态异常: ${callbackData.status}`)
       }
 
-      // 处理支付成功
       await this.processPaymentSuccess(callbackData)
+      appendOfficialRecharge({
+        orderId: callbackData.orderId,
+        userId: callbackData.userId,
+        amount: callbackData.amount,
+        status: 'SUCCESS',
+        source: 'yipay-callback',
+      })
 
       return { success: true, message: '支付成功' }
     } catch (err) {
@@ -310,65 +318,100 @@ export class YiPayment {
   getAllPremiumUsers() {
     return new Map(this.premiumUsers)
   }
+
+  isPaymentEnabled() {
+    return false
+  }
 }
 
 /**
  * 支付配置管理
  */
+export function loadPaymentYaml() {
+  try {
+    if (!fs.existsSync(PAYMENT_YAML)) return {}
+    const parsed = YAML.parse(fs.readFileSync(PAYMENT_YAML, 'utf-8')) || {}
+    return parsed.payment && typeof parsed.payment === 'object' ? parsed.payment : {}
+  } catch (_) {
+    return {}
+  }
+}
+
+export function appendOfficialRecharge(entry) {
+  const rec = {
+    id: crypto.randomBytes(8).toString('hex'),
+    at: new Date().toISOString(),
+    orderId: entry?.orderId || '',
+    userId: entry?.userId || '',
+    amount: entry?.amount ?? null,
+    providerKey: entry?.providerKey || '',
+    status: entry?.status || 'SUCCESS',
+    source: entry?.source || 'local',
+  }
+  let list = []
+  try {
+    if (fs.existsSync(RECHARGE_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(RECHARGE_FILE, 'utf-8'))
+      if (Array.isArray(raw)) list = raw
+    }
+  } catch (_) {}
+  list.unshift(rec)
+  if (list.length > 200) list.length = 200
+  const dir = path.dirname(RECHARGE_FILE)
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(RECHARGE_FILE, JSON.stringify(list, null, 2), { encoding: 'utf-8', mode: 0o600 })
+  return rec
+}
+
+export function listOfficialRecharges(limit = 50) {
+  try {
+    if (!fs.existsSync(RECHARGE_FILE)) return []
+    const raw = JSON.parse(fs.readFileSync(RECHARGE_FILE, 'utf-8'))
+    const list = Array.isArray(raw) ? raw : []
+    const n = Number(limit)
+    return Number.isFinite(n) && n > 0 ? list.slice(0, n) : list
+  } catch (_) {
+    return []
+  }
+}
+
 export class PaymentConfig {
   constructor() {
-    this.config = loadConfig()
+    this.config = { payment: loadPaymentYaml() }
   }
 
-  /**
-   * 获取支付配置
-   * @returns {object}
-   */
   getPaymentConfig() {
     return this.config.payment || {}
   }
 
-  /**
-   * 更新支付配置
-   * @param {object} newConfig - 新配置
-   */
-  updatePaymentConfig(newConfig) {
-    this.config.payment = { ...this.config.payment, ...newConfig }
-    saveConfig(this.config)
-  }
-
-  /**
-   * 检查是否启用付费功能
-   * @returns {boolean}
-   */
   isPaymentEnabled() {
-    return this.config.payment?.enabled || false
+    return false
   }
 
-  /**
-   * 获取支付价格配置
-   * @returns {object}
-   */
   getPrices() {
     return this.config.payment?.prices || {}
   }
 
-  /**
-   * 获取功能权限配置
-   * @returns {Array<object>}
-   */
   getFeatures() {
     return this.config.payment?.features || []
   }
+
+  getAmountLimits() {
+    const sec = this.config.payment?.security || {}
+    const min = Number(sec.min_payment_amount)
+    const max = Number(sec.max_payment_amount)
+    return {
+      min: Number.isFinite(min) && min > 0 ? min : 0.01,
+      max: Number.isFinite(max) && max > 0 ? max : 1000,
+    }
+  }
 }
 
-// 导出易支付实例（单例模式）
 let yiPaymentInstance = null
 
 export function getYiPaymentInstance() {
   if (!yiPaymentInstance) {
-    const config = loadConfig().payment || {}
-    yiPaymentInstance = new YiPayment(config)
+    yiPaymentInstance = new YiPayment(loadPaymentYaml())
   }
   return yiPaymentInstance
 }

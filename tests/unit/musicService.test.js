@@ -413,6 +413,15 @@ describe('sendSongsResultRich（语音+点歌卡片图+链接）', () => {
     assert.match(calls[0], /没有找到相关歌曲/)
   })
 
+  it('未付费用户点歌不被拦截', async () => {
+    const { e } = await makeE()
+    e.user_id = 'guest-not-premium'
+    const songs = [{ pageUrl: 'https://music.163.com/#/song?id=1', playUrl: '', title: '晴天', artist: '周杰伦', source: 'netease' }]
+    const res = await music.sendSongsResultRich(e, songs, { source: 'netease' })
+    assert.equal(res.ok, true)
+    assert.notEqual(res.msg, 'premium_required')
+  })
+
   it('M9d：卡片渲染落盘且内容含歌名（自动清理前可读）', async () => {
     const svg = await import('../../src/svgRender.js')
     const p = svg.renderSongCard({ title: '晴天', artist: '周杰伦', album: '叶惠美', durationSec: 269, pageUrl: 'https://music.163.com/#/song?id=1', source: 'netease' }, '小真哥')

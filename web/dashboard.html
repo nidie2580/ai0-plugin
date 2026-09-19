@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI0-Plugin · 控制台</title>
-<link rel="stylesheet" href="/assets/app.css?v=20260918c" />
+<link rel="stylesheet" href="/assets/app.css?v=20260919b" />
 </head>
 <body>
 <header class="topbar">
@@ -16,7 +16,6 @@
     <a class="nav-item active" data-view="home">🏠 首页</a>
     <a class="nav-item" data-view="config">📝 配置</a>
     <a class="nav-item" data-view="providers">🔌 多API平台</a>
-    <a class="nav-item" data-view="payment">💰 付费配置</a>
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="chatlog">💭 模型互聊</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
@@ -172,7 +171,7 @@
   <section id="view-providers" class="view">
     <div class="card">
       <h2>🔌 多API平台管理 <span class="tag" id="provTag">加载中…</span></h2>
-      <p class="hint">添加任意多个 OpenAI 兼容的 API 服务商（如 OpenAI / Kimi / DeepSeek / 智谱 / 自建反代 等），保存后即可在 <code>#切换模型</code> 中按 <b>平台编号.模型编号</b> 切换。API Key 显示为脱敏，未修改时不会被覆盖。</p>
+      <p class="hint">官方 API 与自定义平台可同时存在多条，用「使用此平台」切换当前对话所用服务。官方条目不展示地址与高级参数，点「拉取模型列表」选择模型。官方充值走易支付，点歌/对话不因未付费被拦截。保存后即可在 <code>#切换模型</code> 中按 <b>平台编号.模型编号</b> 切换。</p>
 
       <div class="row space-between">
         <div>
@@ -182,8 +181,9 @@
         </div>
         <div class="actions">
           <button class="btn primary" id="saveProviders">💾 保存全部</button>
-          <button class="btn" id="addProviderBtn">➕ 添加平台</button>
-          <button class="btn" id="probeAllBtn">🔍 探测所有平台</button>
+          <button class="btn" id="addOfficialBtn">添加官方 API</button>
+          <button class="btn" id="addProviderBtn">添加自定义平台</button>
+          <button class="btn" id="probeAllBtn">探测所有平台</button>
           <span id="provMsg" class="save-msg"></span>
         </div>
       </div>
@@ -322,55 +322,6 @@
     </div>
   </section>
 
-  <!-- ==================== 付费配置 ==================== -->
-  <section id="view-payment" class="view">
-    <div class="card">
-      <h2>💰 付费功能配置 <span class="tag" id="paymentTag">加载中…</span></h2>
-      <p class="hint">配置易支付平台集成和付费用户管理功能。启用后点歌等付费功能仅对付费用户开放。</p>
-
-      <div class="grid-2">
-        <label>启用付费功能
-          <select id="payment_enabled"><option value="false">关闭</option><option value="true">开启</option></select>
-        </label>
-        <label>&nbsp;</label>
-        <label>平台地址 <input id="payment_platformUrl" placeholder="https://pay.example.com/api"/></label>
-        <label>商户ID <input id="payment_merchantId" placeholder="your_merchant_id"/></label>
-        <label>商户私钥 <input id="payment_privateKey" placeholder="your_private_key" autocomplete="off"/></label>
-        <label>&nbsp;</label>
-        <label>月度订阅价格(元) <input id="payment_prices_monthly" type="number" step="0.1"/></label>
-        <label>年度订阅价格(元) <input id="payment_prices_yearly" type="number" step="0.1"/></label>
-      </div>
-
-      <hr>
-      <h3>付费功能开关</h3>
-      <div class="feature-config">
-        <label><input type="checkbox" id="payment_feature_song_request"/> 点歌功能</label>
-        <label><input type="checkbox" id="payment_feature_high_quality_audio"/> 高音质音频</label>
-        <label><input type="checkbox" id="payment_feature_lyrics_display"/> 歌词显示</label>
-        <label><input type="checkbox" id="payment_feature_playlist_management"/> 歌单管理</label>
-        <label><input type="checkbox" id="payment_feature_premium_models"/> 付费专属模型</label>
-      </div>
-
-      <div class="actions">
-        <button class="btn primary" id="savePaymentConfig">💾 保存付费配置</button>
-        <span id="paymentSaveMsg" class="save-msg"></span>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>付费用户管理 <span class="tag" id="paymentUsersTag">-</span>
-        <button class="btn sm right" id="refreshPaymentUsers">🔄 刷新</button>
-      </h2>
-      <div class="row space-between">
-        <p class="hint">管理已付费用户列表，支持手动添加/删除用户。</p>
-        <button class="btn primary" id="addPaymentUserBtn">➕ 手动添加用户</button>
-      </div>
-      <div id="paymentUsersList" class="payment-users-list">
-        <p class="empty">加载中…</p>
-      </div>
-    </div>
-  </section>
-
   <!-- ==================== 关于 ==================== -->
   <section id="view-about" class="view">
     <div class="card">
@@ -400,6 +351,6 @@
   </div>
 </div>
 
-<script src="/assets/app.js?v=20260918c" data-route="dashboard"></script>
+<script src="/assets/app.js?v=20260919b" data-route="dashboard"></script>
 </body>
 </html>

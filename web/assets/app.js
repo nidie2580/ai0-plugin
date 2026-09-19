@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260913a'
+window.__AI0_BUILD__ = '20260919b'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -308,7 +308,7 @@ if (route === 'dashboard') {
           <span class="k">延迟</span><span class="v">${m.latencyMs != null ? m.latencyMs + ' ms' : '-'}</span>
           <span class="k">可用</span><span class="v">${m.modelCount != null ? m.modelCount + ' 个' : '-'}</span>
         </div>
-        <div class="home-model-note">${m.error ? escapeHtml(m.error) : (m.status === 'ok' ? '接口可达' : (m.status === 'unconfigured' ? '请填写 API Base / Key' : ''))}</div>
+        <div class="home-model-note">${m.error ? escapeHtml(m.error) : (m.status === 'ok' ? '接口可达' : (m.status === 'unconfigured' ? (m.kind === 'official' ? '请到多API平台拉取模型列表' : '请填写 API Base / Key') : ''))}</div>
         <div class="home-model-action">点击编辑该模型配置 ›</div>
       `
       card.addEventListener('click', () => jumpToProvider(m.key))
@@ -325,15 +325,16 @@ if (route === 'dashboard') {
     const idx = providersList.findIndex(p => p.key === key)
     if (idx >= 0) {
       // 高亮卡片：用输入框反查父卡片
-      const input = $(`#providersList input[data-idx="${idx}"][data-field="key"]`)
-      const cardEl = input?.closest('.provider-card')
+      const keyEl = $(`#providersList [data-idx="${idx}"][data-field="key"]`)
+      const cardEl = keyEl?.closest('.provider-card') || $$('#providersList .provider-card')[idx]
       if (cardEl) {
         $$('.provider-card').forEach(c => c.classList.remove('flash'))
         cardEl.classList.add('flash')
         cardEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        const keyInput = $(`#providersList input[data-idx="${idx}"][data-field="key"]`)
-        keyInput?.focus()
-        keyInput?.select()
+        if (keyEl && keyEl.tagName === 'INPUT') {
+          keyEl.focus()
+          keyEl.select()
+        }
         setTimeout(() => cardEl.classList.remove('flash'), 2500)
       }
     }
@@ -452,7 +453,17 @@ if (route === 'dashboard') {
       t.classList.toggle('active', t.textContent === key)
     })
     const model = currentConfig.model?.[key] || {}
+    const isOfficial = String(model.kind || '').toLowerCase() === 'official'
     const form = $('#modelForm')
+    if (isOfficial) {
+      form.innerHTML = `
+        <label>配置 Key (唯一标识)<input id="m_key" value="${escapeHtml(key)}" readonly/></label>
+        <label>显示名称<input id="m_name" value="${escapeHtml(model.name || '')}"/></label>
+        <label>模型 ID<input id="m_model" value="${escapeHtml(model.model || '')}" placeholder="点「多API平台」拉取模型列表后选择"/></label>
+        <p class="hint">官方 API 的地址与高级参数由服务端管理，本页不展示。请到「多API平台」拉取模型列表。</p>
+      `
+      return
+    }
     form.innerHTML = `
       <label>配置 Key (唯一标识)<input id="m_key" value="${escapeHtml(key)}"/></label>
       <label>显示名称<input id="m_name" value="${escapeHtml(model.name || '')}"/></label>
@@ -477,8 +488,12 @@ if (route === 'dashboard') {
     const oldKey = currentModelKey
     const newKey = $('#m_key').value.trim() || oldKey
     const obj = {}
+    const existing = currentConfig?.model?.[oldKey] || {}
+    const isOfficial = String(existing.kind || '').toLowerCase() === 'official'
     for (const id of ['name', 'apiBase', 'apiKey', 'model']) {
-      const v = document.getElementById('m_' + id)?.value ?? ''
+      const el = document.getElementById('m_' + id)
+      if (!el) continue
+      const v = el.value ?? ''
       if (v) obj[id] = v
     }
     const temperature = parseFloat(document.getElementById('m_temperature')?.value)
@@ -487,10 +502,12 @@ if (route === 'dashboard') {
     if (!Number.isNaN(temperature)) obj.temperature = temperature
     if (!Number.isNaN(maxTokens)) obj.maxTokens = maxTokens
     if (!Number.isNaN(timeout)) obj.timeout = timeout
-    // 布尔开关：读取 select 真假（深度思考已改为全局 response.deepThink，不再按模型单独配置）
-    const boolOf = (id) => document.getElementById('m_' + id)?.value === 'true'
-    obj.vision = boolOf('vision')
-    obj.web = boolOf('web')
+    if (!isOfficial) {
+      const boolOf = (id) => document.getElementById('m_' + id)?.value === 'true'
+      obj.vision = boolOf('vision')
+      obj.web = boolOf('web')
+    }
+    if (isOfficial) obj.kind = 'official'
     return { oldKey, newKey, obj }
   }
 
@@ -1033,8 +1050,13 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
 
   // ---- Multi-API providers ----
   let providersCache = null  // 完整 config 缓存（含 model 字段）
-  let providersList = []     // [{ key, name, apiBase, apiKey, model, temperature, maxTokens, timeout, _origKey }]
+  let providersList = []     // [{ key, name, apiBase, apiKey, model, temperature, maxTokens, timeout, kind, _origKey }]
   let providersDefault = ''
+  let officialMeta = {
+    displayName: '官方API',
+    keyPrefix: 'official',
+    hint: '官方 API 为可选项，地址由服务端管理。',
+  }
   // 与后端 API_KEY_PLACEHOLDER 完全一致（/api/config 返回的脱敏占位符）。
   // 任何时候保存：若 apiKey 是空串或占位符，视为"未修改"，发送占位符让后端还原原值。
   const API_KEY_PLACEHOLDER = '********'
@@ -1051,7 +1073,11 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   }
   {
     const el = $('#addProviderBtn')
-    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', () => addProvider())
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', () => addProvider('custom'))
+  }
+  {
+    const el = $('#addOfficialBtn')
+    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', () => addProvider('official'))
   }
   {
     const el = $('#probeAllBtn')
@@ -1064,6 +1090,10 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const resp = await api('/api/config')
     if (!resp.ok) { $('#provTag').textContent = '加载失败'; return }
     providersCache = resp.config
+    try {
+      const meta = await api('/api/official/meta')
+      if (meta && meta.ok) officialMeta = { ...officialMeta, ...meta }
+    } catch (_) {}
     const modelCfg = resp.config.model || {}
     providersDefault = modelCfg.default || ''
     providersList = []
@@ -1071,9 +1101,11 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       if (k === 'default') continue
       const m = modelCfg[k]
       if (!m || typeof m !== 'object') continue
+      const kind = String(m.kind || '').toLowerCase() === 'official' ? 'official' : 'custom'
       providersList.push({
         _origKey: k,
         key: k,
+        kind,
         name: m.name || '',
         apiBase: m.apiBase || '',
         apiKey: m.apiKey || '',
@@ -1097,30 +1129,58 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     wrap.innerHTML = ''
     providersList.forEach((p, idx) => {
       const isDefault = (p.key === providersDefault)
+      const isOfficial = p.kind === 'official'
       const card = document.createElement('div')
-      card.className = 'provider-card' + (isDefault ? ' default' : '')
-      card.innerHTML = `
-        <div class="provider-head">
-          <span class="provider-idx">#${idx + 1}</span>
-          <input class="provider-key" data-idx="${idx}" data-field="key" value="${escapeHtml(p.key)}" placeholder="平台 key（唯一标识，如 kimi）"/>
-          ${isDefault ? '<span class="tag">默认</span>' : `<button class="btn sm" data-act="default" data-idx="${idx}">设为默认</button>`}
-          <button class="btn sm warn" data-act="del" data-idx="${idx}">删除</button>
-        </div>
-        <div class="provider-body">
+      card.className = 'provider-card' + (isDefault ? ' default' : '') + (isOfficial ? ' official' : '')
+      const kindTag = isOfficial ? '<span class="tag official-tag">官方</span>' : '<span class="tag">自定义</span>'
+      const rechargeRow = isOfficial ? `
+        <div class="official-recharge">
+          <label>给官方 API 充值（元）
+            <div class="model-row">
+              <input data-idx="${idx}" data-field="rechargeAmount" type="number" min="0.01" step="0.01" placeholder="金额"/>
+              <button class="btn sm" data-act="recharge" data-idx="${idx}">易支付充值</button>
+            </div>
+          </label>
+          <p class="hint">易支付到账后由服务端记账。地址与密钥不在此页展示。</p>
+        </div>` : ''
+      const officialBody = `
+          <label>显示名称<input data-idx="${idx}" data-field="name" value="${escapeHtml(p.name)}" placeholder="官方API"/></label>
+          <label>当前模型
+            <div class="model-row">
+              <input data-idx="${idx}" data-field="model" value="${escapeHtml(p.model)}" placeholder="点击右侧拉取" readonly/>
+              <button class="btn sm" data-act="probe" data-idx="${idx}">拉取模型列表</button>
+            </div>
+            <select class="model-select hidden" data-idx="${idx}"></select>
+          </label>
+          <p class="hint">${escapeHtml(officialMeta.hint || '官方地址由服务端管理，本页不展示。')}</p>`
+      const customBody = `
           <label>显示名称<input data-idx="${idx}" data-field="name" value="${escapeHtml(p.name)}" placeholder="如 Kimi"/></label>
           <label>API Base<input data-idx="${idx}" data-field="apiBase" value="${escapeHtml(p.apiBase)}" placeholder="https://api.moonshot.cn/v1"/></label>
           <label>API Key<input data-idx="${idx}" data-field="apiKey" value="${escapeHtml(p.apiKey)}" placeholder="sk-..." autocomplete="off"/></label>
           <label>模型 ID
             <div class="model-row">
               <input data-idx="${idx}" data-field="model" value="${escapeHtml(p.model)}" placeholder="如 kimi-k2.6"/>
-              <button class="btn sm" data-act="probe" data-idx="${idx}">🔍 探测</button>
+              <button class="btn sm" data-act="probe" data-idx="${idx}">探测</button>
             </div>
             <select class="model-select hidden" data-idx="${idx}"></select>
           </label>
           <label>温度<input data-idx="${idx}" data-field="temperature" type="number" step="0.1" min="0" max="2" value="${p.temperature}"/></label>
           <label>Max Tokens<input data-idx="${idx}" data-field="maxTokens" type="number" min="1" value="${p.maxTokens}"/></label>
-          <label>超时(ms)<input data-idx="${idx}" data-field="timeout" type="number" min="1000" value="${p.timeout}"/></label>
+          <label>超时(ms)<input data-idx="${idx}" data-field="timeout" type="number" min="1000" value="${p.timeout}"/></label>`
+      card.innerHTML = `
+        <div class="provider-head">
+          <span class="provider-idx">#${idx + 1}</span>
+          ${kindTag}
+          ${isOfficial
+            ? `<span class="provider-key-label" data-idx="${idx}" data-field="key">${escapeHtml(p.key)}</span>`
+            : `<input class="provider-key" data-idx="${idx}" data-field="key" value="${escapeHtml(p.key)}" placeholder="平台 key（唯一标识，如 kimi）"/>`}
+          ${isDefault ? '<span class="tag">当前使用</span>' : `<button class="btn sm" data-act="default" data-idx="${idx}">使用此平台</button>`}
+          <button class="btn sm warn" data-act="del" data-idx="${idx}">删除</button>
         </div>
+        <div class="provider-body">
+          ${isOfficial ? officialBody : customBody}
+        </div>
+        ${rechargeRow}
         <div class="provider-probe hidden" data-idx="${idx}"></div>
       `
       wrap.appendChild(card)
@@ -1154,6 +1214,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         if (act === 'del') removeProvider(idx)
         else if (act === 'default') setDefaultProvider(idx)
         else if (act === 'probe') probeProvider(idx)
+        else if (act === 'recharge') rechargeOfficial(idx)
       })
     })
 
@@ -1169,20 +1230,26 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     })
   }
 
-  function addProvider() {
-    // 生成不重复的 key
-    let base = 'new-provider'
-    let n = 1
+  function allocateKey(base) {
     const existing = new Set(providersList.map(p => p.key))
-    let key = base
+    if (!existing.has(base)) return base
+    let n = 2
+    let key = `${base}-${n}`
     while (existing.has(key)) {
       n++
       key = `${base}-${n}`
     }
+    return key
+  }
+
+  function addProvider(kind = 'custom') {
+    const isOfficial = kind === 'official'
+    const key = allocateKey(isOfficial ? (officialMeta.keyPrefix || 'official') : 'new-provider')
     providersList.push({
       _origKey: key,
       key,
-      name: '',
+      kind: isOfficial ? 'official' : 'custom',
+      name: isOfficial ? (officialMeta.displayName || '官方API') : '',
       apiBase: '',
       apiKey: '',
       model: '',
@@ -1191,10 +1258,42 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       timeout: 60000
     })
     if (!providersDefault) providersDefault = key
+    $('#prov_default').value = providersDefault
     $('#provTag').textContent = `${providersList.length} 个平台`
     renderProviders()
     const msg = $('#provMsg')
-    if (msg) { msg.className = 'save-msg'; msg.textContent = `已新增平台「${key}」，记得填写 API Base / Key 后点击「保存全部」。` }
+    if (msg) {
+      msg.className = 'save-msg'
+      msg.textContent = isOfficial
+        ? `已加入官方 API「${key}」。地址由服务端管理；点「拉取模型列表」获取可用模型。`
+        : `已新增自定义平台「${key}」，记得填写 API Base / Key 后点击「保存全部」。`
+    }
+  }
+
+  async function rechargeOfficial(idx) {
+    const p = providersList[idx]
+    const msg = $('#provMsg')
+    if (!p || p.kind !== 'official') return
+    const card = $$('#providersList .provider-card')[idx]
+    const amtRaw = card?.querySelector(`[data-field="rechargeAmount"]`)?.value
+    const amt = Number(amtRaw)
+    if (!Number.isFinite(amt) || amt <= 0) {
+      if (msg) { msg.className = 'save-msg err'; msg.textContent = '请填写大于 0 的充值金额。' }
+      return
+    }
+    if (msg) { msg.className = 'save-msg'; msg.textContent = '正在创建易支付订单…' }
+    const r = await api('/api/official/recharge', {
+      method: 'POST',
+      body: { amount: amt, providerKey: p.key },
+    })
+    if (r.ok && r.paymentUrl) {
+      if (msg) { msg.className = 'save-msg ok'; msg.textContent = `订单 ${r.orderId || ''} 已创建，正在打开支付页。` }
+      window.open(r.paymentUrl, '_blank', 'noopener')
+    } else if (r.ok) {
+      if (msg) { msg.className = 'save-msg ok'; msg.textContent = `订单已创建：${r.orderId || ''}（未返回支付链接）` }
+    } else {
+      if (msg) { msg.className = 'save-msg err'; msg.textContent = '充值失败：' + (r.msg || '未知错误') }
+    }
   }
 
   function removeProvider(idx) {
@@ -1235,14 +1334,25 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const newModel = { default: providersDefault }
     const keyMap = {}
     for (const p of providersList) {
+      const prev = providersCache.model && providersCache.model[p._origKey || p.key]
+      const isOfficial = p.kind === 'official'
       newModel[p.key] = {
         name: p.name || '',
-        apiBase: String(p.apiBase || '').trim(),
-        apiKey: normalizeApiKeyForSave(p.apiKey),
+        kind: isOfficial ? 'official' : 'custom',
+        apiKey: isOfficial
+          ? (String(p.apiKey || '').trim() === API_KEY_PLACEHOLDER ? API_KEY_PLACEHOLDER : '')
+          : normalizeApiKeyForSave(p.apiKey),
         model: String(p.model || '').trim(),
-        temperature: Number(p.temperature) || 0.8,
-        maxTokens: Number(p.maxTokens) || 2000,
-        timeout: Number(p.timeout) || 60000
+        temperature: isOfficial ? (Number(prev?.temperature) || 0.8) : (Number(p.temperature) || 0.8),
+        maxTokens: isOfficial ? (Number(prev?.maxTokens) || 2000) : (Number(p.maxTokens) || 2000),
+        timeout: isOfficial ? (Number(prev?.timeout) || 60000) : (Number(p.timeout) || 60000)
+      }
+      if (!isOfficial) newModel[p.key].apiBase = String(p.apiBase || '').trim()
+      if (prev && typeof prev === 'object') {
+        if (prev.vision != null) newModel[p.key].vision = prev.vision
+        if (prev.web != null) newModel[p.key].web = prev.web
+        if (prev.thinking != null) newModel[p.key].thinking = prev.thinking
+        if (prev.thinkingTimeout != null) newModel[p.key].thinkingTimeout = prev.thinkingTimeout
       }
       if (p._origKey && p._origKey !== p.key) keyMap[p.key] = p._origKey
     }
@@ -1271,24 +1381,20 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       box.classList.remove('hidden')
       box.innerHTML = '<span class="hint">🔍 正在探测 /models ...</span>'
     }
-    // 直接读取当前页面输入的临时数据（不强制先保存到后端）
     const card = $$('#providersList .provider-card')[idx]
-    const apiBase = card?.querySelector(`[data-field="apiBase"]`)?.value?.trim() || p.apiBase
-    const apiKeyRaw = card?.querySelector(`[data-field="apiKey"]`)?.value?.trim()
+    const isOfficial = p.kind === 'official'
+    const apiBase = isOfficial ? '' : (card?.querySelector(`[data-field="apiBase"]`)?.value?.trim() || p.apiBase)
+    const apiKeyRaw = isOfficial ? '' : (card?.querySelector(`[data-field="apiKey"]`)?.value?.trim())
     const apiKey = apiKeyRaw || p.apiKey
-    const key = card?.querySelector(`[data-field="key"]`)?.value?.trim() || p.key
-    // 如果 key/apiBase/apiKey 跟现有 config 里的不一致，需要先临时保存到后端再探测
+    const key = isOfficial ? p.key : (card?.querySelector(`[data-field="key"]`)?.value?.trim() || p.key)
     const cfgResp = await api('/api/config')
     const modelCfg = cfgResp.config?.model || {}
     const exist = modelCfg[key]
-    // —— P3: 使用精确匹配占位符，而非 !apiKey.includes('****') ——
-    // 否则若某个真实 key 恰好含有 4 个连续星（极少见但可能），会被错判为"未改"而跳过保存。
-    const keyActuallyModified = !!apiKeyRaw && apiKeyRaw !== API_KEY_PLACEHOLDER
+    const keyActuallyModified = !isOfficial && !!apiKeyRaw && apiKeyRaw !== API_KEY_PLACEHOLDER
     const needSave = !exist
-      || exist.apiBase !== apiBase
+      || (!isOfficial && exist.apiBase !== apiBase)
       || (keyActuallyModified && exist.apiKey !== apiKeyRaw)
     if (needSave) {
-      // 临时保存一下，方便后端用最新的 key 探测；保存会重绘卡片，必须重新取节点
       await saveProviders()
     }
     const liveBox = $(`#providersList .provider-probe[data-idx="${idx}"]`) || box
@@ -1303,7 +1409,8 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
           const note = r.info.unsupported
             ? `该服务商未提供 /models 模型列表（HTTP ${r.info.status || '-'}），不影响正常对话，请直接在"模型 ID"中手动填写。`
             : `/models 可达（HTTP ${r.info.status || '-'}），但本账号未返回任何模型。`
-          box.innerHTML = `<span class="hint">⚠ ${note} URL: ${escapeHtml(r.info.url || '-')}</span>`
+          const urlHint = (!isOfficial && r.info.url) ? ` URL: ${escapeHtml(r.info.url)}` : ''
+          box.innerHTML = `<span class="hint">⚠ ${note}${urlHint}</span>`
         } else {
           const sel = $(`#providersList select.model-select[data-idx="${idx}"]`)
           if (sel) {
@@ -1311,10 +1418,11 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
               models.map(m => `<option value="${escapeHtml(m)}"${m === p.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')
             sel.classList.remove('hidden')
           }
-          box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${r.info.latencyMs ?? '-'} ms）。可在上方"模型 ID"下拉中选择。</span>`
+          box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${r.info.latencyMs ?? '-'} ms）。可在上方下拉中选择。</span>`
         }
       } else {
-        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml(r.info?.error || r.msg || (r.info?.status != null ? `HTTP ${r.info.status}` : '未知错误'))}<br>URL: ${escapeHtml(r.info?.url || '-')}</span>`
+        const urlHint = (!isOfficial && r.info?.url) ? `<br>URL: ${escapeHtml(r.info.url)}` : ''
+        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml(r.info?.error || r.msg || (r.info?.status != null ? `HTTP ${r.info.status}` : '未知错误'))}${urlHint}</span>`
       }
     }
   }
