@@ -120,7 +120,9 @@ HTTP 4xx/5xx，或 `200` 但 `ok/success` 为 false，且没有可用 `api_key`�
   "user_name": "alice",
   "operatorId": "123456789",
   "operator_id": "123456789",
-  "qq": "123456789"
+  "qq": "123456789",
+  "expectEmail": "123456789@qq.com",
+  "expect_email": "123456789@qq.com"
 }
 ```
 
@@ -128,12 +130,54 @@ HTTP 4xx/5xx，或 `200` 但 `ok/success` 为 false，且没有可用 `api_key`�
 | --- | --- | --- |
 | `username` / `user_name` | 是 | 该用户在你们平台上的用户名 |
 | `qq` / `operator_id` | 是 | 插件主人 QQ，用来把扣费/余额记到这个人而不是匿名实例 |
+| `expect_email` / `expectEmail` | 否 | 期望该用户名绑定的邮箱。第一段固定为 `<qq>@qq.com`；第二段为用户手填的实际邮箱 |
+| `email` | 否 | 仅第二段出现：用户手填的、与该用户名绑定的实际邮箱（可能是字母别名，如 `abc123@qq.com`） |
 
-成功：HTTP `200`，例如 `{ "ok": true, "username": "alice", "associated": true }`。
+### 两段式关联流程
 
-请把该 QQ 绑定到 `username` 对应账号。同一 `instance_id` + `provider_key` + `username` + `qq` 重复调用应幂等成功。
+很多人用微信注册 QQ 邮箱，邮箱是字母别名而不是 `<QQ>@qq.com`。因此关联分两段：
 
-失败建议 `code`：`INVALID_REQUEST` / `USER_NOT_FOUND` / `UNAUTHORIZED` / `RATE_LIMITED` / `ASSOCIATE_FAILED`。
+1. **第一段**：插件带 `expect_email = <qq>@qq.com` 调用。
+   - 若账号绑定邮箱就是 `<qq>@qq.com` → 直接返回成功（见下）。
+   - 若账号存在但邮箱不同 → 返回 **`EMAIL_REQUIRED`**，插件会弹窗请用户填写该用户名实际绑定的邮箱。
+   - 若账号不存在 → 返回 `USER_NOT_FOUND`。
+2. **第二段**：插件带用户手填的 `email` 再次调用，你们校验该邮箱是否与账号绑定邮箱一致。
+
+### 必做的身份校验（安全要求）
+
+插件**不再接受「2xx 就算成功」**。只返回 `200` 而不给出校验证据，插件会判定失败。原因：管理员可以随手填 `admin` 这类别人的用户名，如果你们无条件绑定，他就能蹭到该账号的额度。
+
+请在该接口内：
+
+1. 找到 `username` 对应账号；找不到返回 4xx `USER_NOT_FOUND`；
+2. 读取该账号绑定的邮箱 `actual_email`；
+3. 取期望邮箱 `want_email`：优先用请求里的 `email`，否则用 `expect_email`；
+4. 若 `actual_email` 为空或与 `want_email` 不一致（大小写不敏感）：
+   - 第一段（请求没带 `email`）→ 返回 **`EMAIL_REQUIRED`**，让插件提示用户补填邮箱；
+   - 第二段（请求带了 `email`）→ 返回 `IDENTITY_NOT_VERIFIED`，判定失败；
+5. 一致时才执行绑定，成功回包必须带 `"verified": true`（或直接回带 `"email": "<actual_email>"`）。
+
+第一段邮箱不匹配时返回（HTTP 403）：
+
+```json
+{ "ok": false, "code": "EMAIL_REQUIRED", "need_email": true, "message": "该用户名绑定的邮箱不是当前 QQ 邮箱，请填写实际绑定邮箱" }
+```
+
+第二段仍不匹配时返回（HTTP 403）：
+
+```json
+{ "ok": false, "code": "IDENTITY_NOT_VERIFIED", "message": "用户名与该邮箱不匹配" }
+```
+
+成功：HTTP `200`：
+
+```json
+{ "ok": true, "username": "alice", "email": "abc123@qq.com", "verified": true, "associated": true }
+```
+
+插件认以下任一表示已验证：`verified` / `identityVerified` / `identity_verified` / `emailVerified` / `email_verified` / `emailMatched` / `email_matched` 为 true，或回包 `email` 等于本次期望邮箱。请把该 QQ 绑定到 `username` 对应账号。同一 `instance_id` + `provider_key` + `username` + `qq` 重复调用应幂等成功。
+
+失败建议 `code`：`INVALID_REQUEST` / `USER_NOT_FOUND` / `EMAIL_REQUIRED` / `IDENTITY_NOT_VERIFIED` / `UNAUTHORIZED` / `RATE_LIMITED` / `ASSOCIATE_FAILED`。
 
 ## 对话 API（注册成功之后）
 
@@ -230,6 +274,15 @@ class AssociateIn(BaseModel):
     username: str = Field(alias="user_name")
     operator_id: Optional[str] = Field(default=None, alias="operatorId")
     qq: Optional[str] = None
+    email: Optional[str] = None
+    expect_email: Optional[str] = Field(default=None, alias="expectEmail")
+
+
+# 示例：平台账号表，生产请换成数据库。email 为该账号注册时绑定的邮箱。
+ACCOUNTS = {
+    "alice": {"email": "123456789@qq.com"},
+    "bob": {"email": "bob.wechat@qq.com"},  # 微信注册的字母别名邮箱
+}
 
 
 @app.post("/v1/plugin/associate")
@@ -240,8 +293,48 @@ def associate(body: AssociateIn):
             status_code=400,
             content={"ok": False, "code": "INVALID_REQUEST", "message": "缺少 username 或 qq"},
         )
+
+    account = ACCOUNTS.get(body.username)
+    if not account:
+        return JSONResponse(
+            status_code=404,
+            content={"ok": False, "code": "USER_NOT_FOUND", "message": "用户名不存在"},
+        )
+
+    # 关键校验：账号绑定邮箱必须等于本次期望邮箱，否则拒绝绑定。
+    # 第一段期望 <qq>@qq.com；第二段期望用户手填的 email。
+    user_email = (body.email or "").strip().lower()
+    expect_email = (user_email or body.expect_email or f"{qq}@qq.com").strip().lower()
+    actual_email = str(account.get("email") or "").strip().lower()
+    if not actual_email or actual_email != expect_email:
+        if not user_email:
+            # 第一段不匹配 → 让插件弹窗请用户补填实际绑定邮箱
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "code": "EMAIL_REQUIRED",
+                    "need_email": True,
+                    "message": "该用户名绑定的邮箱不是当前 QQ 邮箱，请填写实际绑定邮箱",
+                },
+            )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "ok": False,
+                "code": "IDENTITY_NOT_VERIFIED",
+                "message": "用户名与该邮箱不匹配",
+            },
+        )
+
     USERS[body.username] = {"qq": qq, "instance_id": body.instance_id}
-    return {"ok": True, "username": body.username, "associated": True}
+    return {
+        "ok": True,
+        "username": body.username,
+        "email": actual_email,
+        "verified": True,
+        "associated": True,
+    }
 
 
 @app.get("/v1/models")
@@ -257,7 +350,7 @@ Flask 等价路径：`@app.post("/v1/plugin/register")`，`request.get_json(sile
 1. 主人用自己的 QQ 发 `#ai网页管理`，直链登录会话绑定该 QQ
 2. 网页后台 → 多 API 平台 →「添加官方 API」→「注册获取密钥」
 3. 插件 `POST /api/official/register`，把 Key 落盘；响应含 `username`（若合作方返回）
-4. 弹窗确认平台用户名 → 插件 `POST /api/official/associate` → 合作方 `/v1/plugin/associate`
+4. 弹窗确认平台用户名 → 插件 `POST /api/official/associate` → 合作方 `/v1/plugin/associate`（需回 `verified: true` 或匹配的 `email`，否则插件判定关联失败）
 5. 之后「拉取模型列表」才带 Key 打 `/v1/models`
 
 失败时后台只显示脱敏后的 `message`，不会出现官方域名。

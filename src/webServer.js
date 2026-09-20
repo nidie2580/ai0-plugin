@@ -12,6 +12,8 @@ import * as auth from './auth.js'
 import * as chatLog from './chatLog.js'
 import * as llm from './llm.js'
 import * as imageGen from './imageGen.js'
+import * as videoGen from './videoGen.js'
+import * as caps from './modelCapabilities.js'
 import * as helper from './helper.js'
 import * as multiChatService from './multiChatService.js'
 import { isAllowedOutboundUrl } from './security.js'
@@ -811,7 +813,8 @@ export function createApp() {
     // — P0-2: 模型子键白名单 —
     if (config.model && typeof config.model === 'object') {
       const ALLOWED_MODEL_FIELDS = new Set([
-        'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout', 'vision', 'thinking', 'thinkingTimeout', 'web', 'kind'
+        'name', 'apiBase', 'apiKey', 'model', 'temperature', 'maxTokens', 'timeout', 'vision', 'thinking', 'thinkingTimeout', 'web', 'kind',
+        'scopes', 'imageSize', 'imageQuality', 'imageTimeout', 'videoSeconds', 'videoSize', 'videoTimeout'
       ])
       for (const [key, val] of Object.entries(config.model)) {
         if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
@@ -826,6 +829,30 @@ export function createApp() {
           }
           val.kind = normalizeProviderKind(val.kind)
           if (isOfficialKind(val.kind)) forceOfficialApiBase(val)
+          // 作用域校验：生图/生视频互斥；并双写旧 vision 布尔（scopes 含 vision → vision:true）
+          if (val.scopes !== undefined) {
+            const vr = caps.validateScopes(val.scopes)
+            if (!vr.ok) return res.json({ ok: false, msg: `模型 "${key}"：${vr.error}` })
+            val.scopes = vr.scopes
+            val.vision = vr.scopes.includes('vision')
+          }
+          // 生成参数范围校验（时长/超时为正整数；尺寸限白名单或 WxH 格式）
+          const intIn = (v, lo, hi) => v == null || v === '' || (Number.isInteger(Number(v)) && Number(v) >= lo && Number(v) <= hi)
+          if (!intIn(val.imageTimeout, 1000, 600000)) {
+            return res.json({ ok: false, msg: `模型 "${key}" 的 imageTimeout 必须为 1000-600000 毫秒` })
+          }
+          if (!intIn(val.videoTimeout, 1000, 1800000)) {
+            return res.json({ ok: false, msg: `模型 "${key}" 的 videoTimeout 必须为 1000-1800000 毫秒` })
+          }
+          if (!intIn(val.videoSeconds, 1, 60)) {
+            return res.json({ ok: false, msg: `模型 "${key}" 的 videoSeconds 必须为 1-60 秒` })
+          }
+          if (val.imageSize != null && String(val.imageSize).trim() && !imageGen.ALLOWED_SIZES.has(String(val.imageSize).trim().toLowerCase())) {
+            return res.json({ ok: false, msg: `模型 "${key}" 的 imageSize 非法（允许：${Array.from(imageGen.ALLOWED_SIZES).join(', ')}）` })
+          }
+          if (val.videoSize != null && String(val.videoSize).trim() && !/^\d{2,5}x\d{2,5}$/.test(String(val.videoSize).trim().toLowerCase())) {
+            return res.json({ ok: false, msg: `模型 "${key}" 的 videoSize 必须是 WxH 格式（如 1280x720）` })
+          }
         }
       }
     }
@@ -1330,19 +1357,57 @@ export function createApp() {
   })
 
   app.post('/api/test-image', requireAuth, requireCsrf, requireApiRate('test-image', 6, 60_000), async (req, res) => {
-    const { prompt } = req.body || {}
+    const { prompt, modelKey } = req.body || {}
     if (!prompt || typeof prompt !== 'string') {
       return res.json({ ok: false, msg: '请提供测试提示词' })
     }
     if (prompt.length > 4000) {
       return res.json({ ok: false, msg: '提示词过长（最多 4000 字符）' })
     }
+    const c = cfg.loadConfig()
+    const entry = modelKey
+      ? c.model?.[modelKey]
+      : caps.findGenerationProvider(c, 'image')?.entry
+    if (!entry || typeof entry !== 'object') {
+      return res.json({ ok: false, msg: modelKey ? '该平台不存在' : '未找到开启「图片生成」的平台' })
+    }
     try {
-      const result = await imageGen.generateImage(prompt)
-      res.json(result)
+      const result = await imageGen.generateImage(prompt, { provider: entry })
+      if (result.ok) {
+        return res.json({ ok: true, url: result.url || null, b64: result.b64 || null, revisedPrompt: result.revisedPrompt || null })
+      }
+      res.json({ ok: false, msg: result.error })
     } catch (err) {
       safeLogger.error(`[ai0-plugin] 图片生成失败: ${err.message}`)
-      res.json({ ok: false, error: '图片生成失败，请稍后重试' })
+      res.json({ ok: false, msg: '图片生成失败，请稍后重试' })
+    }
+  })
+
+  app.post('/api/test-video', requireAuth, requireCsrf, requireApiRate('test-video', 4, 60_000), async (req, res) => {
+    const { prompt, modelKey } = req.body || {}
+    if (!prompt || typeof prompt !== 'string') {
+      return res.json({ ok: false, msg: '请提供测试提示词' })
+    }
+    if (prompt.length > 4000) {
+      return res.json({ ok: false, msg: '提示词过长（最多 4000 字符）' })
+    }
+    const c = cfg.loadConfig()
+    const entry = modelKey
+      ? c.model?.[modelKey]
+      : caps.findGenerationProvider(c, 'video')?.entry
+    if (!entry || typeof entry !== 'object') {
+      return res.json({ ok: false, msg: modelKey ? '该平台不存在' : '未找到开启「视频生成」的平台' })
+    }
+    try {
+      const result = await videoGen.generateVideo(prompt, { provider: entry })
+      if (result.ok) {
+        // 不回传视频 Buffer，避免大响应；仅确认生成成功与体积
+        return res.json({ ok: true, id: result.id || '', size: result.buffer?.length || 0 })
+      }
+      res.json({ ok: false, msg: result.error })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 视频生成失败: ${err.message}`)
+      res.json({ ok: false, msg: '视频生成失败，请稍后重试' })
     }
   })
 
@@ -1378,11 +1443,12 @@ export function createApp() {
 
   app.post('/api/official/associate', requireAuth, requireCsrf, requireApiRate('official-associate', 8, 60_000), async (req, res) => {
     try {
-      const { providerKey, username } = req.body || {}
+      const { providerKey, username, email } = req.body || {}
       const result = await associateOfficialAccount({
         providerKey,
         username,
         operatorId: getWebIdentity(req),
+        email,
       })
       if (result.ok) {
         return res.json({
@@ -1393,7 +1459,12 @@ export function createApp() {
           msg: result.msg,
         })
       }
-      res.json({ ok: false, msg: result.msg || '关联官方账号失败', code: result.code })
+      res.json({
+        ok: false,
+        msg: result.msg || '关联官方账号失败',
+        code: result.code,
+        needEmail: !!result.needEmail,
+      })
     } catch (err) {
       safeLogger.error(`[ai0-plugin] 官方账号关联失败: ${redactOfficialText(err.message)}`)
       res.json({ ok: false, msg: '关联官方账号失败' })

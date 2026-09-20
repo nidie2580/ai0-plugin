@@ -114,6 +114,27 @@ export function sanitizeOfficialQq(value) {
   return s
 }
 
+/**
+ * 关联校验用邮箱：合作方须校验该用户名绑定的邮箱等于 `<QQ>@qq.com`。
+ * QQ 非法时返回空串，调用方应直接拒绝关联。
+ */
+export function officialAssociateExpectedEmail(value) {
+  const qq = sanitizeOfficialQq(value)
+  return qq ? `${qq}@qq.com` : ''
+}
+
+/**
+ * 用户手填的绑定邮箱。允许字母别名（微信注册的 QQ 邮箱常是字母形式），
+ * 因此只做通用邮箱格式校验，不强制 `<QQ>@qq.com`。
+ */
+export function sanitizeOfficialEmail(value) {
+  const s = String(value == null ? '' : value).trim()
+  if (!s || s.length > 254) return ''
+  if (/[\u0000-\u001f\u007f<>\s]/.test(s)) return ''
+  if (!/^[^@]{1,64}@[^@.]+(?:\.[^@.]+)+$/.test(s)) return ''
+  return s
+}
+
 export function buildOfficialRegisterPayload({
   instanceId,
   providerKey,
@@ -213,6 +234,7 @@ export function buildOfficialAssociatePayload({
   providerKey,
   username,
   operatorId,
+  email,
   pluginVersion,
 } = {}) {
   const plugin = OFFICIAL_PLUGIN_NAME
@@ -221,6 +243,7 @@ export function buildOfficialAssociatePayload({
   const key = String(providerKey || '').trim()
   const user = sanitizeOfficialUsername(username)
   const operator = sanitizeOfficialQq(operatorId)
+  const userEmail = sanitizeOfficialEmail(email)
   const payload = {
     plugin,
     pluginVersion: version,
@@ -237,10 +260,32 @@ export function buildOfficialAssociatePayload({
     payload.operator_id = operator
     payload.qq = operator
   }
+  // 第一段：期望邮箱取 `<QQ>@qq.com`；第二段：用户手填的实际绑定邮箱。
+  // 合作方按 expect_email / email 校验该用户名绑定邮箱是否一致。
+  if (userEmail) {
+    payload.email = userEmail
+    payload.expectEmail = userEmail
+    payload.expect_email = userEmail
+  } else if (operator) {
+    const expectEmail = `${operator}@qq.com`
+    payload.expectEmail = expectEmail
+    payload.expect_email = expectEmail
+  }
   return payload
 }
 
-export function parseOfficialAssociateResponse(status, data) {
+const ASSOCIATE_VERIFY_KEYS = [
+  'verified', 'identityVerified', 'identity_verified',
+  'emailVerified', 'email_verified', 'emailMatched', 'email_matched',
+]
+
+function isTruthyFlag(value) {
+  if (value === true || value === 1) return true
+  const s = String(value == null ? '' : value).trim().toLowerCase()
+  return s === 'true' || s === '1' || s === 'yes'
+}
+
+export function parseOfficialAssociateResponse(status, data, opts = {}) {
   const body = (data && typeof data === 'object' && !Array.isArray(data)) ? data : {}
   const nested = (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) ? body.data : {}
   const explicitFail = body.ok === false || body.success === false
@@ -248,25 +293,57 @@ export function parseOfficialAssociateResponse(status, data) {
   const usernameRaw = pickFirst(body, ['username', 'userName', 'user_name', 'account'])
     || pickFirst(nested, ['username', 'userName', 'user_name', 'account'])
     || ''
-  if (httpOk && !explicitFail) {
+  const emailRaw = String(
+    pickFirst(body, ['email', 'mail', 'userEmail', 'user_email'])
+    || pickFirst(nested, ['email', 'mail', 'userEmail', 'user_email'])
+    || '',
+  ).trim()
+  const returnedUsername = sanitizeOfficialUsername(usernameRaw)
+
+  // 身份校验：必须由合作方证明「该用户名绑定的邮箱 == <QQ>@qq.com」。
+  // 仅凭 2xx 就放行会让管理员填 `admin` 冒充他人账号，直接蹭到无限额。
+  const expectedEmail = String(opts.expectedEmail || '').trim().toLowerCase()
+  const expectedUsername = sanitizeOfficialUsername(opts.expectedUsername || '').toLowerCase()
+  const flagVerified = isTruthyFlag(
+    pickFirst(body, ASSOCIATE_VERIFY_KEYS) ?? pickFirst(nested, ASSOCIATE_VERIFY_KEYS),
+  )
+  const emailVerified = !!(expectedEmail && emailRaw && emailRaw.toLowerCase() === expectedEmail)
+  const usernameMismatch = !!(expectedUsername && returnedUsername && returnedUsername.toLowerCase() !== expectedUsername)
+  const identityVerified = (flagVerified || emailVerified) && !usernameMismatch
+
+  if (httpOk && !explicitFail && identityVerified) {
     return {
       ok: true,
-      username: sanitizeOfficialUsername(usernameRaw),
+      username: returnedUsername,
+      email: emailRaw,
+      verified: true,
       associated: body.associated !== false && nested.associated !== false,
     }
   }
-  let code = String(pickFirst(body, ['code', 'errorCode', 'error_code']) || '').trim()
+
+  let code = String(pickFirst(body, ['code', 'errorCode', 'error_code']) || pickFirst(nested, ['code', 'errorCode', 'error_code']) || '').trim()
   if (!code) {
-    if (Number(status) === 429) code = 'RATE_LIMITED'
+    if (usernameMismatch) code = 'IDENTITY_MISMATCH'
+    else if (httpOk && !explicitFail) code = 'IDENTITY_NOT_VERIFIED'
+    else if (Number(status) === 429) code = 'RATE_LIMITED'
     else if (Number(status) === 401 || Number(status) === 403) code = 'UNAUTHORIZED'
     else if (Number(status) === 404) code = 'USER_NOT_FOUND'
     else code = 'ASSOCIATE_FAILED'
   }
-  const rawMsg = pickFirst(body, ['message', 'msg', 'error']) || pickFirst(nested, ['message', 'msg', 'error']) || '关联官方账号失败'
+  // 平台明示「需要用户提供实际绑定邮箱」：邮箱不是 <QQ>@qq.com 时（如微信注册的字母别名），
+  // 插件据此弹窗让用户手填邮箱，再做第二段校验。
+  const needEmailRaw = pickFirst(body, ['needEmail', 'need_email']) ?? pickFirst(nested, ['needEmail', 'need_email'])
+  const needEmail = isTruthyFlag(needEmailRaw) || code === 'EMAIL_REQUIRED'
+  const identityCodes = ['IDENTITY_NOT_VERIFIED', 'IDENTITY_MISMATCH', 'EMAIL_REQUIRED']
+  const defaultMsg = identityCodes.includes(code)
+    ? '平台未确认该用户名与其绑定邮箱匹配，请填写该用户名实际绑定的邮箱后重试'
+    : '关联官方账号失败'
+  const rawMsg = pickFirst(body, ['message', 'msg', 'error']) || pickFirst(nested, ['message', 'msg', 'error']) || defaultMsg
   return {
     ok: false,
     code,
     message: redactOfficialText(String(rawMsg)),
+    needEmail: needEmail || undefined,
     status: Number(status) || 0,
   }
 }

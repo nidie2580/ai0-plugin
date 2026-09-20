@@ -22,6 +22,8 @@ import {
   redactOfficialText,
   sanitizeOfficialUsername,
   sanitizeOfficialQq,
+  sanitizeOfficialEmail,
+  officialAssociateExpectedEmail,
 } from './officialApi.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -130,7 +132,7 @@ export async function registerOfficialKey({ providerKey, displayName, operatorId
   }
 }
 
-export async function associateOfficialAccount({ providerKey, username, operatorId } = {}, deps = {}) {
+export async function associateOfficialAccount({ providerKey, username, operatorId, email } = {}, deps = {}) {
   const request = typeof deps.request === 'function' ? deps.request : safeAxiosRequest
   const loadConfig = typeof deps.loadConfig === 'function' ? deps.loadConfig : cfg.loadConfig
   const instanceId = typeof deps.getInstanceId === 'function' ? deps.getInstanceId() : getOrCreateInstanceId()
@@ -140,6 +142,12 @@ export async function associateOfficialAccount({ providerKey, username, operator
   if (!qq) return { ok: false, msg: '当前登录未绑定有效 QQ，请用主人 QQ 发 #ai网页管理 重新打开直链后再关联' }
   const key = String(providerKey || '').trim()
   if (!key) return { ok: false, msg: '缺少官方平台 key' }
+  // 第二段：用户手填的绑定邮箱。允许字母别名（微信注册的 QQ 邮箱）。
+  const hasEmailInput = String(email == null ? '' : email).trim() !== ''
+  const userEmail = sanitizeOfficialEmail(email)
+  if (hasEmailInput && !userEmail) {
+    return { ok: false, msg: '邮箱格式不正确，请填写该用户名实际绑定的邮箱（如 abc123@qq.com）' }
+  }
   const config = loadConfig() || {}
   const entry = config.model?.[key]
   if (!entry || typeof entry !== 'object' || !isOfficialKind(entry.kind)) {
@@ -151,8 +159,11 @@ export async function associateOfficialAccount({ providerKey, username, operator
     providerKey: key,
     username: user,
     operatorId: qq,
+    email: userEmail,
     pluginVersion: readPluginVersion(),
   })
+  // 第一段期望 `<QQ>@qq.com`；第二段期望用户手填的邮箱。
+  const expectedEmail = userEmail || officialAssociateExpectedEmail(qq)
   let resp
   try {
     resp = await request('post', officialAssociateUrl(), payload, {
@@ -166,9 +177,21 @@ export async function associateOfficialAccount({ providerKey, username, operator
     safeLogger.warn(`[ai0-plugin] 官方账号关联请求失败: ${redactOfficialText(err?.message || err)}`)
     return { ok: false, msg: officialRegisterErrorForClient(err) }
   }
-  const parsed = parseOfficialAssociateResponse(resp?.status, resp?.data)
+  const parsed = parseOfficialAssociateResponse(resp?.status, resp?.data, {
+    expectedEmail,
+    expectedUsername: user,
+  })
   if (!parsed.ok) {
     safeLogger.warn(`[ai0-plugin] 官方账号关联被拒绝: ${parsed.code || ''} ${parsed.message}`)
+    // 第一段（未提供邮箱）且平台要求补充邮箱 → 让前端弹窗收集邮箱后重试
+    if (!userEmail && (parsed.needEmail || parsed.code === 'EMAIL_REQUIRED' || parsed.code === 'IDENTITY_NOT_VERIFIED')) {
+      return {
+        ok: false,
+        needEmail: true,
+        code: 'EMAIL_REQUIRED',
+        msg: parsed.message || '该用户名绑定的邮箱不是当前 QQ 邮箱，请填写该用户名实际绑定的邮箱后重试',
+      }
+    }
     return { ok: false, msg: parsed.message || '关联官方账号失败', code: parsed.code }
   }
   return {
@@ -176,6 +199,7 @@ export async function associateOfficialAccount({ providerKey, username, operator
     providerKey: key,
     username: parsed.username || user,
     operatorId: qq,
+    email: parsed.email || userEmail || '',
     msg: `已将平台用户「${parsed.username || user}」与 QQ ${qq} 关联`,
   }
 }

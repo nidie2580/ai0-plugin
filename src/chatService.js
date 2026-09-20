@@ -6,6 +6,8 @@ import * as groupOps from './groupOps.js'
 import * as securityLog from './securityLog.js'
 import { safeLogger } from './globals.js'
 import * as imageGen from './imageGen.js'
+import * as videoGen from './videoGen.js'
+import * as caps from './modelCapabilities.js'
 import * as agent from './agent.js'
 import * as chatLog from './chatLog.js'
 import * as groupConfirm from './groupConfirm.js'
@@ -86,7 +88,8 @@ export function listConfiguredModels() {
   const keys = Object.keys(m)
     .filter((k) => k !== 'default')
     .filter(usable)
-  if (usable(defaultKey) && !keys.includes(defaultKey)) keys.push(defaultKey)
+    .filter((k) => caps.isChatModel(m[k]))
+  if (usable(defaultKey) && caps.isChatModel(m[defaultKey]) && !keys.includes(defaultKey)) keys.push(defaultKey)
   return keys
 }
 
@@ -94,7 +97,7 @@ export function isModelVision(modelKey) {
   const modelCfgAll = cfg.loadConfig().model || {}
   const defaultKey = modelCfgAll.default || 'openai-compatible'
   const modelConf = modelCfgAll[modelKey || defaultKey] || modelCfgAll[defaultKey] || {}
-  return modelConf.vision === true
+  return caps.hasScope(modelConf, 'vision')
 }
 
 export function pickVisionModelKey(keys, fallback) {
@@ -166,6 +169,7 @@ export function buildAtModelIndex() {
     if (!c || typeof c !== 'object') continue
     const usable = String(c.apiKey || '').trim() && String(c.apiBase || '').trim()
     if (!usable) continue
+    if (!caps.isChatModel(c)) continue
     add(k, k)
     add(c.name, k)
     add(c.model, k)
@@ -173,7 +177,7 @@ export function buildAtModelIndex() {
   // default 指向的模型兜底纳入
   if (m[defaultKey] && typeof m[defaultKey] === 'object') {
     const usable = String(m[defaultKey].apiKey || '').trim() && String(m[defaultKey].apiBase || '').trim()
-    if (usable && !idx.has(String(defaultKey).toLowerCase())) add(defaultKey, defaultKey)
+    if (usable && caps.isChatModel(m[defaultKey]) && !idx.has(String(defaultKey).toLowerCase())) add(defaultKey, defaultKey)
   }
   return idx
 }
@@ -582,7 +586,7 @@ export async function prepareImageAssets(e, { modelKeys = [] } = {}) {
   const m = cfg.loadConfig().model || {}
   const defKey = m.default || 'openai-compatible'
   const keys = Array.isArray(modelKeys) && modelKeys.length ? modelKeys : [defKey]
-  const needOcr = ocrToText && keys.some((k) => (m[k]?.vision === true) !== true)
+  const needOcr = ocrToText && keys.some((k) => !caps.hasScope(m[k], 'vision'))
 
   let ocrText = ''
   if (needOcr) {
@@ -613,7 +617,7 @@ export function applyImagesToHistory(history, assets, modelKey) {
   const m = cfg.loadConfig().model || {}
   const defKey = m.default || 'openai-compatible'
   const modelConf = m[modelKey || defKey] || m[defKey] || {}
-  const mainVision = modelConf.vision === true
+  const mainVision = caps.hasScope(modelConf, 'vision')
 
   // 找"当前这一轮"的 user 消息：正常是 history 里最后一条 role==='user'。
   let userIdx = -1
@@ -975,12 +979,28 @@ export async function handleChat(e) {
     }
   }
 
-  // 注入图片生成能力上下文
+  // 注入生成能力上下文：
+  // 生图 / 生视频各自按 config.model 出现顺序取第一个勾选了该作用域的平台作为凭证来源；
+  // 只要存在可用平台，所有参与对话的模型都能输出 [action:image:...] / [action:video:...]，
+  // 由插件用该平台的凭证与 model ID 执行。没有任何平台勾选时回退旧全局 imageGen 配置。
+  const fullCfg = cfg.loadConfig()
+  const imageProvider = caps.findGenerationProvider(fullCfg, 'image')
+  const videoProvider = caps.findGenerationProvider(fullCfg, 'video')
+  const imageProviderEntry = imageProvider?.entry || null
+  const videoProviderEntry = videoProvider?.entry || null
   let imageContext = null
   try {
-    imageContext = imageGen.buildImageContext()
+    imageContext = imageProviderEntry
+      ? imageGen.buildImageContext(imageProviderEntry)
+      : imageGen.buildImageContext()
   } catch (err) {
     safeLogger.warn(`[ai0-plugin] 构建图片上下文失败: ${err.message}`)
+  }
+  let videoContext = null
+  try {
+    videoContext = videoGen.buildVideoContext(videoProviderEntry)
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 构建视频上下文失败: ${err.message}`)
   }
 
   // 注入点歌能力上下文（群聊/私聊通用；chat.music.enabled=false 时不注入，AI 不知道可点歌）
@@ -1004,7 +1024,7 @@ export async function handleChat(e) {
   // 合并所有上下文到 system prompt（身份信息放最前面，让 AI 优先记住真实数据）
   // 动态变量在"发送前的最终 prompt"处替换：Web 后台保存的原始模板保持不变
   const basePrompt = resolvePromptVars(sysPrompt, e)
-  const extraContext = [identityContext, groupContext, imageContext, musicContext, agentContext].filter(Boolean).join('\n\n')
+  const extraContext = [identityContext, groupContext, imageContext, videoContext, musicContext, agentContext].filter(Boolean).join('\n\n')
   let finalSysPrompt = (extraContext ? basePrompt + '\n\n' + extraContext : basePrompt)
 
   // 多模型互聊：给所有参与模型注入"机器人消息 [*] 标记协议"，让它们能辨认并选择回应/忽略彼此发言。
@@ -1066,7 +1086,9 @@ export async function handleChat(e) {
     //   每个模型各用一份"配有 * 标识协商日志"的独立请求历史，互不串扰（各自独立入参）。
     // 艾特：多模型模式下可用 "/<模型名> 追问" 把消息单独转给某模型让其立即回应。
     const atModelEnabled = multiModelEnabled && mmCfg.atModel !== false
-    let activeModelKeys = multiModelEnabled ? listConfiguredModels() : [defaultKey]
+    // 单模型模式：default 指向的平台若未勾选「文字对话」，退回到第一个具备文字对话能力的平台
+    const defaultChatKey = caps.isChatModel(modelCfg[defaultKey]) ? defaultKey : (listConfiguredModels()[0] || defaultKey)
+    let activeModelKeys = multiModelEnabled ? listConfiguredModels() : [defaultChatKey]
     let atUserText = null
 
     if (atModelEnabled) {
@@ -1291,7 +1313,7 @@ export async function handleChat(e) {
     if (imageContext) {
       try {
         if (isStale()) return true // 已过期：不再生图（生图耗时长，过期后白花钱且会发出过期图片）
-        const imgResult = await parseAndExecuteImageAction(replyText, userId)
+        const imgResult = await parseAndExecuteImageAction(replyText, userId, imageProviderEntry)
         if (imgResult) {
           replyText = imgResult.cleanText
           if (imgResult.ok) {
@@ -1322,6 +1344,39 @@ export async function handleChat(e) {
         }
       } catch (err) {
         safeLogger.error(`[ai0-plugin] 图片生成执行异常: ${err.message}`)
+      }
+    }
+
+    // 解析视频生成指令并执行
+    if (videoContext) {
+      try {
+        if (isStale()) return true // 已过期：不再生视频（耗时长、费用高）
+        const vidResult = await parseAndExecuteVideoAction(replyText, videoProviderEntry)
+        if (vidResult) {
+          replyText = vidResult.cleanText
+          if (vidResult.ok) {
+            if (replyText.trim()) {
+              await helper.replyText(e, replyText)
+            }
+            if (vidResult.videoBuffer) {
+              try {
+                const vidSeg = await helper.getVideoSegment(vidResult.videoBuffer)
+                if (!vidSeg) throw new Error('视频 segment 构造失败')
+                await e.reply(vidSeg)
+              } catch (vidErr) {
+                safeLogger.error(`[ai0-plugin] 发送视频失败: ${vidErr.message}`)
+                await helper.replyText(e, '视频生成成功但发送失败，请查看日志。')
+              }
+            }
+            history.push({ role: 'assistant', content: historyText + '\n[已生成并发送视频]' })
+            if (ownsInflight()) llm.saveHistory(userId, sessionId, history)
+            return true
+          } else {
+            replyText = replyText + '\n\n❌ 视频生成失败：' + vidResult.error
+          }
+        }
+      } catch (err) {
+        safeLogger.error(`[ai0-plugin] 视频生成执行异常: ${err.message}`)
       }
     }
 
@@ -1460,7 +1515,7 @@ export async function handleChat(e) {
  * 从 AI 回复中解析图片生成指令 [action:image:提示词] 并执行
  * 返回 null 表示没有图片指令；否则返回 { cleanText, ok, imageBuffer?, error? }
  */
-async function parseAndExecuteImageAction(replyText, userId) {
+async function parseAndExecuteImageAction(replyText, userId, provider = null) {
   const re = /\[action:image:([^\]]+)\]/gi
   const matches = [...String(replyText || '').matchAll(re)]
   if (!matches.length) return null
@@ -1487,7 +1542,7 @@ async function parseAndExecuteImageAction(replyText, userId) {
   }
 
   safeLogger.info(`[ai0-plugin] 解析到图片生成指令，提示词：${prompt.slice(0, 100)}`)
-  const result = await imageGen.generateImage(prompt, { userId })
+  const result = await imageGen.generateImage(prompt, { userId, provider })
   if (!result.ok) {
     return { cleanText, ok: false, error: result.error }
   }
@@ -1507,6 +1562,36 @@ async function parseAndExecuteImageAction(replyText, userId) {
   }
 
   return { cleanText, ok: true, imageBuffer }
+}
+
+/**
+ * 从 AI 回复中解析视频生成指令 [action:video:提示词] 并执行。
+ * 返回 null 表示没有视频指令；否则返回 { cleanText, ok, videoBuffer?, error? }
+ */
+async function parseAndExecuteVideoAction(replyText, provider = null) {
+  const re = /\[action:video:([^\]]+)\]/gi
+  const matches = [...String(replyText || '').matchAll(re)]
+  if (!matches.length) return null
+  const first = matches[0]
+
+  const PROMPT_MAX_LEN = 4000
+  const raw = first[1].trim()
+  const prompt = raw.length > PROMPT_MAX_LEN ? raw.slice(0, PROMPT_MAX_LEN) : raw
+  const cleanText = String(replyText || '').replace(re, '').trim()
+
+  if (!prompt) {
+    return { cleanText, ok: false, error: '视频提示词为空' }
+  }
+  if (raw.length > PROMPT_MAX_LEN) {
+    return { cleanText, ok: false, error: `视频提示词过长（${raw.length} 字符，最多 ${PROMPT_MAX_LEN}），已拒绝生视频。` }
+  }
+
+  safeLogger.info(`[ai0-plugin] 解析到视频生成指令，提示词：${prompt.slice(0, 100)}`)
+  const result = await videoGen.generateVideo(prompt, { provider })
+  if (!result.ok) {
+    return { cleanText, ok: false, error: result.error }
+  }
+  return { cleanText, ok: true, videoBuffer: result.buffer }
 }
 
 /**

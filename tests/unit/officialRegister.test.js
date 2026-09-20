@@ -112,13 +112,91 @@ describe('officialRegister', () => {
           assert.equal(url.endsWith('/plugin/associate'), true)
           assert.equal(payload.username, 'alice')
           assert.equal(payload.qq, '10001')
-          return { status: 200, data: { ok: true, username: 'alice' } }
+          assert.equal(payload.expect_email, '10001@qq.com')
+          return { status: 200, data: { ok: true, username: 'alice', verified: true } }
         },
       },
     )
     assert.equal(result.ok, true)
     assert.equal(result.username, 'alice')
     assert.equal(result.operatorId, '10001')
+  })
+
+  it('关联：合作方未证明邮箱匹配时拒绝，防用户名冒充（第一段转为要求补邮箱）', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', username: 'admin', operatorId: '10001' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => ({ status: 200, data: { ok: true, username: 'admin', associated: true } }),
+      },
+    )
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'EMAIL_REQUIRED')
+    assert.equal(result.needEmail, true)
+    assert.match(result.msg, /未确认该用户名与其绑定邮箱匹配/)
+  })
+
+  it('关联：回包邮箱等于 QQ 邮箱时视为已验证', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', username: 'alice', operatorId: '10001' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => ({ status: 200, data: { ok: true, username: 'alice', email: '10001@qq.com' } }),
+      },
+    )
+    assert.equal(result.ok, true)
+    assert.equal(result.username, 'alice')
+  })
+
+  it('关联两段式：字母别名邮箱先要求补填，再带 email 二次校验成功', async () => {
+    let seenEmailField = null
+    const first = await associateOfficialAccount(
+      { providerKey: 'official', username: 'bob', operatorId: '10001' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async (method, url, payload) => {
+          seenEmailField = payload.email
+          assert.equal(payload.expect_email, '10001@qq.com')
+          return { status: 403, data: { ok: false, code: 'EMAIL_REQUIRED', need_email: true } }
+        },
+      },
+    )
+    assert.equal(first.ok, false)
+    assert.equal(first.needEmail, true)
+    assert.equal(first.code, 'EMAIL_REQUIRED')
+    assert.equal(seenEmailField, undefined)
+
+    const second = await associateOfficialAccount(
+      { providerKey: 'official', username: 'bob', operatorId: '10001', email: 'bob.wechat@qq.com' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async (method, url, payload) => {
+          assert.equal(payload.email, 'bob.wechat@qq.com')
+          assert.equal(payload.expect_email, 'bob.wechat@qq.com')
+          return { status: 200, data: { ok: true, username: 'bob', email: 'bob.wechat@qq.com', verified: true } }
+        },
+      },
+    )
+    assert.equal(second.ok, true)
+    assert.equal(second.username, 'bob')
+    assert.equal(second.email, 'bob.wechat@qq.com')
+  })
+
+  it('关联两段式：手填邮箱格式非法时直接拒绝，不发请求', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', username: 'bob', operatorId: '10001', email: 'not-an-email' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => { throw new Error('should not call') },
+      },
+    )
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /邮箱格式不正确/)
   })
 
   it('关联：登录身份不是 QQ 时拒绝', async () => {

@@ -1279,6 +1279,37 @@ export function safeSegmentImageWithFallback(filePath) {
   }
 }
 
+export function safeSegmentVideo(filePath) {
+  try {
+    if (typeof segment !== 'undefined' && segment && typeof segment.video === 'function') {
+      return segment.video(filePath)
+    }
+  } catch (_) {}
+  return { type: 'video', file: filePath }
+}
+
+/**
+ * 把视频 Buffer 落临时文件并构造视频 segment。超过 50MB 拒绝，避免临时目录被撑爆。
+ * @param {Buffer} src
+ * @returns {Promise<object|null>}
+ */
+export async function getVideoSegment(src) {
+  if (!Buffer.isBuffer(src)) return null
+  if (src.length > 50 * 1024 * 1024) {
+    safeLogger.warn(`[ai0-plugin] Buffer 视频过大(${Math.round(src.length / 1024 / 1024)}MB)，已拒绝`)
+    return null
+  }
+  cleanupTmpDir()
+  try {
+    const tmp = path.join(TMP_DIR, `vid-${Date.now()}-${rand6()}.mp4`)
+    fs.writeFileSync(tmp, src)
+    return safeSegmentVideo(tmp)
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] getVideoSegment 异常: ${err.message}`)
+    return null
+  }
+}
+
 function rand6() {
   return crypto.randomBytes(3).toString('hex')
 }

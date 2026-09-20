@@ -14,6 +14,16 @@ const dailyUsage = new Map() // key: `YYYY-MM-DD:userId` → { count, tokens }
 // dailyUsage Map 容量上限：海量用户访问时防止内存耗尽
 const MAX_DAILY_USAGE_ENTRIES = 10_000
 
+// P3-7: 合法生图尺寸白名单（与 /api/config 校验共用）
+export const ALLOWED_SIZES = new Set([
+  '256x256', '512x512', '768x768',
+  '1024x1024', '1152x896', '896x1152',
+  '1344x768', '768x1344', '1365x1024', '1024x1365',
+  '1536x1024', '1024x1536',
+  '1792x1024', '1024x1792',
+  '2048x2048',
+])
+
 function todayKey(userId) {
   const now = new Date()
   const y = now.getFullYear()
@@ -125,7 +135,10 @@ export function isEnabled() {
  */
 export async function generateImage(prompt, opts = {}) {
   const ic = getImageGenConfig()
-  if (!ic.enabled) return { ok: false, error: '图片生成功能未启用' }
+  // 多API模式：provider 为该模型所在平台条目（含 apiBase/apiKey/model 与生图参数）。
+  // 传入 provider 时以平台卡片配置为准，不再走 agent 级别的全局 imageGen 开关与配额。
+  const p = opts.provider && typeof opts.provider === 'object' ? opts.provider : null
+  if (!p && !ic.enabled) return { ok: false, error: '图片生成功能未启用' }
   // P3-7: 提示词长度防御（与 chatService.parseAndExecuteImageAction 和 /api/test-image 一致）
   //       作为"入口兜底"：即便上层漏了长度限制也不会把超大字符串传外网 API。
   const MAX_PROMPT = 4000
@@ -136,15 +149,15 @@ export async function generateImage(prompt, opts = {}) {
     return { ok: false, error: `提示词过长（${trimmedPrompt.length} 字符，最多 ${MAX_PROMPT}）` }
   }
   // —— P3: apiBase / apiKey / model 输入净化（trim 空白，否则会被当成有效值） ——
-  const apiBase = String(ic.apiBase || '').trim()
-  const apiKey = String(ic.apiKey || '').trim()
-  const modelBase = String(ic.model || '').trim()
+  const apiBase = String(p?.apiBase || ic.apiBase || '').trim()
+  const apiKey = String(p?.apiKey || ic.apiKey || '').trim()
+  const modelBase = String(p?.model || ic.model || '').trim()
   if (!apiBase || !apiKey || !modelBase) {
     return { ok: false, error: '图片生成配置不完整（需要 apiBase、apiKey、model）' }
   }
 
-  // 用户配额检查
-  if (opts.userId) {
+  // 用户配额检查（仅旧全局模式；多API平台卡片不再设日限额/白名单）
+  if (!p && opts.userId) {
     const quota = checkUserQuota(opts.userId)
     if (!quota.ok) return { ok: false, error: quota.reason }
   }
@@ -159,20 +172,12 @@ export async function generateImage(prompt, opts = {}) {
   // P3-7: size / quality 白名单校验。防止注入"9999x9999"、"hdXSS"等异常值被外部厂商拒绝浪费请求。
   //       主流 DALL·E 兼容厂商的通用合法尺寸：256/512/1024 正方形、以及 1792x1024 / 1024x1792；
   //       白名单中额外加入一些常见宽高比，兼容国内厂商（含方、横、竖版）。
-  const rawSize = String(opts.size || ic.defaultSize || '1024x1024').toLowerCase().trim()
-  const ALLOWED_SIZES = new Set([
-    '256x256', '512x512', '768x768',
-    '1024x1024', '1152x896', '896x1152',
-    '1344x768', '768x1344', '1365x1024', '1024x1365',
-    '1536x1024', '1024x1536',
-    '1792x1024', '1024x1792',
-    '2048x2048',
-  ])
+  const rawSize = String(opts.size || p?.imageSize || ic.defaultSize || '1024x1024').toLowerCase().trim()
   if (!ALLOWED_SIZES.has(rawSize)) {
     return { ok: false, error: `非法图片尺寸：${rawSize}（允许的值：${Array.from(ALLOWED_SIZES).join(', ')}）` }
   }
   const size = rawSize
-  const rawQuality = String(opts.quality || ic.quality || 'standard').toLowerCase().trim()
+  const rawQuality = String(opts.quality || p?.imageQuality || ic.quality || 'standard').toLowerCase().trim()
   const ALLOWED_QUALITY = new Set(['standard', 'hd'])
   if (!ALLOWED_QUALITY.has(rawQuality)) {
     return { ok: false, error: `非法 quality：${rawQuality}（仅允许 standard / hd）` }
@@ -180,7 +185,7 @@ export async function generateImage(prompt, opts = {}) {
   const quality = rawQuality
   const n = 1
   // 防御式读取：timeout 必须为正有限数，否则兜底 120000，避免负数/NaN 传给上游导致异常
-  const rawTimeout = Number(opts.timeout ?? ic.timeout ?? 120000)
+  const rawTimeout = Number(opts.timeout ?? p?.imageTimeout ?? ic.timeout ?? 120000)
   const timeout = Number.isFinite(rawTimeout) && rawTimeout > 0 ? Math.floor(rawTimeout) : 120000
 
   const body = {
@@ -260,11 +265,25 @@ export async function downloadImage(url, maxBytes = 20 * 1024 * 1024) {
 
 /**
  * 构建图片能力上下文（注入到 system prompt）
+ * @param {object} [provider] - 多API平台条目；传入时按该条目判断可用性与模型名，
+ *   不传时回退旧的全局 imageGen 配置（仅用于兼容旧部署）。
  */
-export function buildImageContext() {
-  if (!isEnabled()) return null
+export function buildImageContext(provider) {
+  let model
+  let size
+  if (provider && typeof provider === 'object') {
+    if (!String(provider.apiKey || '').trim() || !String(provider.apiBase || '').trim() || !String(provider.model || '').trim()) {
+      return null
+    }
+    model = String(provider.model).trim()
+    size = String(provider.imageSize || '1024x1024')
+  } else {
+    if (!isEnabled()) return null
+    const ic = getImageGenConfig()
+    model = ic.model
+    size = ic.defaultSize || '1024x1024'
+  }
 
-  const ic = getImageGenConfig()
   return [
     '【图片生成能力】',
     '你可以根据用户的请求生成图片。当用户要求画图、生成图片、画一幅画等时，请在回复末尾另起一行，用以下格式输出图片生成指令：',
@@ -278,6 +297,6 @@ export function buildImageContext() {
     '  2) 提示词要详细、具体，包含主体、场景、风格、色调等信息。',
     '  3) 先用中文回复用户，然后在末尾另起一行输出操作指令。',
     '  4) 不要在回复中透露你的提示词内容（那是给系统解析用的）。',
-    `  5) 当前生图模型：${ic.model}，默认尺寸：${ic.defaultSize || '1024x1024'}。`
+    `  5) 当前生图模型：${model}，默认尺寸：${size}。`
   ].join('\n')
 }

@@ -19,7 +19,6 @@
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="chatlog">💭 模型互聊</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
-    <a class="nav-item" data-view="image">🎨 图片管理</a>
     <a class="nav-item" data-view="about">ℹ️ 关于</a>
   </nav>
   <button id="logoutBtn" class="btn ghost sm">退出登录</button>
@@ -287,41 +286,6 @@
     </div>
   </section>
 
-  <!-- ==================== 图片管理 ==================== -->
-  <section id="view-image" class="view">
-    <div class="card">
-      <h2>🎨 图片生成管理 <span class="tag" id="imgTag">加载中…</span></h2>
-      <p class="hint">配置生图模型后，AI可在对话中根据用户请求自动生成并发送图片。</p>
-
-      <div class="grid-2">
-        <label>启用图片生成
-          <select id="img_enabled"><option value="true">开启</option><option value="false">关闭</option></select>
-        </label>
-        <label>&nbsp;</label>
-        <label>API 地址 <input id="img_apiBase" placeholder="https://api.openai.com/v1"/></label>
-        <label>API Key <input id="img_apiKey" placeholder="sk-..." autocomplete="off"/></label>
-        <label>模型 ID <input id="img_model" placeholder="dall-e-3"/></label>
-        <label>默认尺寸 <input id="img_defaultSize" placeholder="1024x1024"/></label>
-        <label>图片质量 <select id="img_quality"><option value="standard">standard</option><option value="hd">hd</option></select></label>
-        <label>生成超时(ms) <input id="img_timeout" type="number" min="10000"/></label>
-      </div>
-
-      <div class="actions">
-        <button class="btn primary" id="saveImgCfg">💾 保存图片配置</button>
-        <button class="btn" id="testImgBtn">🧪 测试生图</button>
-        <span id="imgSaveMsg" class="save-msg"></span>
-      </div>
-
-      <hr>
-      <h3>生图测试</h3>
-      <label>测试提示词
-        <textarea id="img_test_prompt" rows="3">A cute fluffy kitten with big eyes, sitting on a windowsill with sunlight, digital art</textarea>
-      </label>
-      <pre id="imgTestOut" class="test-out hidden"></pre>
-      <div id="imgTestPreview" class="hidden img-test-preview"></div>
-    </div>
-  </section>
-
   <!-- ==================== 关于 ==================== -->
   <section id="view-about" class="view">
     <div class="card">
@@ -343,10 +307,13 @@
 <div id="officialAssociateDlg" class="guard-lock hidden" role="dialog" aria-modal="true" aria-labelledby="officialAssociateTitle">
   <div class="guard-lock-card official-associate-card">
     <h2 id="officialAssociateTitle">关联官方平台账号</h2>
-    <p class="hint">把当前登录 QQ 关联到合作方平台上的用户名。若注册回包未带用户名，请手动填写你在该平台已注册的用户名。</p>
+    <p class="hint">把当前登录 QQ 关联到合作方平台上的用户名。该用户名绑定的邮箱必须等于「当前登录 QQ + @qq.com」，由平台校验通过后才会关联成功；填错会提示未匹配。若注册回包未带用户名，请手动填写你在该平台已注册的用户名。</p>
     <p class="hint" id="officialAssociateQq">当前登录 QQ：未绑定</p>
     <label>平台用户名
       <input id="officialAssociateUser" maxlength="64" placeholder="该 API 平台上的用户名" autocomplete="off" />
+    </label>
+    <label id="officialAssociateEmailWrap" class="hidden">绑定邮箱
+      <input id="officialAssociateEmail" maxlength="254" placeholder="该用户名实际绑定的邮箱，如 abc123@qq.com" autocomplete="off" />
     </label>
     <p class="hint" id="officialAssociateHint"></p>
     <div class="actions official-associate-actions">

@@ -175,7 +175,6 @@ if (route === 'dashboard') {
       if (a.dataset.view === 'sessions') loadSessions()
       if (a.dataset.view === 'chatlog') { loadChatlog(); startChatlogTimerIfNeeded(); initChatAcrossApp() }
       else stopChatlogTimer()
-      if (a.dataset.view === 'image') loadImageConfig()
       if (a.dataset.view === 'providers') loadProviders()
       if (a.dataset.view === 'home') loadHome()
       if (a.dataset.view === 'about') loadAbout()
@@ -238,7 +237,6 @@ if (route === 'dashboard') {
     $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name))
     if (name === 'sessions') loadSessions()
     else if (name === 'chatlog') { loadChatlog(); startChatlogTimerIfNeeded(); initChatAcrossApp() }
-    else if (name === 'image') loadImageConfig()
     else if (name === 'providers') loadProviders()
     else if (name === 'home') loadHome()
     else if (name === 'about') loadAbout()
@@ -506,6 +504,14 @@ if (route === 'dashboard') {
       const boolOf = (id) => document.getElementById('m_' + id)?.value === 'true'
       obj.vision = boolOf('vision')
       obj.web = boolOf('web')
+      // 与「多API平台」的 scopes 双写保持一致：vision 开关同步到 scopes 中的 vision 项，
+      // 保留已有的 image/video 作用域，避免两处编辑器互相覆盖。
+      const existScopes = Array.isArray(existing.scopes) && existing.scopes.length
+        ? existing.scopes.slice()
+        : (existing.vision === true ? ['chat', 'vision'] : ['chat'])
+      const set = new Set(existScopes)
+      if (obj.vision) set.add('vision'); else set.delete('vision')
+      obj.scopes = ['chat', 'vision', 'image', 'video'].filter((s) => set.has(s))
     }
     if (isOfficial) obj.kind = 'official'
     return { oldKey, newKey, obj }
@@ -1113,7 +1119,16 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         model: m.model || '',
         temperature: m.temperature ?? 0.8,
         maxTokens: m.maxTokens ?? 2000,
-        timeout: m.timeout ?? 60000
+        timeout: m.timeout ?? 60000,
+        scopes: Array.isArray(m.scopes) && m.scopes.length
+          ? m.scopes.slice()
+          : (m.vision === true ? ['chat', 'vision'] : ['chat']),
+        imageSize: m.imageSize || '',
+        imageQuality: m.imageQuality || '',
+        imageTimeout: m.imageTimeout ?? '',
+        videoSeconds: m.videoSeconds ?? '',
+        videoSize: m.videoSize || '',
+        videoTimeout: m.videoTimeout ?? ''
       })
     }
     $('#prov_default').value = providersDefault
@@ -1163,6 +1178,32 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
           <label>温度<input data-idx="${idx}" data-field="temperature" type="number" step="0.1" min="0" max="2" value="${p.temperature}"/></label>
           <label>Max Tokens<input data-idx="${idx}" data-field="maxTokens" type="number" min="1" value="${p.maxTokens}"/></label>
           <label>超时(ms)<input data-idx="${idx}" data-field="timeout" type="number" min="1000" value="${p.timeout}"/></label>`
+      const scopeCb = (scope, label) => `<label class="inline-toggle scope-item"><input type="checkbox" data-idx="${idx}" data-scope="${scope}"${p.scopes.includes(scope) ? ' checked' : ''}/> ${label}</label>`
+      const selectedQuality = (q) => (String(p.imageQuality || '') === q ? ' selected' : '')
+      const capBody = `
+          <fieldset class="scope-box">
+            <legend>能力作用域（跟随当前模型）</legend>
+            <div class="scope-items">
+              ${scopeCb('chat', '文字对话')}
+              ${scopeCb('vision', '接收图片')}
+              ${scopeCb('image', '图片生成')}
+              ${scopeCb('video', '视频生成')}
+            </div>
+            <p class="hint">图片生成与视频生成互斥；不勾「文字对话」的平台只能作为生成器凭证，不参与默认对话/艾特/并行。</p>
+            <div class="gen-params">
+              <label>生图尺寸<input data-idx="${idx}" data-field="imageSize" value="${escapeHtml(p.imageSize)}" placeholder="1024x1024"/></label>
+              <label>生图质量<select data-idx="${idx}" data-field="imageQuality"><option value=""${selectedQuality('')}>默认</option><option value="standard"${selectedQuality('standard')}>standard</option><option value="hd"${selectedQuality('hd')}>hd</option></select></label>
+              <label>生图超时(ms)<input data-idx="${idx}" data-field="imageTimeout" type="number" min="1000" value="${p.imageTimeout}"/></label>
+              <label>视频时长(秒)<input data-idx="${idx}" data-field="videoSeconds" type="number" min="1" max="60" value="${p.videoSeconds}"/></label>
+              <label>视频尺寸<input data-idx="${idx}" data-field="videoSize" value="${escapeHtml(p.videoSize)}" placeholder="1280x720"/></label>
+              <label>视频超时(ms)<input data-idx="${idx}" data-field="videoTimeout" type="number" min="1000" value="${p.videoTimeout}"/></label>
+            </div>
+            <div class="model-row">
+              <button class="btn sm" data-act="test-image" data-idx="${idx}">测试生图</button>
+              <button class="btn sm" data-act="test-video" data-idx="${idx}">测试生视频</button>
+            </div>
+            <pre class="test-out hidden" data-genout="${idx}"></pre>
+          </fieldset>`
       card.innerHTML = `
         <div class="provider-head">
           <span class="provider-idx">#${idx + 1}</span>
@@ -1175,6 +1216,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         </div>
         <div class="provider-body">
           ${isOfficial ? officialBody : customBody}
+          ${capBody}
         </div>
         <div class="provider-probe hidden" data-idx="${idx}"></div>
       `
@@ -1188,8 +1230,8 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         const f = el.dataset.field
         if (!providersList[idx] || !f) return
         let v = el.value
-        if (f === 'temperature' || f === 'maxTokens' || f === 'timeout') {
-          v = parseFloat(v) || 0
+        if (f === 'temperature' || f === 'maxTokens' || f === 'timeout' || f === 'imageTimeout' || f === 'videoSeconds' || f === 'videoTimeout') {
+          v = v === '' ? '' : (parseFloat(v) || 0)
         } else if (typeof v === 'string') {
           // —— P3: 文本字段 trim，避免首尾空白导致：(a) 配置被认为"无效"/"冲突" ——
           // (b) 恰好只含空白的 apiKey 在输入框里看不见，会被当成空串发给后端覆
@@ -1211,6 +1253,8 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         else if (act === 'probe') probeProvider(idx)
         else if (act === 'register') registerOfficial(idx)
         else if (act === 'associate') openOfficialAssociate(idx)
+        else if (act === 'test-image') testProviderImage(idx)
+        else if (act === 'test-video') testProviderVideo(idx)
       })
     })
 
@@ -1222,6 +1266,27 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         providersList[idx].model = sel.value
         const inp = $(`#providersList input[data-idx="${idx}"][data-field="model"]`)
         if (inp) inp.value = sel.value
+      })
+    })
+
+    // 生图质量等 select 字段
+    $$('#providersList select[data-field]').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const idx = parseInt(sel.dataset.idx, 10)
+        if (!providersList[idx]) return
+        providersList[idx][sel.dataset.field] = sel.value
+      })
+    })
+
+    // 能力作用域勾选
+    $$('#providersList input[data-scope]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const idx = parseInt(cb.dataset.idx, 10)
+        const p = providersList[idx]
+        if (!p) return
+        const set = new Set(p.scopes)
+        if (cb.checked) set.add(cb.dataset.scope); else set.delete(cb.dataset.scope)
+        p.scopes = ['chat', 'vision', 'image', 'video'].filter(s => set.has(s))
       })
     })
   }
@@ -1251,7 +1316,14 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       model: '',
       temperature: 0.8,
       maxTokens: 2000,
-      timeout: 60000
+      timeout: 60000,
+      scopes: ['chat'],
+      imageSize: '',
+      imageQuality: '',
+      imageTimeout: '',
+      videoSeconds: '',
+      videoSize: '',
+      videoTimeout: ''
     })
     if (!providersDefault) providersDefault = key
     $('#prov_default').value = providersDefault
@@ -1281,15 +1353,19 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     associateTargetIdx = idx
     const qqEl = $('#officialAssociateQq')
     const userEl = $('#officialAssociateUser')
+    const emailWrap = $('#officialAssociateEmailWrap')
+    const emailEl = $('#officialAssociateEmail')
     const hintEl = $('#officialAssociateHint')
     const msgEl = $('#officialAssociateMsg')
     const qq = String(preset.operatorId || '').trim()
     if (qqEl) qqEl.textContent = qq ? `当前登录 QQ：${qq}` : '当前登录 QQ：未绑定（请用主人 QQ 发 #ai网页管理 重新打开直链）'
     if (userEl) userEl.value = String(preset.username || '').trim()
+    if (emailEl) emailEl.value = ''
+    if (emailWrap) emailWrap.classList.add('hidden')
     if (hintEl) {
       hintEl.textContent = preset.username
-        ? '注册回包已带平台用户名，确认无误后点关联。'
-        : '请填写你在该 API 平台已注册的用户名，再点关联。'
+        ? '注册回包已带平台用户名，确认无误后点关联。平台会校验该用户名绑定的邮箱是否等于「当前 QQ + @qq.com」。'
+        : '请填写你在该 API 平台已注册的用户名，再点关联。平台会校验该用户名绑定的邮箱是否等于「当前 QQ + @qq.com」。'
     }
     if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = '' }
     dlg.classList.remove('hidden')
@@ -1300,25 +1376,34 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const p = providersList[associateTargetIdx]
     const msgEl = $('#officialAssociateMsg')
     const userEl = $('#officialAssociateUser')
+    const emailWrap = $('#officialAssociateEmailWrap')
+    const emailEl = $('#officialAssociateEmail')
     if (!p || p.kind !== 'official') return
     const username = String(userEl?.value || '').trim()
     if (!username) {
       if (msgEl) { msgEl.className = 'save-msg err'; msgEl.textContent = '请填写平台用户名。' }
       return
     }
+    const email = String(emailEl?.value || '').trim()
     if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = '正在关联…' }
-    const r = await api('/api/official/associate', {
-      method: 'POST',
-      body: { providerKey: p.key, username },
-    })
+    const body = { providerKey: p.key, username }
+    if (email) body.email = email
+    const r = await api('/api/official/associate', { method: 'POST', body })
     if (r.ok) {
       if (msgEl) { msgEl.className = 'save-msg ok'; msgEl.textContent = r.msg || '已关联。' }
       const pageMsg = $('#provMsg')
       if (pageMsg) { pageMsg.className = 'save-msg ok'; pageMsg.textContent = r.msg || '已关联官方平台用户名。' }
       closeOfficialAssociate()
-    } else {
-      if (msgEl) { msgEl.className = 'save-msg err'; msgEl.textContent = r.msg || '关联失败' }
+      return
     }
+    // 平台提示需要补充实际绑定邮箱（如微信用字母别名注册的 QQ 邮箱）
+    if (r.needEmail && !email) {
+      if (emailWrap) emailWrap.classList.remove('hidden')
+      if (emailEl) emailEl.focus()
+      if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = r.msg || '该用户名绑定的邮箱不是当前 QQ 邮箱，请填写实际绑定的邮箱后重试。' }
+      return
+    }
+    if (msgEl) { msgEl.className = 'save-msg err'; msgEl.textContent = r.msg || '关联失败' }
   }
 
   async function registerOfficial(idx) {
@@ -1396,8 +1481,21 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         timeout: isOfficial ? (Number(prev?.timeout) || 60000) : (Number(p.timeout) || 60000)
       }
       if (!isOfficial) newModel[p.key].apiBase = String(p.apiBase || '').trim()
+      // 能力作用域 + 生成参数（vision 由 scopes 派生，保存时双写）
+      const scopes = Array.isArray(p.scopes) && p.scopes.length ? p.scopes : ['chat']
+      newModel[p.key].scopes = scopes
+      newModel[p.key].vision = scopes.includes('vision')
+      if (scopes.includes('image')) {
+        if (String(p.imageSize || '').trim()) newModel[p.key].imageSize = String(p.imageSize).trim()
+        if (String(p.imageQuality || '').trim()) newModel[p.key].imageQuality = String(p.imageQuality).trim()
+        if (p.imageTimeout !== '' && p.imageTimeout != null) newModel[p.key].imageTimeout = Number(p.imageTimeout)
+      }
+      if (scopes.includes('video')) {
+        if (p.videoSeconds !== '' && p.videoSeconds != null) newModel[p.key].videoSeconds = Number(p.videoSeconds)
+        if (String(p.videoSize || '').trim()) newModel[p.key].videoSize = String(p.videoSize).trim()
+        if (p.videoTimeout !== '' && p.videoTimeout != null) newModel[p.key].videoTimeout = Number(p.videoTimeout)
+      }
       if (prev && typeof prev === 'object') {
-        if (prev.vision != null) newModel[p.key].vision = prev.vision
         if (prev.web != null) newModel[p.key].web = prev.web
         if (prev.thinking != null) newModel[p.key].thinking = prev.thinking
         if (prev.thinkingTimeout != null) newModel[p.key].thinkingTimeout = prev.thinkingTimeout
@@ -1527,84 +1625,40 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     msg.textContent = `✅ 探测完成：${okCount}/${results.length} 个平台在线，共 ${totalModels} 个可用模型`
   }
 
-  // ---- Image management ----
-  {
-    const el = $('#saveImgCfg')
-    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', saveImageConfig)
-  }
-  {
-    const el = $('#testImgBtn')
-    if (el && typeof el.addEventListener === 'function') el.addEventListener('click', testImageGen)
-  }
-
-  async function loadImageConfig() {
-    const r = await api('/api/image-config')
-    if (!r.ok) { $('#imgTag').textContent = '加载失败'; return }
-    const ic = r.config || {}
-    $('#imgTag').textContent = ic.enabled ? '已启用' : '未启用'
-    $('#img_enabled').value = String(ic.enabled ?? false)
-    $('#img_apiBase').value = ic.apiBase || ''
-    $('#img_apiKey').value = ic.apiKey || ''
-    $('#img_model').value = ic.model || 'dall-e-3'
-    $('#img_defaultSize').value = ic.defaultSize || '1024x1024'
-    $('#img_quality').value = ic.quality || 'standard'
-    $('#img_timeout').value = ic.timeout ?? 120000
-  }
-
-  async function saveImageConfig() {
-    const msg = $('#imgSaveMsg')
-    msg.className = 'save-msg'
-    msg.textContent = '保存中…'
-    const ic = {
-      enabled: $('#img_enabled').value === 'true',
-      apiBase: $('#img_apiBase').value.trim(),
-      apiKey: normalizeApiKeyForSave($('#img_apiKey').value),
-      model: $('#img_model').value.trim() || 'dall-e-3',
-      defaultSize: $('#img_defaultSize').value.trim() || '1024x1024',
-      quality: $('#img_quality').value || 'standard',
-      timeout: parseInt($('#img_timeout').value, 10) || 120000
-    }
-    const r = await api('/api/image-config', { method: 'POST', body: { config: ic } })
-    if (r.ok) {
-      msg.className = 'save-msg ok'
-      msg.textContent = '✅ ' + (r.msg || '保存成功')
-      await loadImageConfig()
-    } else {
-      msg.className = 'save-msg err'
-      msg.textContent = '❌ ' + (r.msg || '保存失败')
-    }
-  }
-
-  async function testImageGen() {
-    const info = $('#imgSaveMsg')
-    const out = $('#imgTestOut')
-    const preview = $('#imgTestPreview')
-    const prompt = $('#img_test_prompt').value.trim()
-    if (!prompt) { info.textContent = '请输入测试提示词'; return }
-    info.className = 'save-msg'
-    info.textContent = '生成中…（可能需要 10-30 秒）'
-    out.classList.add('hidden')
-    preview.classList.add('hidden')
+  // ---- 生成能力测试（在「多API平台」各平台卡片内触发） ----
+  async function testProviderImage(idx) {
+    const p = providersList[idx]
+    if (!p) return
+    const out = $(`#providersList [data-genout="${idx}"]`)
+    const show = (t, cls) => { if (out) { out.classList.remove('hidden'); out.className = 'test-out ' + (cls || '') ; out.textContent = t } }
+    const prompt = (window.prompt('测试生图提示词：', 'A cute fluffy kitten, digital art') || '').trim()
+    if (!prompt) return
+    show('生成中…（可能需要 10-30 秒）')
     const t0 = Date.now()
-    const r = await api('/api/test-image', { method: 'POST', body: { prompt } })
+    const r = await api('/api/test-image', { method: 'POST', body: { prompt, modelKey: p.key } })
     const dur = Date.now() - t0
-    out.classList.remove('hidden')
     if (r.ok) {
-      info.className = 'save-msg ok'
-      info.textContent = `✅ 生成成功（${dur}ms）`
-      out.textContent =
-        `模型: ${r.raw?.model || '-'}\n` +
-        `耗时: ${dur} ms\n` +
-        (r.revisedPrompt ? `优化后的提示词: ${r.revisedPrompt}\n` : '') +
-        (r.url ? `图片URL: ${r.url}` : (r.b64 ? '图片已返回(base64)' : ''))
-      if (r.url) {
-        preview.classList.remove('hidden')
-        preview.innerHTML = `<img src="${escapeHtml(r.url)}" class="img-preview" />`
-      }
+      show(`✅ 生成成功（${dur}ms）${r.url ? '\n图片URL: ' + r.url : (r.b64 ? '\n图片已返回(base64)' : '')}`, 'ok')
     } else {
-      info.className = 'save-msg err'
-      info.textContent = `❌ 失败（${dur}ms）`
-      out.textContent = `错误详情：\n${r.error || r.msg || '未知错误'}`
+      show(`❌ 失败（${dur}ms）：${r.msg || '未知错误'}`, 'err')
+    }
+  }
+
+  async function testProviderVideo(idx) {
+    const p = providersList[idx]
+    if (!p) return
+    const out = $(`#providersList [data-genout="${idx}"]`)
+    const show = (t, cls) => { if (out) { out.classList.remove('hidden'); out.className = 'test-out ' + (cls || '') ; out.textContent = t } }
+    const prompt = (window.prompt('测试生视频提示词：', 'Ocean waves crashing against rocky cliffs, cinematic slow motion') || '').trim()
+    if (!prompt) return
+    show('生成中…（视频通常需要数分钟，请耐心等待）')
+    const t0 = Date.now()
+    const r = await api('/api/test-video', { method: 'POST', body: { prompt, modelKey: p.key } })
+    const dur = Date.now() - t0
+    if (r.ok) {
+      show(`✅ 生成成功（${dur}ms）\n任务ID: ${r.id || '-'}\n文件大小: ${Math.round((r.size || 0) / 1024)} KB`, 'ok')
+    } else {
+      show(`❌ 失败（${dur}ms）：${r.msg || '未知错误'}`, 'err')
     }
   }
 

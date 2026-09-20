@@ -31,6 +31,20 @@ model:
     #           模型可主动联网查询后再回答。若所用 API 不支持该工具，会自动回退为不带工具(不报错)。
     #   false → 模型只按已有上下文回答(默认)。
     web: false
+    # 能力作用域（推荐；优先级高于旧 vision 布尔）：
+    #   chat=文字对话  vision=接收图片  image=图片生成  video=视频生成
+    #   生图与生视频互斥；不勾 chat 的条目为纯生成器，不参与默认对话/艾特/并行。
+    #   省略时按旧 vision 布尔回退（vision:true → [chat, vision]，否则 [chat]）。
+    # scopes: [chat, vision]
+    # 生成参数（勾选对应作用域后生效）：
+    #   多平台时，按本文件中出现的顺序，取第一个具备该能力的平台作为凭证来源，
+    #   用一个模型同时"提供凭证 + 输出 [action:image:...] / [action:video:...]"。
+    # imageSize: 1024x1024
+    # imageQuality: standard
+    # imageTimeout: 120000
+    # videoSeconds: 4
+    # videoSize: 1280x720
+    # videoTimeout: 600000
 
 # 对话设置
 chat:
