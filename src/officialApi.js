@@ -252,8 +252,11 @@ export function buildOfficialAssociatePayload({
     instance_id: inst,
     providerKey: key,
     provider_key: key,
-    username: user,
-    user_name: user,
+  }
+  // 用户名可选：留空表示「按 QQ 优先匹配」，由合作方依据 operatorId 反查账号。
+  if (user) {
+    payload.username = user
+    payload.user_name = user
   }
   if (operator) {
     payload.operatorId = operator
@@ -304,12 +307,16 @@ export function parseOfficialAssociateResponse(status, data, opts = {}) {
   // 仅凭 2xx 就放行会让管理员填 `admin` 冒充他人账号，直接蹭到无限额。
   const expectedEmail = String(opts.expectedEmail || '').trim().toLowerCase()
   const expectedUsername = sanitizeOfficialUsername(opts.expectedUsername || '').toLowerCase()
+  const allowQqMatch = !!opts.allowQqMatch && !expectedUsername
   const flagVerified = isTruthyFlag(
     pickFirst(body, ASSOCIATE_VERIFY_KEYS) ?? pickFirst(nested, ASSOCIATE_VERIFY_KEYS),
   )
   const emailVerified = !!(expectedEmail && emailRaw && emailRaw.toLowerCase() === expectedEmail)
   const usernameMismatch = !!(expectedUsername && returnedUsername && returnedUsername.toLowerCase() !== expectedUsername)
-  const identityVerified = (flagVerified || emailVerified) && !usernameMismatch
+  // QQ 优先匹配：未提供用户名时，合作方依据 operatorId(QQ) 反查账号并回传 username，
+  // 视为「QQ 已绑定该平台账号」——不需要额外 verified 标记（operatorId 由服务端登录态派生，不可伪造）。
+  const qqMatched = !!(allowQqMatch && returnedUsername && httpOk && !explicitFail)
+  const identityVerified = qqMatched || ((flagVerified || emailVerified) && !usernameMismatch)
 
   if (httpOk && !explicitFail && identityVerified) {
     return {
@@ -317,6 +324,7 @@ export function parseOfficialAssociateResponse(status, data, opts = {}) {
       username: returnedUsername,
       email: emailRaw,
       verified: true,
+      matchedBy: qqMatched ? 'qq' : 'email',
       associated: body.associated !== false && nested.associated !== false,
     }
   }
@@ -334,16 +342,27 @@ export function parseOfficialAssociateResponse(status, data, opts = {}) {
   // 插件据此弹窗让用户手填邮箱，再做第二段校验。
   const needEmailRaw = pickFirst(body, ['needEmail', 'need_email']) ?? pickFirst(nested, ['needEmail', 'need_email'])
   const needEmail = isTruthyFlag(needEmailRaw) || code === 'EMAIL_REQUIRED'
+  // QQ 优先匹配失败：合作方未找到该 QQ 绑定的账号（或明示需要用户名），前端改为收集用户名后重试。
+  const needUsernameRaw = pickFirst(body, ['needUsername', 'need_username']) ?? pickFirst(nested, ['needUsername', 'need_username'])
+  const needUsername = isTruthyFlag(needUsernameRaw)
+    || code === 'NEED_USERNAME'
+    || code === 'USERNAME_REQUIRED'
+    || (allowQqMatch && (code === 'USER_NOT_FOUND' || needEmail || code === 'IDENTITY_NOT_VERIFIED' || code === 'IDENTITY_MISMATCH'))
   const identityCodes = ['IDENTITY_NOT_VERIFIED', 'IDENTITY_MISMATCH', 'EMAIL_REQUIRED']
-  const defaultMsg = identityCodes.includes(code)
-    ? '平台未确认该用户名与其绑定邮箱匹配，请填写该用户名实际绑定的邮箱后重试'
-    : '关联官方账号失败'
+  const defaultMsg = needUsername
+    ? '未找到与该 QQ 关联的平台账号，请填写你在该平台注册的用户名后重试'
+    : identityCodes.includes(code)
+      ? '平台未确认该用户名与其绑定邮箱匹配，请填写该用户名实际绑定的邮箱后重试'
+      : code === 'USER_NOT_FOUND'
+        ? '未找到该平台用户名，请确认后重试'
+        : '关联官方账号失败'
   const rawMsg = pickFirst(body, ['message', 'msg', 'error']) || pickFirst(nested, ['message', 'msg', 'error']) || defaultMsg
   return {
     ok: false,
     code,
     message: redactOfficialText(String(rawMsg)),
     needEmail: needEmail || undefined,
+    needUsername: needUsername || undefined,
     status: Number(status) || 0,
   }
 }

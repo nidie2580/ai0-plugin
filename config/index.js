@@ -211,6 +211,15 @@ securityLog:
   # 轮转后保留的归档文件数（默认 5 份）
   maxFiles: 5
 
+# 出站访问安全设置
+security:
+  # 显式放行可访问私有/回环地址的 API 主机（SSRF 防护白名单，默认空 = 一律拒绝）。
+  # 场景：机器人服务器与 OpenAI 兼容 API 部署在同一台机器，API 地址形如
+  #   http://127.0.0.1:8000/v1 或 http://localhost:8000/v1。
+  # 支持 IP、主机名、host:port，或 "*"（放行全部，不推荐）。
+  # 仅填写你信任且自行配置的 API 主机。
+  allowPrivateHosts: []
+
 # 图片生成设置
 imageGen:
   # 是否启用图片生成功能

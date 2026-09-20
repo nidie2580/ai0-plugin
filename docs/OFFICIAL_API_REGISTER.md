@@ -97,7 +97,7 @@ HTTP 4xx/5xx，或 `200` 但 `ok/success` 为 false，且没有可用 `api_key`�
 
 ## 关联 QQ（本次需要合作方新增）
 
-注册成功后，插件会弹窗让管理员确认平台用户名，再把 **用户名 + 请求者 QQ** 发给你们。请新增：
+注册成功后，插件会弹窗让管理员关联账号：**默认只带请求者 QQ**（不带用户名），由你们按 QQ 反查已注册账号并回传用户名；仅当 QQ 未匹配到时，插件才让管理员手填平台用户名。请新增：
 
 - Method: `POST`
 - Path: `/v1/plugin/associate`
@@ -105,7 +105,7 @@ HTTP 4xx/5xx，或 `200` 但 `ok/success` 为 false，且没有可用 `api_key`�
 - Content-Type: `application/json; charset=utf-8`
 - 超时：插件侧 20 秒
 
-请求体（同样双写 camelCase / snake_case）：
+请求体（同样双写 camelCase / snake_case）。**`username` 可选**：QQ 优先匹配时不带该字段：
 
 ```json
 {
@@ -116,8 +116,6 @@ HTTP 4xx/5xx，或 `200` 但 `ok/success` 为 false，且没有可用 `api_key`�
   "instance_id": "32位小写hex",
   "providerKey": "official",
   "provider_key": "official",
-  "username": "alice",
-  "user_name": "alice",
   "operatorId": "123456789",
   "operator_id": "123456789",
   "qq": "123456789",
@@ -126,28 +124,31 @@ HTTP 4xx/5xx，或 `200` 但 `ok/success` 为 false，且没有可用 `api_key`�
 }
 ```
 
+QQ 未匹配到时，插件会再带 `username` 重试（此时才有下述字段）：
+
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `username` / `user_name` | 是 | 该用户在你们平台上的用户名 |
 | `qq` / `operator_id` | 是 | 插件主人 QQ，用来把扣费/余额记到这个人而不是匿名实例 |
+| `username` / `user_name` | 否 | 该用户在你们平台上的用户名。QQ 优先匹配时可省略；省略时请按 `qq` 反查账号并回传其用户名 |
 | `expect_email` / `expectEmail` | 否 | 期望该用户名绑定的邮箱。第一段固定为 `<qq>@qq.com`；第二段为用户手填的实际邮箱 |
 | `email` | 否 | 仅第二段出现：用户手填的、与该用户名绑定的实际邮箱（可能是字母别名，如 `abc123@qq.com`） |
 
-### 两段式关联流程
+### 关联流程（QQ 优先）
 
-很多人用微信注册 QQ 邮箱，邮箱是字母别名而不是 `<QQ>@qq.com`。因此关联分两段：
-
-1. **第一段**：插件带 `expect_email = <qq>@qq.com` 调用。
+1. **第零段（默认，无 `username`）**：插件只带 `qq` 调用，请按 `qq` 反查已绑定的账号：
+   - 查到 → 直接返回成功（见下），`username` 回传该账号用户名即可，无需其他校验证据；
+   - 查不到 → 返回 4xx `USER_NOT_FOUND`（或 `NEED_USERNAME`），插件会弹窗请管理员手填平台用户名后进入下面两段。
+2. **第一段**：插件带 `expect_email = <qq>@qq.com` 调用。
    - 若账号绑定邮箱就是 `<qq>@qq.com` → 直接返回成功（见下）。
    - 若账号存在但邮箱不同 → 返回 **`EMAIL_REQUIRED`**，插件会弹窗请用户填写该用户名实际绑定的邮箱。
    - 若账号不存在 → 返回 `USER_NOT_FOUND`。
-2. **第二段**：插件带用户手填的 `email` 再次调用，你们校验该邮箱是否与账号绑定邮箱一致。
+3. **第二段**：插件带用户手填的 `email` 再次调用，你们校验该邮箱是否与账号绑定邮箱一致。
 
 ### 必做的身份校验（安全要求）
 
-插件**不再接受「2xx 就算成功」**。只返回 `200` 而不给出校验证据，插件会判定失败。原因：管理员可以随手填 `admin` 这类别人的用户名，如果你们无条件绑定，他就能蹭到该账号的额度。
+第零段的匹配键是登录 QQ——插件从登录态派生，不可伪造，因此你们按 QQ 反查账号即可信任该结果。带 `username` 的第零段之后各段**不再接受「2xx 就算成功」**：只返回 `200` 而不给出校验证据，插件会判定失败。原因：管理员可以随手填 `admin` 这类别人的用户名，如果你们无条件绑定，他就能蹭到该账号的额度。
 
-请在该接口内：
+对于带 `username` 的请求，请在该接口内：
 
 1. 找到 `username` 对应账号；找不到返回 4xx `USER_NOT_FOUND`；
 2. 读取该账号绑定的邮箱 `actual_email`；
@@ -175,9 +176,9 @@ HTTP 4xx/5xx，或 `200` 但 `ok/success` 为 false，且没有可用 `api_key`�
 { "ok": true, "username": "alice", "email": "abc123@qq.com", "verified": true, "associated": true }
 ```
 
-插件认以下任一表示已验证：`verified` / `identityVerified` / `identity_verified` / `emailVerified` / `email_verified` / `emailMatched` / `email_matched` 为 true，或回包 `email` 等于本次期望邮箱。请把该 QQ 绑定到 `username` 对应账号。同一 `instance_id` + `provider_key` + `username` + `qq` 重复调用应幂等成功。
+插件在带 `username` 时认以下任一表示已验证：`verified` / `identityVerified` / `identity_verified` / `emailVerified` / `email_verified` / `emailMatched` / `email_matched` 为 true，或回包 `email` 等于本次期望邮箱。第零段（无 `username`）只要你们按 QQ 反查到账号并回传非空 `username` 即视为成功。请把该 QQ 绑定到 `username` 对应账号。同一 `instance_id` + `provider_key` + `username` + `qq` 重复调用应幂等成功。
 
-失败建议 `code`：`INVALID_REQUEST` / `USER_NOT_FOUND` / `EMAIL_REQUIRED` / `IDENTITY_NOT_VERIFIED` / `UNAUTHORIZED` / `RATE_LIMITED` / `ASSOCIATE_FAILED`。
+失败建议 `code`：`INVALID_REQUEST` / `USER_NOT_FOUND` / `NEED_USERNAME` / `EMAIL_REQUIRED` / `IDENTITY_NOT_VERIFIED` / `UNAUTHORIZED` / `RATE_LIMITED` / `ASSOCIATE_FAILED`。
 
 ## 对话 API（注册成功之后）
 
@@ -271,30 +272,49 @@ class AssociateIn(BaseModel):
     plugin_version: str = Field(default="", alias="pluginVersion")
     instance_id: str = Field(alias="instanceId")
     provider_key: str = Field(alias="providerKey")
-    username: str = Field(alias="user_name")
+    username: Optional[str] = Field(default=None, alias="user_name")  # QQ 优先匹配时为空
     operator_id: Optional[str] = Field(default=None, alias="operatorId")
     qq: Optional[str] = None
     email: Optional[str] = None
     expect_email: Optional[str] = Field(default=None, alias="expectEmail")
 
 
-# 示例：平台账号表，生产请换成数据库。email 为该账号注册时绑定的邮箱。
+# 示例：平台账号表，生产请换成数据库。email 为该账号注册时绑定的邮箱，qq 为关联的插件主人 QQ。
 ACCOUNTS = {
-    "alice": {"email": "123456789@qq.com"},
-    "bob": {"email": "bob.wechat@qq.com"},  # 微信注册的字母别名邮箱
+    "alice": {"email": "123456789@qq.com", "qq": "123456789"},
+    "bob": {"email": "bob.wechat@qq.com", "qq": "987654321"},  # 微信注册的字母别名邮箱
 }
+
+QQ_INDEX = {str(a.get("qq")): name for name, a in ACCOUNTS.items() if a.get("qq")}
 
 
 @app.post("/v1/plugin/associate")
 def associate(body: AssociateIn):
     qq = (body.qq or body.operator_id or "").strip()
-    if body.plugin != "ai0-plugin" or not body.username or not qq:
+    username = (body.username or "").strip()
+    if body.plugin != "ai0-plugin" or not qq or (not username and body.email):
         return JSONResponse(
             status_code=400,
-            content={"ok": False, "code": "INVALID_REQUEST", "message": "缺少 username 或 qq"},
+            content={"ok": False, "code": "INVALID_REQUEST", "message": "缺少 qq（或补充 username 后可带 email）"},
         )
 
-    account = ACCOUNTS.get(body.username)
+    # 第零段（默认）：没带 username → 按 QQ 反查已注册账号并回传其用户名。
+    if not username:
+        name = QQ_INDEX.get(qq)
+        if not name:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "code": "USER_NOT_FOUND", "message": "该 QQ 尚未关联平台账号，请填写平台用户名"},
+            )
+        USERS[name] = {"qq": qq, "instance_id": body.instance_id}
+        return {
+            "ok": True,
+            "username": name,
+            "email": str(ACCOUNTS[name].get("email") or ""),
+            "associated": True,
+        }
+
+    account = ACCOUNTS.get(username)
     if not account:
         return JSONResponse(
             status_code=404,
@@ -327,10 +347,10 @@ def associate(body: AssociateIn):
             },
         )
 
-    USERS[body.username] = {"qq": qq, "instance_id": body.instance_id}
+    USERS[username] = {"qq": qq, "instance_id": body.instance_id}
     return {
         "ok": True,
-        "username": body.username,
+        "username": username,
         "email": actual_email,
         "verified": True,
         "associated": True,
@@ -350,7 +370,7 @@ Flask 等价路径：`@app.post("/v1/plugin/register")`，`request.get_json(sile
 1. 主人用自己的 QQ 发 `#ai网页管理`，直链登录会话绑定该 QQ
 2. 网页后台 → 多 API 平台 →「添加官方 API」→「注册获取密钥」
 3. 插件 `POST /api/official/register`，把 Key 落盘；响应含 `username`（若合作方返回）
-4. 弹窗确认平台用户名 → 插件 `POST /api/official/associate` → 合作方 `/v1/plugin/associate`（需回 `verified: true` 或匹配的 `email`，否则插件判定关联失败）
+4. 弹窗关联 → 插件先只带 QQ 调 `POST /api/official/associate` → 合作方按 QQ 反查账号（`USER_NOT_FOUND` 时插件再让管理员手填用户名，此时才走 `verified: true` / 匹配 `email` 校验）
 5. 之后「拉取模型列表」才带 Key 打 `/v1/models`
 
 失败时后台只显示脱敏后的 `message`，不会出现官方域名。

@@ -227,4 +227,53 @@ describe('officialApi', () => {
     assert.equal(wrong.ok, false)
     assert.equal(wrong.code, 'IDENTITY_NOT_VERIFIED')
   })
+
+  it('QQ 优先匹配：请求体省略 username，回包 username 即视为成功', () => {
+    const payload = buildOfficialAssociatePayload({
+      instanceId: 'abc123',
+      providerKey: 'official',
+      username: '',
+      operatorId: '10001',
+      pluginVersion: '1.2.0',
+    })
+    assert.equal('username' in payload, false)
+    assert.equal('user_name' in payload, false)
+    assert.equal(payload.qq, '10001')
+    assert.equal(payload.expect_email, '10001@qq.com')
+
+    const matched = parseOfficialAssociateResponse(
+      200,
+      { ok: true, username: 'alice', associated: true },
+      { expectedEmail: '10001@qq.com', allowQqMatch: true },
+    )
+    assert.equal(matched.ok, true)
+    assert.equal(matched.matchedBy, 'qq')
+    assert.equal(matched.username, 'alice')
+  })
+
+  it('QQ 优先匹配失败：USER_NOT_FOUND → needUsername', () => {
+    const notFound = parseOfficialAssociateResponse(
+      404,
+      { ok: false, code: 'USER_NOT_FOUND', message: 'no user' },
+      { expectedEmail: '10001@qq.com', allowQqMatch: true },
+    )
+    assert.equal(notFound.ok, false)
+    assert.equal(notFound.needUsername, true)
+
+    const needName = parseOfficialAssociateResponse(
+      200,
+      { ok: false, needUsername: true },
+      { expectedEmail: '10001@qq.com', allowQqMatch: true },
+    )
+    assert.equal(needName.needUsername, true)
+  })
+
+  it('QQ 优先匹配：回包无 username 时不算成功', () => {
+    const empty = parseOfficialAssociateResponse(
+      200,
+      { ok: true, associated: true },
+      { expectedEmail: '10001@qq.com', allowQqMatch: true },
+    )
+    assert.equal(empty.ok, false)
+  })
 })

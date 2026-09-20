@@ -102,6 +102,51 @@ describe('security: isAllowedOutboundUrl', () => {
   })
 })
 
+describe('security: security.allowPrivateHosts 白名单', () => {
+  const CONFIG_PATH = fileURLToPath(new URL('../../config/config.yaml', import.meta.url))
+  const backupExists = fs.existsSync(CONFIG_PATH)
+  const backupContent = backupExists ? fs.readFileSync(CONFIG_PATH, 'utf-8') : null
+
+  after(() => {
+    if (backupExists) fs.writeFileSync(CONFIG_PATH, backupContent, 'utf-8')
+    else if (fs.existsSync(CONFIG_PATH)) fs.unlinkSync(CONFIG_PATH)
+    cfg.setForceLoad(false)
+  })
+
+  function setAllow(list) {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify({ security: { allowPrivateHosts: list } }), 'utf-8')
+    cfg.setForceLoad(true)
+    cfg.loadConfig()
+  }
+
+  it('默认拒绝回环 IP', async () => {
+    setAllow([])
+    const result = await sec.isAllowedOutboundUrl('http://127.0.0.1:8000/v1')
+    assert.equal(result.ok, false)
+    assert.match(result.reason, /私有|回环/)
+  })
+
+  it('白名单含 127.0.0.1 → 放行回环 IP', async () => {
+    setAllow(['127.0.0.1'])
+    const result = await sec.isAllowedOutboundUrl('http://127.0.0.1:8000/v1')
+    assert.equal(result.ok, true)
+  })
+
+  it('白名单含 host:port 时按主机名放行 localhost', async () => {
+    setAllow(['localhost:8000'])
+    const result = await sec.isAllowedOutboundUrl('http://localhost:8000/v1')
+    assert.equal(result.ok, true)
+    const denied = await sec.isAllowedOutboundUrl('http://some-other-host:8000/v1')
+    assert.equal(denied.ok, false)
+  })
+
+  it('白名单为 "*" → 放行私有地址', async () => {
+    setAllow(['*'])
+    const result = await sec.isAllowedOutboundUrl('http://192.168.1.10')
+    assert.equal(result.ok, true)
+  })
+})
+
 describe('security: hasSystemProxy', () => {
   it('无代理环境变量时为 false', () => {
     const bak = {

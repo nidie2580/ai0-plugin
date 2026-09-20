@@ -1364,12 +1364,11 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     if (emailWrap) emailWrap.classList.add('hidden')
     if (hintEl) {
       hintEl.textContent = preset.username
-        ? '注册回包已带平台用户名，确认无误后点关联。平台会校验该用户名绑定的邮箱是否等于「当前 QQ + @qq.com」。'
-        : '请填写你在该 API 平台已注册的用户名，再点关联。平台会校验该用户名绑定的邮箱是否等于「当前 QQ + @qq.com」。'
+        ? '注册回包已带平台用户名。默认先按当前 QQ 匹配；如需指定，可直接确认或修改用户名后点关联。'
+        : '默认先用当前登录 QQ 匹配平台账号；若未匹配到，再填写你在该 API 平台已注册的用户名。'
     }
     if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = '' }
     dlg.classList.remove('hidden')
-    if (userEl) userEl.focus()
   }
 
   async function submitOfficialAssociate() {
@@ -1380,13 +1379,10 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const emailEl = $('#officialAssociateEmail')
     if (!p || p.kind !== 'official') return
     const username = String(userEl?.value || '').trim()
-    if (!username) {
-      if (msgEl) { msgEl.className = 'save-msg err'; msgEl.textContent = '请填写平台用户名。' }
-      return
-    }
     const email = String(emailEl?.value || '').trim()
-    if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = '正在关联…' }
-    const body = { providerKey: p.key, username }
+    if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = username ? '正在关联…' : '正在按 QQ 匹配并关联…' }
+    const body = { providerKey: p.key }
+    if (username) body.username = username
     if (email) body.email = email
     const r = await api('/api/official/associate', { method: 'POST', body })
     if (r.ok) {
@@ -1394,6 +1390,12 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       const pageMsg = $('#provMsg')
       if (pageMsg) { pageMsg.className = 'save-msg ok'; pageMsg.textContent = r.msg || '已关联官方平台用户名。' }
       closeOfficialAssociate()
+      return
+    }
+    // QQ 未匹配到账号 → 让用户补充平台用户名后重试
+    if (r.needUsername && !username) {
+      if (msgEl) { msgEl.className = 'save-msg err'; msgEl.textContent = r.msg || '未找到与该 QQ 关联的平台账号，请填写平台用户名后重试。' }
+      if (userEl) userEl.focus()
       return
     }
     // 平台提示需要补充实际绑定邮箱（如微信用字母别名注册的 QQ 邮箱）

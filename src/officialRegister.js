@@ -137,7 +137,8 @@ export async function associateOfficialAccount({ providerKey, username, operator
   const loadConfig = typeof deps.loadConfig === 'function' ? deps.loadConfig : cfg.loadConfig
   const instanceId = typeof deps.getInstanceId === 'function' ? deps.getInstanceId() : getOrCreateInstanceId()
   const user = sanitizeOfficialUsername(username)
-  if (!user) return { ok: false, msg: '请填写有效的平台用户名（1–64 字，勿含空格或尖括号）' }
+  const hasUserInput = String(username == null ? '' : username).trim() !== ''
+  if (hasUserInput && !user) return { ok: false, msg: '请填写有效的平台用户名（1–64 字，勿含空格或尖括号）' }
   const qq = sanitizeOfficialQq(operatorId)
   if (!qq) return { ok: false, msg: '当前登录未绑定有效 QQ，请用主人 QQ 发 #ai网页管理 重新打开直链后再关联' }
   const key = String(providerKey || '').trim()
@@ -180,11 +181,23 @@ export async function associateOfficialAccount({ providerKey, username, operator
   const parsed = parseOfficialAssociateResponse(resp?.status, resp?.data, {
     expectedEmail,
     expectedUsername: user,
+    allowQqMatch: !user,
   })
   if (!parsed.ok) {
     safeLogger.warn(`[ai0-plugin] 官方账号关联被拒绝: ${parsed.code || ''} ${parsed.message}`)
+    // QQ 优先匹配失败：未提供用户名时，平台未找到该 QQ 绑定的账号 → 让前端收集用户名后重试。
+    if (!user && (parsed.needUsername || parsed.needEmail || parsed.code === 'USER_NOT_FOUND'
+      || parsed.code === 'NEED_USERNAME' || parsed.code === 'USERNAME_REQUIRED'
+      || parsed.code === 'EMAIL_REQUIRED' || parsed.code === 'IDENTITY_NOT_VERIFIED')) {
+      return {
+        ok: false,
+        needUsername: true,
+        code: 'USER_NOT_FOUND',
+        msg: parsed.message || '未找到与该 QQ 关联的平台账号，请填写你在该平台注册的用户名后重试',
+      }
+    }
     // 第一段（未提供邮箱）且平台要求补充邮箱 → 让前端弹窗收集邮箱后重试
-    if (!userEmail && (parsed.needEmail || parsed.code === 'EMAIL_REQUIRED' || parsed.code === 'IDENTITY_NOT_VERIFIED')) {
+    if (user && !userEmail && (parsed.needEmail || parsed.code === 'EMAIL_REQUIRED' || parsed.code === 'IDENTITY_NOT_VERIFIED')) {
       return {
         ok: false,
         needEmail: true,
@@ -200,6 +213,7 @@ export async function associateOfficialAccount({ providerKey, username, operator
     username: parsed.username || user,
     operatorId: qq,
     email: parsed.email || userEmail || '',
+    matchedBy: parsed.matchedBy || '',
     msg: `已将平台用户「${parsed.username || user}」与 QQ ${qq} 关联`,
   }
 }

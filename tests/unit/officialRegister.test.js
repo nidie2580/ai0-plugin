@@ -211,4 +211,38 @@ describe('officialRegister', () => {
     assert.equal(result.ok, false)
     assert.match(result.msg, /未绑定有效 QQ/)
   })
+
+  it('关联 QQ 优先：不带用户名，合作方按 QQ 反查回传用户名即成功', async () => {
+    let seenUsername
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', operatorId: '10001' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async (method, url, payload) => {
+          seenUsername = payload.username
+          assert.equal(payload.qq, '10001')
+          return { status: 200, data: { ok: true, username: 'alice', associated: true } }
+        },
+      },
+    )
+    assert.equal(seenUsername, undefined)
+    assert.equal(result.ok, true)
+    assert.equal(result.username, 'alice')
+    assert.equal(result.matchedBy, 'qq')
+  })
+
+  it('关联 QQ 优先：未匹配到账号 → needUsername 提示手填用户名', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', operatorId: '10001' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => ({ status: 404, data: { ok: false, code: 'USER_NOT_FOUND' } }),
+      },
+    )
+    assert.equal(result.ok, false)
+    assert.equal(result.needUsername, true)
+    assert.match(result.msg, /用户名/)
+  })
 })

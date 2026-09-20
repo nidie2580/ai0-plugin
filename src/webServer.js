@@ -795,11 +795,35 @@ export function createApp() {
 
     // — P0-2: 白名单校验顶层字段 —
     const ALLOWED_TOP_KEYS = new Set([
-      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web', 'securityLog', 'imageInput'
+      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web', 'securityLog', 'imageInput', 'security'
     ])
     const unknownKeys = Object.keys(config).filter(k => !ALLOWED_TOP_KEYS.has(k))
     if (unknownKeys.length) {
       return res.json({ ok: false, msg: `不允许的配置字段: ${unknownKeys.join(', ')}` })
+    }
+
+    // — security.allowPrivateHosts：显式放行可访问私有/回环地址的 API 主机（SSRF 白名单）—
+    //   仅允许字符串/字符串数组；逐项清洗、限量，防止写入超长或非字符串内容。
+    if (config.security && typeof config.security === 'object' && !Array.isArray(config.security)) {
+      const rawAllow = config.security.allowPrivateHosts
+      if (rawAllow != null && rawAllow !== '') {
+        const list = (Array.isArray(rawAllow) ? rawAllow : [rawAllow])
+          .map((v) => String(v == null ? '' : v).trim())
+          .filter(Boolean)
+        if (list.length > 50) {
+          return res.json({ ok: false, msg: 'security.allowPrivateHosts 最多 50 条' })
+        }
+        if (list.some((v) => v.length > 253 || /[\u0000-\u001f<>\s]/.test(v))) {
+          return res.json({ ok: false, msg: 'security.allowPrivateHosts 含有非法主机名' })
+        }
+        config.security.allowPrivateHosts = list
+      } else {
+        config.security.allowPrivateHosts = []
+      }
+      const badSec = Object.keys(config.security).filter((k) => k !== 'allowPrivateHosts')
+      if (badSec.length) {
+        return res.json({ ok: false, msg: `security 含有不允许的字段: ${badSec.join(', ')}` })
+      }
     }
 
     // — P0-2: 禁止通过 API 修改 permissions.masters —
@@ -1464,6 +1488,7 @@ export function createApp() {
         msg: result.msg || '关联官方账号失败',
         code: result.code,
         needEmail: !!result.needEmail,
+        needUsername: !!result.needUsername,
       })
     } catch (err) {
       safeLogger.error(`[ai0-plugin] 官方账号关联失败: ${redactOfficialText(err.message)}`)

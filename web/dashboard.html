@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI0-Plugin · 控制台</title>
-<link rel="stylesheet" href="/assets/app.css?v=20260919e" />
+<link rel="stylesheet" href="/assets/app.css?v=20260920a" />
 </head>
 <body>
 <header class="topbar">
@@ -307,10 +307,10 @@
 <div id="officialAssociateDlg" class="guard-lock hidden" role="dialog" aria-modal="true" aria-labelledby="officialAssociateTitle">
   <div class="guard-lock-card official-associate-card">
     <h2 id="officialAssociateTitle">关联官方平台账号</h2>
-    <p class="hint">把当前登录 QQ 关联到合作方平台上的用户名。该用户名绑定的邮箱必须等于「当前登录 QQ + @qq.com」，由平台校验通过后才会关联成功；填错会提示未匹配。若注册回包未带用户名，请手动填写你在该平台已注册的用户名。</p>
+    <p class="hint">默认先用当前登录 QQ 去合作方平台匹配已注册账号，匹配成功即完成关联（无需手填用户名）。仅当平台未找到该 QQ 关联的账号时，才需要填写你在该平台注册的用户名；合作方会校验该用户名绑定的邮箱是否与 QQ 一致，填错会提示未匹配。</p>
     <p class="hint" id="officialAssociateQq">当前登录 QQ：未绑定</p>
-    <label>平台用户名
-      <input id="officialAssociateUser" maxlength="64" placeholder="该 API 平台上的用户名" autocomplete="off" />
+    <label>平台用户名（可留空）
+      <input id="officialAssociateUser" maxlength="64" placeholder="留空则按 QQ 匹配；未匹配到时再填写" autocomplete="off" />
     </label>
     <label id="officialAssociateEmailWrap" class="hidden">绑定邮箱
       <input id="officialAssociateEmail" maxlength="254" placeholder="该用户名实际绑定的邮箱，如 abc123@qq.com" autocomplete="off" />
@@ -335,6 +335,6 @@
   </div>
 </div>
 
-<script src="/assets/app.js?v=20260919e" data-route="dashboard"></script>
+<script src="/assets/app.js?v=20260920a" data-route="dashboard"></script>
 </body>
 </html>

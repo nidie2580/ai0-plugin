@@ -1,6 +1,7 @@
 import dns from 'node:dns/promises'
 import net from 'node:net'
 import axios from 'axios'
+import * as cfg from '../config/index.js'
 
 /**
  * 判断 IP 是否为私有/回环/链路本地/保留地址（SSRF 防护用）。
@@ -111,6 +112,52 @@ function isPrivateIpv6(ip) {
 const dnsCache = new Map()
 const DNS_CACHE_TTL = 60_000 // 60 秒
 
+/**
+ * 私有/回环地址白名单（security.allowPrivateHosts）。
+ *
+ * 场景：机器人服务器与 OpenAI 兼容 API 部署在同一台机器，API 地址是
+ * `http://127.0.0.1:PORT/v1` 或 `http://localhost:PORT/v1`。默认一律拒绝私有/回环地址，
+ * 只有管理员在配置中显式列出的主机才放行（fail-closed）。
+ *
+ * 支持：主机名、IPv4/IPv6 字面量、`host:port`（取 host 部分），或 `*`（放行所有，不推荐）。
+ */
+let _allowRawKey = null
+let _allowSet = new Set()
+
+function getPrivateAllowSet() {
+  let raw = []
+  try { raw = cfg.get('security.allowPrivateHosts', []) } catch (_) { raw = [] }
+  const key = JSON.stringify(raw == null ? null : raw)
+  if (key === _allowRawKey) return _allowSet
+  _allowRawKey = key
+  const list = Array.isArray(raw) ? raw : (raw == null || raw === '' ? [] : [raw])
+  const set = new Set()
+  for (const item of list) {
+    const s = String(item == null ? '' : item).trim().toLowerCase()
+    if (!s) continue
+    if (s === '*') { set.add('*'); continue }
+    let host = s
+    if (host.startsWith('[')) {
+      // IPv6 字面量：[::1] 或 [::1]:8000
+      host = host.replace(/^\[([^\]]*)\].*$/, '$1')
+    } else if (/^[^:]+:\d+$/.test(host)) {
+      // host:port → 取 host
+      host = host.split(':')[0]
+    }
+    if (host) set.add(host)
+  }
+  _allowSet = set
+  return set
+}
+
+function isAllowlistedHost(hostname) {
+  const set = getPrivateAllowSet()
+  if (!set.size) return false
+  if (set.has('*')) return true
+  const h = String(hostname == null ? '' : hostname).toLowerCase().replace(/^\[|\]$/g, '')
+  return !!h && set.has(h)
+}
+
 function getDnsCache(hostname) {
   const entry = dnsCache.get(hostname)
   if (entry && Date.now() - entry.at < DNS_CACHE_TTL) return entry.addrs
@@ -152,15 +199,20 @@ export async function isAllowedOutboundUrl(u) {
 
   const v = net.isIP(hostname)
   if (v === 4 || v === 6) {
-    if (isPrivateIp(hostname)) return { ok: false, reason: '拒绝访问私有或回环 IP 地址' }
+    if (isPrivateIp(hostname) && !isAllowlistedHost(hostname)) {
+      return { ok: false, reason: '拒绝访问私有或回环 IP 地址（如确为同机 API，可在 config.yaml 的 security.allowPrivateHosts 中显式放行该地址）' }
+    }
     return { ok: true, resolvedIp: hostname }
   }
 
   // DNS Rebinding 防护：优先使用 TTL 缓存
+  const hostAllowed = isAllowlistedHost(hostname)
   const cached = getDnsCache(hostname)
   if (cached) {
     for (const a of cached) {
-      if (isPrivateIp(a)) return { ok: false, reason: '域名解析到私有或回环地址，拒绝访问' }
+      if (isPrivateIp(a) && !hostAllowed && !isAllowlistedHost(a)) {
+        return { ok: false, reason: '域名解析到私有或回环地址，拒绝访问' }
+      }
     }
     return { ok: true, resolvedIp: cached[0] }
   }
@@ -170,7 +222,9 @@ export async function isAllowedOutboundUrl(u) {
     if (!Array.isArray(addrs) || addrs.length === 0) return { ok: false, reason: '域名无法解析' }
     const ipList = addrs.map(a => a.address).filter(Boolean)
     for (const a of ipList) {
-      if (isPrivateIp(a)) return { ok: false, reason: '域名解析到私有或回环地址，拒绝访问' }
+      if (isPrivateIp(a) && !hostAllowed && !isAllowlistedHost(a)) {
+        return { ok: false, reason: '域名解析到私有或回环地址，拒绝访问' }
+      }
     }
     // 缓存解析结果（即使拒绝也缓存，防止同一域名反复 DNS 查询）
     setDnsCache(hostname, ipList)
