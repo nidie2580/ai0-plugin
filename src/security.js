@@ -2,6 +2,7 @@ import dns from 'node:dns/promises'
 import net from 'node:net'
 import axios from 'axios'
 import * as cfg from '../config/index.js'
+import { isOfficialHost, officialHttpsAgent } from './officialApi.js'
 
 /**
  * 判断 IP 是否为私有/回环/链路本地/保留地址（SSRF 防护用）。
@@ -245,6 +246,24 @@ export function hasSystemProxy() {
   return keys.some((k) => String(process.env[k] || '').trim())
 }
 
+/**
+ * 官方合作方域名（api.djyun.click）跳过 TLS 证书校验。
+ *
+ * 背景：官方 API 的证书链/域名与插件侧 TLS 栈不匹配时，拉取模型列表、注册、关联会报
+ * "证书校验失败"。仅对官方域名放宽，其余主机一律保持完整证书校验；DNS pinning 与
+ * Host/servername 逻辑不变（servername 仍为原始域名，SNI 正常）。
+ */
+function applyOfficialTlsBypass(axiosOpts, url) {
+  try {
+    const u = new URL(url)
+    if (u.protocol === 'https:' && isOfficialHost(u.hostname)) {
+      axiosOpts.httpsAgent = officialHttpsAgent()
+      axiosOpts.rejectUnauthorized = false
+    }
+  } catch (_) {}
+  return axiosOpts
+}
+
 export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 3) {
   let current = origUrl
   let redirects = 0
@@ -277,6 +296,7 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
         }
       } catch (_) {}
     }
+    applyOfficialTlsBypass(axiosOpts, current)
     let resp
     try {
       resp = await axios.get(connectUrl, axiosOpts)
@@ -351,6 +371,7 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
         } catch (_) {}
       }
       const conf = Object.assign({}, reqOpts, { method, url: connectUrl, data, maxRedirects: 0, validateStatus: () => true })
+      applyOfficialTlsBypass(conf, current)
       const resp = await axios.request(conf)
       if (resp.status >= 300 && resp.status < 400) {
         const loc = resp.headers?.location

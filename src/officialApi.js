@@ -1,3 +1,5 @@
+import https from 'node:https'
+
 export const OFFICIAL_KIND = 'official'
 export const CUSTOM_KIND = 'custom'
 export const OFFICIAL_HOST = 'api.djyun.click'
@@ -7,6 +9,32 @@ export const OFFICIAL_KEY_PREFIX = 'official'
 export const OFFICIAL_REGISTER_PATH = '/plugin/register'
 export const OFFICIAL_ASSOCIATE_PATH = '/plugin/associate'
 export const OFFICIAL_PLUGIN_NAME = 'ai0-plugin'
+
+function normalizeHostname(value) {
+  return String(value == null ? '' : value).trim().toLowerCase().replace(/^\[|\]$/g, '')
+}
+
+/**
+ * 目标主机是否为官方合作方域名（含其子域）。仅此类主机允许放宽 TLS 证书校验，
+ * 避免官方证书链异常时注册/关联/拉模型列表全部失败，同时不对其他主机降级。
+ */
+export function isOfficialHost(hostname) {
+  const h = normalizeHostname(hostname)
+  if (!h) return false
+  if (h === OFFICIAL_HOST) return true
+  return h.endsWith('.' + OFFICIAL_HOST)
+}
+
+let _officialHttpsAgent = null
+/**
+ * 供官方域名使用的 https agent（跳过证书校验）。全局复用，避免每次请求新建连接池。
+ */
+export function officialHttpsAgent() {
+  if (!_officialHttpsAgent) {
+    _officialHttpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: false })
+  }
+  return _officialHttpsAgent
+}
 
 export function isOfficialKind(kind) {
   return String(kind || '').trim().toLowerCase() === OFFICIAL_KIND

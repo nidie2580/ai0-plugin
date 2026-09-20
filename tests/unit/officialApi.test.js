@@ -23,10 +23,31 @@ import {
   sanitizeOfficialQq,
   sanitizeOfficialEmail,
   officialAssociateExpectedEmail,
+  isOfficialHost,
+  officialHttpsAgent,
   OFFICIAL_API_BASE,
 } from '../../src/officialApi.js'
 
 describe('officialApi', () => {
+  it('isOfficialHost 仅匹配官方域名及其子域', () => {
+    assert.equal(isOfficialHost('api.djyun.click'), true)
+    assert.equal(isOfficialHost('API.DJYUN.CLICK'), true)
+    assert.equal(isOfficialHost('  api.djyun.click  '), true)
+    assert.equal(isOfficialHost('sub.api.djyun.click'), true)
+    assert.equal(isOfficialHost('djyun.click'), false)
+    assert.equal(isOfficialHost('evil-djyun.click'), false)
+    assert.equal(isOfficialHost('api.djyun.click.evil.com'), false)
+    assert.equal(isOfficialHost(''), false)
+    assert.equal(isOfficialHost(null), false)
+  })
+
+  it('officialHttpsAgent 返回跳验证的 agent 且复用同一实例', () => {
+    const a = officialHttpsAgent()
+    const b = officialHttpsAgent()
+    assert.equal(a, b)
+    assert.equal(a.options.rejectUnauthorized, false)
+  })
+
   it('allocateOfficialKey 避开已占用 key', () => {
     assert.equal(allocateOfficialKey([]), 'official')
     assert.equal(allocateOfficialKey(['official']), 'official-2')
