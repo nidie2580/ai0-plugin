@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260924a'
+window.__AI0_BUILD__ = '20260924b'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -1693,6 +1693,18 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   // ---- 平台广播（页面最顶部，仅展示；不发 QQ 群，不调 pending/ack） ----
   // 媒体一律走后端代理 /api/official/broadcast-media/{id}，页面不出现官方域名。
   let broadcastExpanded = false
+  let broadcastLatestId = 0
+  const BROADCAST_DISMISS_KEY = 'ai0_broadcast_dismiss_id'
+
+  function readBroadcastDismissal() {
+    try { return localStorage.getItem(BROADCAST_DISMISS_KEY) } catch (_) { return null }
+  }
+  function writeBroadcastDismissal(v) {
+    try { localStorage.setItem(BROADCAST_DISMISS_KEY, v) } catch (_) {}
+  }
+  function clearBroadcastDismissal() {
+    try { localStorage.removeItem(BROADCAST_DISMISS_KEY) } catch (_) {}
+  }
 
   function renderBroadcastItem(b) {
     const esc = escapeHtml
@@ -1714,11 +1726,18 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const bar = $('#broadcastBar')
     if (!bar) return
     if (!data || data.available === false) { bar.classList.add('hidden'); return }
-    bar.classList.remove('hidden')
     const list = $('#broadcastList')
     const staleEl = $('#broadcastStale')
     if (staleEl) staleEl.classList.toggle('hidden', !data.stale)
     const items = Array.isArray(data.broadcasts) ? data.broadcasts : []
+    broadcastLatestId = items.reduce((m, b) => Math.max(m, Number(b.id) || 0), 0)
+    // 已手动收起：同批公告（或已清空的列表）保持隐藏；平台出现新 id 或手动刷新时恢复
+    const dismissed = readBroadcastDismissal()
+    if (dismissed !== null && (broadcastLatestId === 0 || dismissed === String(broadcastLatestId))) {
+      bar.classList.add('hidden')
+      return
+    }
+    bar.classList.remove('hidden')
     const toggle = $('#broadcastToggle')
     if (!list) return
     if (!items.length) {
@@ -1750,11 +1769,20 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
 
   {
     const bcRefresh = $('#broadcastRefresh')
-    if (bcRefresh) bcRefresh.addEventListener('click', () => loadBroadcasts(true))
+    if (bcRefresh) bcRefresh.addEventListener('click', () => {
+      clearBroadcastDismissal()
+      loadBroadcasts(true)
+    })
     const bcToggle = $('#broadcastToggle')
     if (bcToggle) bcToggle.addEventListener('click', () => {
       broadcastExpanded = !broadcastExpanded
       loadBroadcasts(false)
+    })
+    const bcClose = $('#broadcastClose')
+    if (bcClose) bcClose.addEventListener('click', () => {
+      writeBroadcastDismissal(String(broadcastLatestId))
+      const bar = $('#broadcastBar')
+      if (bar) bar.classList.add('hidden')
     })
     loadBroadcasts()
   }
