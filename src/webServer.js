@@ -16,11 +16,12 @@ import * as videoGen from './videoGen.js'
 import * as caps from './modelCapabilities.js'
 import * as helper from './helper.js'
 import * as multiChatService from './multiChatService.js'
-import { isAllowedOutboundUrl } from './security.js'
+import { isAllowedOutboundUrl, safeAxiosRequest } from './security.js'
 import { safeLogger } from './globals.js'
 import * as loginGuard from './loginGuard.js'
 import { getOfficialMeta, isOfficialKind, normalizeProviderKind, forceOfficialApiBase, omitOfficialSecrets, omitOfficialProbeUrl, redactOfficialText } from './officialApi.js'
 import { registerOfficialKey, associateOfficialAccount } from './officialRegister.js'
+import { fetchOfficialBroadcasts, getBroadcastMediaUrl } from './officialBroadcast.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -1462,6 +1463,75 @@ export function createApp() {
     } catch (err) {
       safeLogger.error(`[ai0-plugin] 官方 API 注册失败: ${redactOfficialText(err.message)}`)
       res.json({ ok: false, msg: '官方密钥签发失败' })
+    }
+  })
+
+  // ---- 平台广播（仅网页展示；不投递 QQ 群，不调用 pending/ack）----
+  // 列表：媒体地址不回传，前端经 /api/official/broadcast-media/:id 代理取媒体，
+  //       保证官方域名不出现在页面任何位置。
+  app.get('/api/official/broadcasts', requireAuth, requireApiRate('broadcast', 30, 60_000), async (req, res) => {
+    try {
+      const r = await fetchOfficialBroadcasts({ force: String(req.query.refresh || '') === '1' })
+      if (!r.ok && r.error === '未配置官方 API') {
+        return res.json({ ok: true, available: false, stale: false, broadcasts: [], error: '' })
+      }
+      res.json({
+        ok: true,
+        available: true,
+        stale: !!r.stale,
+        error: r.ok ? '' : (r.error || '平台广播暂不可用'),
+        broadcasts: (r.broadcasts || []).map((b) => ({
+          id: b.id,
+          title: b.title,
+          content: b.content,
+          mediaType: b.media_type,
+          hasMedia: !!b.media_url,
+          publishedAt: b.execute_at || '',
+          createdAt: b.created_at || '',
+        })),
+      })
+    } catch (err) {
+      safeLogger.error(`[ai0-plugin] 平台广播列表失败: ${redactOfficialText(err?.message || err)}`)
+      res.json({ ok: false, available: true, stale: true, broadcasts: [], error: '平台广播暂不可用' })
+    }
+  })
+
+  // 媒体代理：仅允许代理「本实例缓存列表里出现过」的 media_url（按 id 反查），
+  // 禁止把 URL 作为参数传入，避免变成任意 URL 代理（SSRF 面 + 域名外泄）。
+  app.get('/api/official/broadcast-media/:id', requireAuth, requireApiRate('broadcast-media', 60, 60_000), async (req, res) => {
+    try {
+      const id = Number(req.params.id)
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(404).json({ ok: false, msg: '媒体不存在' })
+      }
+      const mediaUrl = getBroadcastMediaUrl(id)
+      if (!mediaUrl) {
+        return res.status(404).json({ ok: false, msg: '媒体不存在' })
+      }
+      const MAX_MEDIA_BYTES = 10 * 1024 * 1024
+      const cap = MAX_MEDIA_BYTES + 4096
+      const r = await safeAxiosRequest('get', mediaUrl, null, {
+        responseType: 'arraybuffer',
+        timeout: 20000,
+        maxContentLength: cap,
+        maxBodyLength: cap,
+      })
+      if (Number(r?.status) !== 200) {
+        return res.status(502).json({ ok: false, msg: '媒体拉取失败' })
+      }
+      const buf = Buffer.from(r.data || [])
+      if (!buf.length) {
+        return res.status(502).json({ ok: false, msg: '媒体拉取失败' })
+      }
+      if (buf.length > MAX_MEDIA_BYTES) {
+        return res.status(413).json({ ok: false, msg: '媒体过大' })
+      }
+      res.set('Content-Type', String(r.headers?.['content-type'] || 'application/octet-stream'))
+      res.set('Cache-Control', 'private, max-age=600')
+      res.send(buf)
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 平台广播媒体代理失败: ${redactOfficialText(err?.message || err)}`)
+      res.status(502).json({ ok: false, msg: '媒体拉取失败' })
     }
   })
 

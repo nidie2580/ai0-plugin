@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI0-Plugin · 控制台</title>
-<link rel="stylesheet" href="/assets/app.css?v=20260920a" />
+<link rel="stylesheet" href="/assets/app.css?v=20260924a" />
 </head>
 <body>
 <header class="topbar">
@@ -25,6 +25,19 @@
 </header>
 
 <main class="container">
+  <!-- ==================== 平台广播（页面最顶部，仅展示；不发 QQ 群） ==================== -->
+  <section id="broadcastBar" class="broadcast-bar hidden" aria-live="polite">
+    <div class="broadcast-head">
+      <span class="broadcast-title">📢 平台公告</span>
+      <span id="broadcastStale" class="broadcast-stale hidden">广播可能不是最新</span>
+      <span class="broadcast-actions">
+        <button id="broadcastRefresh" class="btn ghost sm" type="button">刷新</button>
+        <button id="broadcastToggle" class="btn ghost sm hidden" type="button">展开全部</button>
+      </span>
+    </div>
+    <div id="broadcastList" class="broadcast-list"></div>
+  </section>
+
   <!-- ==================== 首页：全屏英雄区 + 模型健康 ==================== -->
   <section id="view-home" class="view active">
     <div class="hero-band">
@@ -335,6 +348,6 @@
   </div>
 </div>
 
-<script src="/assets/app.js?v=20260920a" data-route="dashboard"></script>
+<script src="/assets/app.js?v=20260924a" data-route="dashboard"></script>
 </body>
 </html>

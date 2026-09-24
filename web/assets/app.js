@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260919e'
+window.__AI0_BUILD__ = '20260924a'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -1689,6 +1689,75 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   const associateSkip = $('#officialAssociateSkip')
   if (associateOk) associateOk.addEventListener('click', () => { submitOfficialAssociate() })
   if (associateSkip) associateSkip.addEventListener('click', () => { closeOfficialAssociate() })
+
+  // ---- 平台广播（页面最顶部，仅展示；不发 QQ 群，不调 pending/ack） ----
+  // 媒体一律走后端代理 /api/official/broadcast-media/{id}，页面不出现官方域名。
+  let broadcastExpanded = false
+
+  function renderBroadcastItem(b) {
+    const esc = escapeHtml
+    const mediaSrc = `/api/official/broadcast-media/${encodeURIComponent(b.id)}`
+    const media = b.hasMedia && b.mediaType === 'image'
+      ? `<img class="broadcast-media" src="${mediaSrc}" alt="公告图片" loading="lazy" />`
+      : (b.hasMedia && b.mediaType === 'voice'
+        ? `<audio class="broadcast-media" controls preload="none" src="${mediaSrc}"></audio>`
+        : '')
+    const contentHtml = b.content ? `<div class="broadcast-content">${esc(b.content)}</div>` : ''
+    const time = esc(b.publishedAt || b.createdAt || '')
+    return `<article class="broadcast-item">`
+      + `<div class="broadcast-item-head"><strong>${esc(b.title)}</strong>${time ? `<span class="muted">${time}</span>` : ''}</div>`
+      + contentHtml + media
+      + `</article>`
+  }
+
+  function renderBroadcasts(data) {
+    const bar = $('#broadcastBar')
+    if (!bar) return
+    if (!data || data.available === false) { bar.classList.add('hidden'); return }
+    bar.classList.remove('hidden')
+    const list = $('#broadcastList')
+    const staleEl = $('#broadcastStale')
+    if (staleEl) staleEl.classList.toggle('hidden', !data.stale)
+    const items = Array.isArray(data.broadcasts) ? data.broadcasts : []
+    const toggle = $('#broadcastToggle')
+    if (!list) return
+    if (!items.length) {
+      list.innerHTML = '<p class="hint broadcast-empty">暂无平台公告</p>'
+      if (toggle) toggle.classList.add('hidden')
+      return
+    }
+    const shown = broadcastExpanded ? items : items.slice(0, 3)
+    list.innerHTML = shown.map(renderBroadcastItem).join('')
+    if (toggle) {
+      if (items.length > 3) {
+        toggle.classList.remove('hidden')
+        toggle.textContent = broadcastExpanded ? '收起' : `展开全部（${items.length} 条）`
+      } else {
+        toggle.classList.add('hidden')
+      }
+    }
+  }
+
+  async function loadBroadcasts(force = false) {
+    try {
+      const r = await api(`/api/official/broadcasts${force ? '?refresh=1' : ''}`, { timeout: 25000 })
+      renderBroadcasts(r)
+    } catch (_) {
+      const bar = $('#broadcastBar')
+      if (bar) bar.classList.add('hidden')
+    }
+  }
+
+  {
+    const bcRefresh = $('#broadcastRefresh')
+    if (bcRefresh) bcRefresh.addEventListener('click', () => loadBroadcasts(true))
+    const bcToggle = $('#broadcastToggle')
+    if (bcToggle) bcToggle.addEventListener('click', () => {
+      broadcastExpanded = !broadcastExpanded
+      loadBroadcasts(false)
+    })
+    loadBroadcasts()
+  }
 
   // 初始化（正常路径：块内所有绑定成功 → 最后加载配置并填充表单）
   // 若前面发生未捕获的同步错误，会由文件顶部的全局 window.onerror 弹窗提示并写「初始化失败」，
