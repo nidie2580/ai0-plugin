@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260924c'
+window.__AI0_BUILD__ = '20260925a'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -18,11 +18,12 @@ async function api(path, { method = 'GET', body, raw = false, timeout = 0 } = {}
   }
   // CSRF: POST/DELETE 时从 cookie 读取 token 并附带到 header
   if (method === 'POST' || method === 'DELETE') {
-    const csrf = document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('ai0_csrf='))?.split('=')[1]
+    const csrf = (document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('ai0_csrf=')) && document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('ai0_csrf=')).split('=')[1])
     if (csrf) opts.headers['X-CSRF-Token'] = csrf
   }
   // 可选超时（毫秒）：防止 fetch 被挂起导致页面无限停留在加载状态
-  if (timeout > 0) {
+  // 旧内核（Chromium < 66）无 AbortController，此时跳过超时机制，保证功能可用
+  if (timeout > 0 && typeof AbortController === 'function') {
     const ctrl = new AbortController()
     opts.signal = ctrl.signal
     const timer = setTimeout(() => ctrl.abort(), timeout)
@@ -38,12 +39,12 @@ async function doFetch(path, opts, raw) {
   const r = await fetch(path, opts)
   const text = await r.text()
   let data = {}
-  try { data = text ? JSON.parse(text) : {} } catch { data = { raw: text } }
+  try { data = text ? JSON.parse(text) : {} } catch (_) { data = { raw: text } }
   if (raw) return { status: r.status, ok: r.ok, data }
   return data
 }
 
-const route = document.currentScript?.dataset.route || ''
+const route = (document.currentScript && document.currentScript.dataset && document.currentScript.dataset.route) || ''
 
 // ============== 全局错误捕获 ==============
 // 任何未捕获的同步错误或 Promise 拒绝都会在这里弹窗显示具体报错（含行号），
@@ -96,16 +97,16 @@ if (route === 'login') {
   const input = $('#codeInput')
   const err = $('#err')
   const waitPane = $('#waitPane')
-  input?.addEventListener('input', () => {
+  (input && input.addEventListener('input', () => {
     input.value = input.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)
     err.textContent = ''
-  })
-  codeIdInput?.addEventListener('input', () => {
+  }))
+  (codeIdInput && codeIdInput.addEventListener('input', () => {
     codeIdInput.value = codeIdInput.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 64)
     err.textContent = ''
-  })
-  input?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
-  codeIdInput?.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() })
+  }))
+  (input && input.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() }))
+  (codeIdInput && codeIdInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() }))
 
   {
     const el = $('#loginBtn')
@@ -113,7 +114,7 @@ if (route === 'login') {
   }
 
   function showWait() {
-    waitPane?.classList.remove('hidden')
+    (waitPane && waitPane.classList && waitPane.classList.remove('hidden'))
   }
 
   async function pollClaim(pendingId) {
@@ -127,7 +128,7 @@ if (route === 'login') {
           if (window.__ai0ClaimTimer === timer) window.__ai0ClaimTimer = null
           const cl = await api('/api/login/code/claim', { method: 'POST', body: { pendingId } })
           if (cl && cl.ok) { location.href = '/'; return }
-          err.textContent = cl?.msg || '放行失败，请稍后重试'
+          err.textContent = (cl && cl.msg) || '放行失败，请稍后重试'
         }
       } catch (_) {}
     }, 2500)
@@ -139,7 +140,7 @@ if (route === 'login') {
 
   async function doLogin() {
     err.textContent = ''
-    const codeId = (codeIdInput?.value || '').trim()
+    const codeId = ((codeIdInput && codeIdInput.value) || '').trim()
     const code = input.value.trim()
     if (!codeId) {
       err.textContent = '请输入验证码 ID（你的 QQ 号或 stdin）'
@@ -324,7 +325,7 @@ if (route === 'dashboard') {
     if (idx >= 0) {
       // 高亮卡片：用输入框反查父卡片
       const keyEl = $(`#providersList [data-idx="${idx}"][data-field="key"]`)
-      const cardEl = keyEl?.closest('.provider-card') || $$('#providersList .provider-card')[idx]
+      const cardEl = (keyEl && keyEl.closest('.provider-card')) || $$('#providersList .provider-card')[idx]
       if (cardEl) {
         $$('.provider-card').forEach(c => c.classList.remove('flash'))
         cardEl.classList.add('flash')
@@ -373,65 +374,65 @@ if (route === 'dashboard') {
     if (!resp.ok) { $('#cfgTag').textContent = '加载失败'; return }
     currentConfig = resp.config
     $('#cfgTag').textContent = '已加载'
-    $('#cfg_default').value = resp.config.model?.default || 'openai-compatible'
+    $('#cfg_default').value = (resp.config.model && resp.config.model.default) || 'openai-compatible'
 
     buildModelTabs(resp.config.model || {})
-    const mkey = resp.config.model?.default || currentModelKey || Object.keys(resp.config.model || {})[0]
+    const mkey = (resp.config.model && resp.config.model.default) || currentModelKey || Object.keys(resp.config.model || {})[0]
     selectModel(mkey)
 
     // chat
-    $('#chat_groupAtReply').value = String(resp.config.chat?.groupAtReply ?? true)
-    $('#chat_privateReply').value = String(resp.config.chat?.privateReply ?? true)
-    $('#chat_globalAI').value = String(resp.config.chat?.globalAI ?? false)
-    $('#chat_globalAIGroups').value = (resp.config.chat?.globalAIGroups || []).join(',')
-    $('#chat_globalAIIgnorePrefix').value = (resp.config.chat?.globalAIIgnorePrefix || ['#', '/', '！']).join(',')
-    $('#chat_contextSize').value = resp.config.chat?.contextSize ?? 10
-    $('#chat_maxSessionsPerUser').value = resp.config.chat?.maxSessionsPerUser ?? 3
-    $('#chat_triggerPrefix').value = (resp.config.chat?.triggerPrefix || []).join(',')
-    $('#chat_sessionTimeout').value = resp.config.chat?.sessionTimeout ?? 1800000
-    const mmCfg = resp.config.chat?.multiModel || {}
-    $('#chat_multiModel_enabled').value = String(mmCfg.enabled ?? false)
-    $('#chat_multiModel_multiChat').value = String(mmCfg.multiChat ?? false)
-    $('#chat_multiModel_groupConfirm').value = String(mmCfg.groupConfirm ?? true)
-    $('#chat_multiModel_atModel').value = String(mmCfg.atModel ?? true)
-    $('#chat_multiModel_deliberate').value = String(mmCfg.deliberate ?? false)
-    $('#chat_multiModel_maxRounds').value = mmCfg.maxRounds ?? 3
-    const lgCfg = resp.config.chat?.loopGuard || {}
-    $('#chat_loopGuard_enabled').value = String(lgCfg.enabled ?? true)
-    $('#chat_loopGuard_windowMs').value = lgCfg.windowMs ?? 20000
-    $('#chat_loopGuard_maxReplies').value = lgCfg.maxReplies ?? 4
-    $('#chat_loopGuard_cooldownMs').value = lgCfg.cooldownMs ?? 60000
-    const prCfg = resp.config.chat?.privateRateLimit || {}
-    $('#chat_privateRate_enabled').value = String(prCfg.enabled ?? true)
-    $('#chat_privateRate_windowMs').value = prCfg.windowMs ?? 60000
-    $('#chat_privateRate_maxReplies').value = prCfg.maxReplies ?? 20
+    $('#chat_groupAtReply').value = String((((resp.config.chat && resp.config.chat.groupAtReply)) != null ? ((resp.config.chat && resp.config.chat.groupAtReply)) : (true)))
+    $('#chat_privateReply').value = String((((resp.config.chat && resp.config.chat.privateReply)) != null ? ((resp.config.chat && resp.config.chat.privateReply)) : (true)))
+    $('#chat_globalAI').value = String((((resp.config.chat && resp.config.chat.globalAI)) != null ? ((resp.config.chat && resp.config.chat.globalAI)) : (false)))
+    $('#chat_globalAIGroups').value = ((resp.config.chat && resp.config.chat.globalAIGroups) || []).join(',')
+    $('#chat_globalAIIgnorePrefix').value = ((resp.config.chat && resp.config.chat.globalAIIgnorePrefix) || ['#', '/', '！']).join(',')
+    $('#chat_contextSize').value =(((resp.config.chat && resp.config.chat.contextSize)) != null ? ((resp.config.chat && resp.config.chat.contextSize)) : (10))
+    $('#chat_maxSessionsPerUser').value =(((resp.config.chat && resp.config.chat.maxSessionsPerUser)) != null ? ((resp.config.chat && resp.config.chat.maxSessionsPerUser)) : (3))
+    $('#chat_triggerPrefix').value = ((resp.config.chat && resp.config.chat.triggerPrefix) || []).join(',')
+    $('#chat_sessionTimeout').value =(((resp.config.chat && resp.config.chat.sessionTimeout)) != null ? ((resp.config.chat && resp.config.chat.sessionTimeout)) : (1800000))
+    const mmCfg = (resp.config.chat && resp.config.chat.multiModel) || {}
+    $('#chat_multiModel_enabled').value = String(((mmCfg.enabled) != null ? (mmCfg.enabled) : (false)))
+    $('#chat_multiModel_multiChat').value = String(((mmCfg.multiChat) != null ? (mmCfg.multiChat) : (false)))
+    $('#chat_multiModel_groupConfirm').value = String(((mmCfg.groupConfirm) != null ? (mmCfg.groupConfirm) : (true)))
+    $('#chat_multiModel_atModel').value = String(((mmCfg.atModel) != null ? (mmCfg.atModel) : (true)))
+    $('#chat_multiModel_deliberate').value = String(((mmCfg.deliberate) != null ? (mmCfg.deliberate) : (false)))
+    $('#chat_multiModel_maxRounds').value =((mmCfg.maxRounds) != null ? (mmCfg.maxRounds) : (3))
+    const lgCfg = (resp.config.chat && resp.config.chat.loopGuard) || {}
+    $('#chat_loopGuard_enabled').value = String(((lgCfg.enabled) != null ? (lgCfg.enabled) : (true)))
+    $('#chat_loopGuard_windowMs').value =((lgCfg.windowMs) != null ? (lgCfg.windowMs) : (20000))
+    $('#chat_loopGuard_maxReplies').value =((lgCfg.maxReplies) != null ? (lgCfg.maxReplies) : (4))
+    $('#chat_loopGuard_cooldownMs').value =((lgCfg.cooldownMs) != null ? (lgCfg.cooldownMs) : (60000))
+    const prCfg = (resp.config.chat && resp.config.chat.privateRateLimit) || {}
+    $('#chat_privateRate_enabled').value = String(((prCfg.enabled) != null ? (prCfg.enabled) : (true)))
+    $('#chat_privateRate_windowMs').value =((prCfg.windowMs) != null ? (prCfg.windowMs) : (60000))
+    $('#chat_privateRate_maxReplies').value =((prCfg.maxReplies) != null ? (prCfg.maxReplies) : (20))
 
-    const muCfg = resp.config.chat?.music || {}
-    $('#chat_music_enabled').value = String(muCfg.enabled ?? false)
+    const muCfg = (resp.config.chat && resp.config.chat.music) || {}
+    $('#chat_music_enabled').value = String(((muCfg.enabled) != null ? (muCfg.enabled) : (false)))
     $('#chat_music_source').value = muCfg.source === 'qq' ? 'qq' : 'netease'
-    $('#chat_music_maxResults').value = muCfg.maxResults ?? 3
+    $('#chat_music_maxResults').value =((muCfg.maxResults) != null ? (muCfg.maxResults) : (3))
     $('#chat_music_tryPlayUrl').value = String(muCfg.tryPlayUrl !== false)
 
-    $('#system_prompt').value = resp.config.system?.prompt || ''
-    $('#agent_maxRounds').value = resp.config.agent?.maxRounds ?? 5
-    $('#agent_hardTimeoutMs').value = resp.config.agent?.hardTimeoutMs ?? 600000
+    $('#system_prompt').value = (resp.config.system && resp.config.system.prompt) || ''
+    $('#agent_maxRounds').value =(((resp.config.agent && resp.config.agent.maxRounds)) != null ? ((resp.config.agent && resp.config.agent.maxRounds)) : (5))
+    $('#agent_hardTimeoutMs').value =(((resp.config.agent && resp.config.agent.hardTimeoutMs)) != null ? ((resp.config.agent && resp.config.agent.hardTimeoutMs)) : (600000))
 
-    $('#perm_mode').value = String(resp.config.permissions?.whitelistMode ?? false)
-    $('#perm_masters').value = (resp.config.permissions?.masters || []).join(',')
-    $('#perm_allowedUsers').value = (resp.config.permissions?.allowedUsers || []).join(',')
-    $('#perm_allowedGroups').value = (resp.config.permissions?.allowedGroups || []).join(',')
-    $('#perm_blockedUsers').value = (resp.config.permissions?.blockedUsers || []).join(',')
-    $('#perm_blockedGroups').value = (resp.config.permissions?.blockedGroups || []).join(',')
+    $('#perm_mode').value = String((((resp.config.permissions && resp.config.permissions.whitelistMode)) != null ? ((resp.config.permissions && resp.config.permissions.whitelistMode)) : (false)))
+    $('#perm_masters').value = ((resp.config.permissions && resp.config.permissions.masters) || []).join(',')
+    $('#perm_allowedUsers').value = ((resp.config.permissions && resp.config.permissions.allowedUsers) || []).join(',')
+    $('#perm_allowedGroups').value = ((resp.config.permissions && resp.config.permissions.allowedGroups) || []).join(',')
+    $('#perm_blockedUsers').value = ((resp.config.permissions && resp.config.permissions.blockedUsers) || []).join(',')
+    $('#perm_blockedGroups').value = ((resp.config.permissions && resp.config.permissions.blockedGroups) || []).join(',')
 
-    $('#resp_useForwardMsg').value = String(resp.config.response?.useForwardMsg ?? true)
-    $('#resp_forwardThreshold').value = resp.config.response?.forwardThreshold ?? 500
-    $('#resp_showModelTag').value = String(resp.config.response?.showModelTag ?? true)
-    $('#resp_typingDelay').value = resp.config.response?.typingDelay ?? 500
-    $('#resp_deepThink').value = String(resp.config.response?.deepThink ?? false)
-    $('#resp_deepThinkTimeout').value = resp.config.response?.deepThinkTimeout ?? 300000
-    $('#web_port').value = resp.config.web?.port ?? 12580
-    $('#web_host').value = resp.config.web?.host ?? '127.0.0.1'
-    $('#web_trustProxy').checked = !!resp.config.web?.trustProxy
+    $('#resp_useForwardMsg').value = String((((resp.config.response && resp.config.response.useForwardMsg)) != null ? ((resp.config.response && resp.config.response.useForwardMsg)) : (true)))
+    $('#resp_forwardThreshold').value =(((resp.config.response && resp.config.response.forwardThreshold)) != null ? ((resp.config.response && resp.config.response.forwardThreshold)) : (500))
+    $('#resp_showModelTag').value = String((((resp.config.response && resp.config.response.showModelTag)) != null ? ((resp.config.response && resp.config.response.showModelTag)) : (true)))
+    $('#resp_typingDelay').value =(((resp.config.response && resp.config.response.typingDelay)) != null ? ((resp.config.response && resp.config.response.typingDelay)) : (500))
+    $('#resp_deepThink').value = String((((resp.config.response && resp.config.response.deepThink)) != null ? ((resp.config.response && resp.config.response.deepThink)) : (false)))
+    $('#resp_deepThinkTimeout').value =(((resp.config.response && resp.config.response.deepThinkTimeout)) != null ? ((resp.config.response && resp.config.response.deepThinkTimeout)) : (300000))
+    $('#web_port').value =(((resp.config.web && resp.config.web.port)) != null ? ((resp.config.web && resp.config.web.port)) : (12580))
+    $('#web_host').value =(((resp.config.web && resp.config.web.host)) != null ? ((resp.config.web && resp.config.web.host)) : ('127.0.0.1'))
+    $('#web_trustProxy').checked = !!(resp.config.web && resp.config.web.trustProxy)
   }
 
   function buildModelTabs(models) {
@@ -453,7 +454,7 @@ if (route === 'dashboard') {
     $$('.model-tab').forEach(t => {
       t.classList.toggle('active', t.textContent === key)
     })
-    const model = currentConfig.model?.[key] || {}
+    const model = (currentConfig.model && currentConfig.model[key]) || {}
     const isOfficial = String(model.kind || '').toLowerCase() === 'official'
     const form = $('#modelForm')
     if (isOfficial) {
@@ -471,9 +472,9 @@ if (route === 'dashboard') {
       <label>API Base<input id="m_apiBase" value="${escapeHtml(model.apiBase || '')}" placeholder="https://.../v1"/></label>
       <label>API Key<input id="m_apiKey" value="${escapeHtml(model.apiKey || '')}" placeholder="sk-..." autocomplete="off"/></label>
       <label>模型 ID<input id="m_model" value="${escapeHtml(model.model || '')}"/></label>
-      <label>温度 (temperature)<input id="m_temperature" type="number" step="0.1" min="0" max="2" value="${model.temperature ?? 0.8}"/></label>
-      <label>Max Tokens<input id="m_maxTokens" type="number" min="1" value="${model.maxTokens ?? 2000}"/></label>
-      <label>超时 (ms)<input id="m_timeout" type="number" min="1000" value="${model.timeout ?? 60000}"/></label>
+      <label>温度 (temperature)<input id="m_temperature" type="number" step="0.1" min="0" max="2" value="${((model.temperature) != null ? (model.temperature) : (0.8))}"/></label>
+      <label>Max Tokens<input id="m_maxTokens" type="number" min="1" value="${((model.maxTokens) != null ? (model.maxTokens) : (2000))}"/></label>
+      <label>超时 (ms)<input id="m_timeout" type="number" min="1000" value="${((model.timeout) != null ? (model.timeout) : (60000))}"/></label>
       <label>支持图片输入 (vision)
         <select id="m_vision"><option value="false">关闭</option><option value="true">开启</option></select>
       </label>
@@ -481,30 +482,30 @@ if (route === 'dashboard') {
         <select id="m_web"><option value="false">关闭</option><option value="true">开启</option></select>
       </label>
     `
-    $('#m_vision').value = String(model.vision ?? false)
-    $('#m_web').value = String(model.web ?? false)
+    $('#m_vision').value = String(((model.vision) != null ? (model.vision) : (false)))
+    $('#m_web').value = String(((model.web) != null ? (model.web) : (false)))
   }
 
   function readFormModel() {
     const oldKey = currentModelKey
     const newKey = $('#m_key').value.trim() || oldKey
     const obj = {}
-    const existing = currentConfig?.model?.[oldKey] || {}
+    const existing = (currentConfig && currentConfig.model && currentConfig.model[oldKey]) || {}
     const isOfficial = String(existing.kind || '').toLowerCase() === 'official'
     for (const id of ['name', 'apiBase', 'apiKey', 'model']) {
       const el = document.getElementById('m_' + id)
       if (!el) continue
-      const v = el.value ?? ''
+      const v =((el.value) != null ? (el.value) : (''))
       if (v) obj[id] = v
     }
-    const temperature = parseFloat(document.getElementById('m_temperature')?.value)
-    const maxTokens = parseInt(document.getElementById('m_maxTokens')?.value, 10)
-    const timeout = parseInt(document.getElementById('m_timeout')?.value, 10)
+    const temperature = parseFloat((document.getElementById('m_temperature') && document.getElementById('m_temperature').value))
+    const maxTokens = parseInt((document.getElementById('m_maxTokens') && document.getElementById('m_maxTokens').value), 10)
+    const timeout = parseInt((document.getElementById('m_timeout') && document.getElementById('m_timeout').value), 10)
     if (!Number.isNaN(temperature)) obj.temperature = temperature
     if (!Number.isNaN(maxTokens)) obj.maxTokens = maxTokens
     if (!Number.isNaN(timeout)) obj.timeout = timeout
     if (!isOfficial) {
-      const boolOf = (id) => document.getElementById('m_' + id)?.value === 'true'
+      const boolOf = (id) => (document.getElementById('m_' + id) && document.getElementById('m_' + id).value) === 'true'
       obj.vision = boolOf('vision')
       obj.web = boolOf('web')
       // 与「多API平台」的 scopes 双写保持一致：vision 开关同步到 scopes 中的 vision 项，
@@ -533,7 +534,7 @@ if (route === 'dashboard') {
     if (oldKey && oldKey !== newKey && c.model[oldKey]) {
       delete c.model[oldKey]
     }
-    c.model[newKey] = { ...(c.model[newKey] || {}), ...obj }
+    c.model[newKey] = Object.assign({}, c.model[newKey] || {}, obj)
     if (c.model.default === oldKey && oldKey !== newKey) c.model.default = newKey
 
     // chat 对象做浅合并：UI 未覆盖的扩展键（chat.music、multiModel.judgeModel 等）不会因保存被抹掉
@@ -541,8 +542,7 @@ if (route === 'dashboard') {
     const prevMM = prevChat.multiModel || {}
     let delibRounds = parseInt($('#chat_multiModel_maxRounds').value, 10)
     if (!Number.isInteger(delibRounds) || delibRounds < 2 || delibRounds > 8) delibRounds = 3
-    c.chat = {
-      ...prevChat,
+    c.chat = Object.assign({}, prevChat, {
       groupAtReply: $('#chat_groupAtReply').value === 'true',
       privateReply: $('#chat_privateReply').value === 'true',
       globalAI: $('#chat_globalAI').value === 'true',
@@ -552,34 +552,32 @@ if (route === 'dashboard') {
       maxSessionsPerUser: parseIntOr($('#chat_maxSessionsPerUser').value, 3),
       triggerPrefix: splitCsv($('#chat_triggerPrefix').value),
       sessionTimeout: parseIntOr($('#chat_sessionTimeout').value, -1),
-      multiModel: {
-        ...prevMM,
+      multiModel: Object.assign({}, prevMM, {
         enabled: $('#chat_multiModel_enabled').value === 'true',
         multiChat: $('#chat_multiModel_multiChat').value === 'true',
         groupConfirm: $('#chat_multiModel_groupConfirm').value === 'true',
         atModel: $('#chat_multiModel_atModel').value === 'true',
         deliberate: $('#chat_multiModel_deliberate').value === 'true',
         maxRounds: delibRounds
-      },
+      }),
       loopGuard: {
         enabled: $('#chat_loopGuard_enabled').value === 'true',
         windowMs: parseIntOr($('#chat_loopGuard_windowMs').value, 20000),
         maxReplies: parseIntOr($('#chat_loopGuard_maxReplies').value, 4),
         cooldownMs: parseIntOr($('#chat_loopGuard_cooldownMs').value, 60000)
       },
-      privateRateLimit: {
-        ...(prevChat.privateRateLimit || {}),
+      privateRateLimit: Object.assign({}, prevChat.privateRateLimit || {}, {
         enabled: $('#chat_privateRate_enabled').value === 'true',
         windowMs: parseIntOr($('#chat_privateRate_windowMs').value, 60000),
         maxReplies: parseIntOr($('#chat_privateRate_maxReplies').value, 20)
-      },
+      }),
       music: {
         enabled: $('#chat_music_enabled').value === 'true',
         source: $('#chat_music_source').value === 'qq' ? 'qq' : 'netease',
         maxResults: Math.min(5, Math.max(1, parseIntOr($('#chat_music_maxResults').value, 3))),
         tryPlayUrl: $('#chat_music_tryPlayUrl').value !== 'false'
       }
-    }
+    })
     c.system = { prompt: $('#system_prompt').value }
 
     // Agent 配置：maxRounds 前端校验（≥1 正整数，无 20 硬上限），越界拒绝保存
@@ -589,7 +587,7 @@ if (route === 'dashboard') {
       saveMsg.textContent = '❌ Agent 最大执行轮数必须为 1-10000 之间的整数'
       return
     }
-    c.agent = { ...(c.agent || {}), maxRounds }
+    c.agent = Object.assign({}, c.agent || {}, { maxRounds })
     // Agent 硬超时（ms）：30s~30min，默认 600000（10 分钟）
     const hardTimeoutMs = parseInt($('#agent_hardTimeoutMs').value, 10)
     if (Number.isFinite(hardTimeoutMs) && hardTimeoutMs >= 30000 && hardTimeoutMs <= 1800000) {
@@ -702,7 +700,7 @@ if (route === 'dashboard') {
     if (!r.ok) { if (!append) wrap.innerHTML = '<p class="empty">加载失败</p>'; return }
     const data = r.data || {}
     const items = data.items || []
-    const total = data.total ?? 0
+    const total =((data.total) != null ? (data.total) : (0))
     $('#chatlogTag').textContent = `${total} 条记录`
     if (!items.length) {
       if (!append) wrap.innerHTML = '<p class="empty">暂无互聊记录。开启多模型互聊后，模型间的对话会自动记录在这里。</p>'
@@ -727,7 +725,7 @@ if (route === 'dashboard') {
   }
   function startChatlogTimerIfNeeded() {
     stopChatlogTimer()
-    if ($('#chatlogAuto')?.checked) chatlogTimer = setInterval(() => loadChatlog(), 5000)
+    if (($('#chatlogAuto') && $('#chatlogAuto').checked)) chatlogTimer = setInterval(() => loadChatlog(), 5000)
   }
 
   {
@@ -819,7 +817,7 @@ if (route === 'dashboard') {
   async function resolveFallbackIdentity() {
     try {
       const cfgResp = await api('/api/config')
-      const botId = (cfgResp.config?.bot?.self_id || cfgResp.config?.bot?.uin || '')
+      const botId = ((cfgResp.config && cfgResp.config.bot && cfgResp.config.bot.self_id) || (cfgResp.config && cfgResp.config.bot && cfgResp.config.bot.uin) || '')
       return botId ? botId : '机器人'
     } catch (_) { return '机器人' }
   }
@@ -868,7 +866,7 @@ if (route === 'dashboard') {
   async function sendMic() {
     if (micBusy) return
     const input = $('#micInput')
-    const question = (input?.value || '').trim()
+    const question = ((input && input.value) || '').trim()
     if (!question) return
     const keys = selectedModelKeys()
     if (!keys.length) { alert('请至少选择一个模型'); return }
@@ -1028,7 +1026,7 @@ if (route === 'dashboard') {
       out.textContent =
         `模型名: ${r.modelName || '-'}\n` +
         `耗时: ${dur} ms\n` +
-        (r.probe ? `探测: ${r.probe.method || ''} ${r.probe.url || ''} → HTTP ${r.probe.status} (${r.probe.latencyMs ?? '-'} ms)\n` : '') +
+        (r.probe ? `探测: ${r.probe.method || ''} ${r.probe.url || ''} → HTTP ${r.probe.status} (${((r.probe.latencyMs) != null ? (r.probe.latencyMs) : ('-'))} ms)\n` : '') +
         availList +
         `Token使用: ${r.usage ? JSON.stringify(r.usage) : '-'}\n\n` +
         `— 回复 —\n${r.text || '(空)'}`
@@ -1104,7 +1102,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     providersCache = resp.config
     try {
       const meta = await api('/api/official/meta')
-      if (meta && meta.ok) officialMeta = { ...officialMeta, ...meta }
+      if (meta && meta.ok) officialMeta = Object.assign({}, officialMeta, meta)
     } catch (_) {}
     const modelCfg = resp.config.model || {}
     providersDefault = modelCfg.default || ''
@@ -1123,18 +1121,18 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         apiKey: m.apiKey || '',
         keyReady: !!m.keyReady,
         model: m.model || '',
-        temperature: m.temperature ?? 0.8,
-        maxTokens: m.maxTokens ?? 2000,
-        timeout: m.timeout ?? 60000,
+        temperature:((m.temperature) != null ? (m.temperature) : (0.8)),
+        maxTokens:((m.maxTokens) != null ? (m.maxTokens) : (2000)),
+        timeout:((m.timeout) != null ? (m.timeout) : (60000)),
         scopes: Array.isArray(m.scopes) && m.scopes.length
           ? m.scopes.slice()
           : (m.vision === true ? ['chat', 'vision'] : ['chat']),
         imageSize: m.imageSize || '',
         imageQuality: m.imageQuality || '',
-        imageTimeout: m.imageTimeout ?? '',
-        videoSeconds: m.videoSeconds ?? '',
+        imageTimeout:((m.imageTimeout) != null ? (m.imageTimeout) : ('')),
+        videoSeconds:((m.videoSeconds) != null ? (m.videoSeconds) : ('')),
         videoSize: m.videoSize || '',
-        videoTimeout: m.videoTimeout ?? ''
+        videoTimeout:((m.videoTimeout) != null ? (m.videoTimeout) : (''))
       })
     }
     $('#prov_default').value = providersDefault
@@ -1384,8 +1382,8 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const emailWrap = $('#officialAssociateEmailWrap')
     const emailEl = $('#officialAssociateEmail')
     if (!p || p.kind !== 'official') return
-    const username = String(userEl?.value || '').trim()
-    const email = String(emailEl?.value || '').trim()
+    const username = String((userEl && userEl.value) || '').trim()
+    const email = String((emailEl && emailEl.value) || '').trim()
     if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = username ? '正在关联…' : '正在按 QQ 匹配并关联…' }
     const body = { providerKey: p.key }
     if (username) body.username = username
@@ -1443,7 +1441,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     if (!confirm(`删除平台「${k}」？该平台的模型配置会被移除。`)) return
     providersList.splice(idx, 1)
     if (providersDefault === k) {
-      providersDefault = providersList[0]?.key || ''
+      providersDefault = (providersList[0] && providersList[0].key) || ''
     }
     $('#prov_default').value = providersDefault
     $('#provTag').textContent = `${providersList.length} 个平台`
@@ -1461,7 +1459,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const msg = $('#provMsg')
     if (!providersCache) { msg.textContent = '配置尚未加载'; return }
     // 同步默认平台输入框
-    providersDefault = $('#prov_default').value.trim() || providersList[0]?.key || ''
+    providersDefault = $('#prov_default').value.trim() || (providersList[0] && providersList[0].key) || ''
     // 校验：key 唯一且非空
     const seen = new Set()
     for (const p of providersList) {
@@ -1484,9 +1482,9 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
           ? (String(p.apiKey || '').trim() === API_KEY_PLACEHOLDER ? API_KEY_PLACEHOLDER : '')
           : normalizeApiKeyForSave(p.apiKey),
         model: String(p.model || '').trim(),
-        temperature: isOfficial ? (Number(prev?.temperature) || 0.8) : (Number(p.temperature) || 0.8),
-        maxTokens: isOfficial ? (Number(prev?.maxTokens) || 2000) : (Number(p.maxTokens) || 2000),
-        timeout: isOfficial ? (Number(prev?.timeout) || 60000) : (Number(p.timeout) || 60000)
+        temperature: isOfficial ? (Number((prev && prev.temperature)) || 0.8) : (Number(p.temperature) || 0.8),
+        maxTokens: isOfficial ? (Number((prev && prev.maxTokens)) || 2000) : (Number(p.maxTokens) || 2000),
+        timeout: isOfficial ? (Number((prev && prev.timeout)) || 60000) : (Number(p.timeout) || 60000)
       }
       if (!isOfficial) newModel[p.key].apiBase = String(p.apiBase || '').trim()
       // 能力作用域 + 生成参数（vision 由 scopes 派生，保存时双写）
@@ -1541,12 +1539,12 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       if (box) box.innerHTML = '<span class="hint">请先点「注册获取密钥」，密钥由合作方签发后再拉取模型。</span>'
       return
     }
-    const apiBase = isOfficial ? '' : (card?.querySelector(`[data-field="apiBase"]`)?.value?.trim() || p.apiBase)
-    const apiKeyRaw = isOfficial ? '' : (card?.querySelector(`[data-field="apiKey"]`)?.value?.trim())
+    const apiBase = isOfficial ? '' : ((card && card.querySelector(`[data-field="apiBase"]`) && card.querySelector(`[data-field="apiBase"]`).value && card.querySelector(`[data-field="apiBase"]`).value.trim()) || p.apiBase)
+    const apiKeyRaw = isOfficial ? '' : ((card && card.querySelector(`[data-field="apiKey"]`) && card.querySelector(`[data-field="apiKey"]`).value && card.querySelector(`[data-field="apiKey"]`).value.trim()))
     const apiKey = apiKeyRaw || p.apiKey
-    const key = isOfficial ? p.key : (card?.querySelector(`[data-field="key"]`)?.value?.trim() || p.key)
+    const key = isOfficial ? p.key : ((card && card.querySelector(`[data-field="key"]`) && card.querySelector(`[data-field="key"]`).value && card.querySelector(`[data-field="key"]`).value.trim()) || p.key)
     const cfgResp = await api('/api/config')
-    const modelCfg = cfgResp.config?.model || {}
+    const modelCfg = (cfgResp.config && cfgResp.config.model) || {}
     const exist = modelCfg[key]
     const keyActuallyModified = !isOfficial && !!apiKeyRaw && apiKeyRaw !== API_KEY_PLACEHOLDER
     const needSave = !exist
@@ -1561,7 +1559,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       box = liveBox
     }
     if (box) {
-      if (r.ok && r.info?.ok) {
+      if (r.ok && (r.info && r.info.ok)) {
         const models = r.info.models || []
         if (!models.length) {
           const note = r.info.unsupported
@@ -1576,11 +1574,11 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
               models.map(m => `<option value="${escapeHtml(m)}"${m === p.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')
             sel.classList.remove('hidden')
           }
-          box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${r.info.latencyMs ?? '-'} ms）。可在上方下拉中选择。</span>`
+          box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${((r.info.latencyMs) != null ? (r.info.latencyMs) : ('-'))} ms）。可在上方下拉中选择。</span>`
         }
       } else {
-        const urlHint = (!isOfficial && r.info?.url) ? `<br>URL: ${escapeHtml(r.info.url)}` : ''
-        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml(r.info?.error || r.msg || (r.info?.status != null ? `HTTP ${r.info.status}` : '未知错误'))}${urlHint}</span>`
+        const urlHint = (!isOfficial && (r.info && r.info.url)) ? `<br>URL: ${escapeHtml(r.info.url)}` : ''
+        box.innerHTML = `<span class="err">❌ 探测失败：${escapeHtml((r.info && r.info.error) || r.msg || ((r.info && r.info.status) != null ? `HTTP ${r.info.status}` : '未知错误'))}${urlHint}</span>`
       }
     }
   }
@@ -1623,7 +1621,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
               models.map(m => `<option value="${escapeHtml(m)}"${m === p.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')
             sel.classList.remove('hidden')
           }
-          box.innerHTML = `<span class="hint">✅ ${models.length} 个模型（${item.latencyMs ?? '-'} ms）</span>`
+          box.innerHTML = `<span class="hint">✅ ${models.length} 个模型（${((item.latencyMs) != null ? (item.latencyMs) : ('-'))} ms）</span>`
         }
       } else {
         box.innerHTML = `<span class="err">❌ ${escapeHtml(item.error || (item.status != null ? `HTTP ${item.status}` : '未知错误'))}</span>`
@@ -1673,7 +1671,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
   // ---- helpers ----
   function escapeHtml(s) {
     // 包含 / 转义（防 </script> 标签内嵌 JSON 场景，防御深度）
-    return String(s ?? '').replace(/[&<>"'/]/g, c => ({
+    return String(((s) != null ? (s) : (''))).replace(/[&<>"'/]/g, c => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '/': '&#x2F;'
     }[c]))
   }
