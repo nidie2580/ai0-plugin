@@ -97,16 +97,16 @@ if (route === 'login') {
   const input = $('#codeInput')
   const err = $('#err')
   const waitPane = $('#waitPane')
-  (input && input.addEventListener('input', () => {
+  ;(input && input.addEventListener('input', () => {
     input.value = input.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)
     err.textContent = ''
   }))
-  (codeIdInput && codeIdInput.addEventListener('input', () => {
+  ;(codeIdInput && codeIdInput.addEventListener('input', () => {
     codeIdInput.value = codeIdInput.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 64)
     err.textContent = ''
   }))
-  (input && input.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() }))
-  (codeIdInput && codeIdInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() }))
+  ;(input && input.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() }))
+  ;(codeIdInput && codeIdInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() }))
 
   {
     const el = $('#loginBtn')
