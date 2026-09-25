@@ -122,6 +122,36 @@ describe('officialRegister', () => {
     assert.equal(result.operatorId, '10001')
   })
 
+  it('关联：平台限频(429/RATE_LIMITED)时明确提示等待，不进入补用户名引导', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', operatorId: '10001' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => ({ status: 429, data: { ok: false, code: 'RATE_LIMITED', message: '身份校验失败次数过多' } }),
+      },
+    )
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'RATE_LIMITED')
+    assert.equal(result.needUsername, undefined)
+    assert.equal(result.needEmail, undefined)
+    assert.equal(result.msg, '身份校验失败次数过多')
+  })
+
+  it('关联：429 无错误信息时回退到内置等待提示', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', username: 'alice', operatorId: '10001' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => ({ status: 429, data: {} }),
+      },
+    )
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'RATE_LIMITED')
+    assert.match(result.msg, /1 小时后再试/)
+  })
+
   it('关联：合作方未证明邮箱匹配时拒绝，防用户名冒充（第一段转为要求补邮箱）', async () => {
     const result = await associateOfficialAccount(
       { providerKey: 'official', username: 'admin', operatorId: '10001' },

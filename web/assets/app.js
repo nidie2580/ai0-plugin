@@ -1,7 +1,7 @@
 /* global document, window, fetch */
 
 // 构建版本戳：用于在手机上确认加载的 app.js 是否最新（若值不符 = 浏览器在用旧缓存）
-window.__AI0_BUILD__ = '20260924b'
+window.__AI0_BUILD__ = '20260924c'
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -382,6 +382,9 @@ if (route === 'dashboard') {
     // chat
     $('#chat_groupAtReply').value = String(resp.config.chat?.groupAtReply ?? true)
     $('#chat_privateReply').value = String(resp.config.chat?.privateReply ?? true)
+    $('#chat_globalAI').value = String(resp.config.chat?.globalAI ?? false)
+    $('#chat_globalAIGroups').value = (resp.config.chat?.globalAIGroups || []).join(',')
+    $('#chat_globalAIIgnorePrefix').value = (resp.config.chat?.globalAIIgnorePrefix || ['#', '/', '！']).join(',')
     $('#chat_contextSize').value = resp.config.chat?.contextSize ?? 10
     $('#chat_maxSessionsPerUser').value = resp.config.chat?.maxSessionsPerUser ?? 3
     $('#chat_triggerPrefix').value = (resp.config.chat?.triggerPrefix || []).join(',')
@@ -542,6 +545,9 @@ if (route === 'dashboard') {
       ...prevChat,
       groupAtReply: $('#chat_groupAtReply').value === 'true',
       privateReply: $('#chat_privateReply').value === 'true',
+      globalAI: $('#chat_globalAI').value === 'true',
+      globalAIGroups: splitCsvInt($('#chat_globalAIGroups').value),
+      globalAIIgnorePrefix: splitCsv($('#chat_globalAIIgnorePrefix').value),
       contextSize: parseIntOr($('#chat_contextSize').value, 10),
       maxSessionsPerUser: parseIntOr($('#chat_maxSessionsPerUser').value, 3),
       triggerPrefix: splitCsv($('#chat_triggerPrefix').value),

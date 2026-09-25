@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>AI0-Plugin · 控制台</title>
-<link rel="stylesheet" href="/assets/app.css?v=20260924b" />
+<link rel="stylesheet" href="/assets/app.css?v=20260924c" />
 </head>
 <body>
 <header class="topbar">
@@ -83,6 +83,9 @@
       <div class="grid-2">
         <label>群聊艾特回复 <select id="chat_groupAtReply"><option value="true">开启</option><option value="false">关闭</option></select></label>
         <label>私聊回复 <select id="chat_privateReply"><option value="true">开启</option><option value="false">关闭</option></select></label>
+        <label>全局AI（指定群无需@） <select id="chat_globalAI"><option value="false">关闭</option><option value="true">开启</option></select></label>
+        <label>全局AI群号（逗号分隔） <input id="chat_globalAIGroups" placeholder="如：123456,234567"/></label>
+        <label>全局AI忽略前缀（逗号分隔） <input id="chat_globalAIIgnorePrefix" placeholder="如：#,/,！"/></label>
         <label>上下文轮数 <input id="chat_contextSize" type="number" min="0" max="50"/></label>
         <label>单用户最大会话数 <input id="chat_maxSessionsPerUser" type="number" min="1" max="50"/></label>
         <label>触发前缀（逗号分隔） <input id="chat_triggerPrefix" placeholder="如：#ai,小爱"/></label>
@@ -94,7 +97,7 @@
         <label>多模型协同讨论 <select id="chat_multiModel_deliberate"><option value="false">关闭</option><option value="true">开启</option></select></label>
         <label>协同最大讨论轮数 <input id="chat_multiModel_maxRounds" type="number" min="2" max="8"/></label>
       </div>
-      <p class="hint">多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。「艾特指定模型」允许用 /模型名 把消息单独转给某个模型。「群操一致性确认」：互聊开启时，AI 回复里带出的群操作会先转发给其他模型确认，任一否决则取消。「多模型协同讨论」：≥2 个模型先互相商量（各自输出立场→可同意他人版本→本地判定收敛），达成过半共识即输出一份统一回复；达最大轮数未收敛则由裁判模型综合。开启后群聊只发最终一条结论，不再逐个刷屏。注意：并行回答会成倍增加模型 API 调用次数。</p>
+      <p class="hint">全局AI：开启后，仅在「全局AI群号」列表内的群里，所有非命令消息都会触发回复（无需 @机器人）；「忽略前缀」中的消息不触发。与 QQ 命令 #ai全局ai on/off 等效，保存后立即生效。多模型并行回答：一条用户消息同时交给所有已配置模型各自作答。开启「模型间互聊」后，各模型会看到彼此的发言（带 [*] 标记），可就同一话题相互点评/聊天。「艾特指定模型」允许用 /模型名 把消息单独转给某个模型。「群操一致性确认」：互聊开启时，AI 回复里带出的群操作会先转发给其他模型确认，任一否决则取消。「多模型协同讨论」：≥2 个模型先互相商量（各自输出立场→可同意他人版本→本地判定收敛），达成过半共识即输出一份统一回复；达最大轮数未收敛则由裁判模型综合。开启后群聊只发最终一条结论，不再逐个刷屏。注意：并行回答会成倍增加模型 API 调用次数。</p>
 
       <hr>
       <h3>防 AI 互聊循环</h3>
@@ -349,6 +352,6 @@
   </div>
 </div>
 
-<script src="/assets/app.js?v=20260924b" data-route="dashboard"></script>
+<script src="/assets/app.js?v=20260924c" data-route="dashboard"></script>
 </body>
 </html>

@@ -185,6 +185,16 @@ export async function associateOfficialAccount({ providerKey, username, operator
   })
   if (!parsed.ok) {
     safeLogger.warn(`[ai0-plugin] 官方账号关联被拒绝: ${parsed.code || ''} ${parsed.message}`)
+    // 平台限频：同一实例 1 小时内身份校验失败 3 次 → 429/RATE_LIMITED。
+    // 明确提示等待，不进入「补用户名/补邮箱」的引导重试分支，避免继续撞限。
+    if (parsed.code === 'RATE_LIMITED') {
+      // parse 层对空 message 会回退「关联官方账号失败」；命中该兜底时改用内置的等待提示
+      const platformMsg = String(parsed.message || '').trim()
+      const msg = platformMsg && platformMsg !== '关联官方账号失败'
+        ? platformMsg
+        : '身份校验失败次数过多（同一实例 1 小时内最多 3 次），请约 1 小时后再试'
+      return { ok: false, code: 'RATE_LIMITED', msg }
+    }
     // QQ 优先匹配失败：未提供用户名时，平台未找到该 QQ 绑定的账号 → 让前端收集用户名后重试。
     if (!user && (parsed.needUsername || parsed.needEmail || parsed.code === 'USER_NOT_FOUND'
       || parsed.code === 'NEED_USERNAME' || parsed.code === 'USERNAME_REQUIRED'
