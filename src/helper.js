@@ -793,12 +793,13 @@ export function parseMessageWithContext(e) {
 /**
  * 给"发件人+文本"打标，生成适合喂给 LLM 的字符串（可配置开关 includeSenderTag）
  */
-export function formatTurnForPrompt({ name, text, isBot, tagBotAs = 'AI', tagUserAs = '用户' }) {
+export function formatTurnForPrompt({ name, text, isBot, tagBotAs = 'AI', tagUserAs = '用户', triggerTag = '' }) {
   const t = String(text ?? '').trim()
   if (!t) return ''
   const who =
     (name ? name : (isBot ? tagBotAs : tagUserAs)) +
-    (isBot ? `（${tagBotAs}）` : '')
+    (isBot ? `（${tagBotAs}）` : '') +
+    (triggerTag ? `·${triggerTag}` : '')
   // 用 "【发送者：昵称】\n消息内容：正文" 的两行结构，
   // 避免弱模型把发件人标识和正文粘成一句话（如"昵称：正文"）。
   return `【发送者：${who}】\n消息内容：${t}`

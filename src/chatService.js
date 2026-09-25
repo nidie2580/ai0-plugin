@@ -282,6 +282,9 @@ export function injectContextIntoHistory({ history, sysPrompt, parsed, opts, mod
   const includeQuote = !!opts.includeQuote
   const includeForward = !!opts.includeForward
   const quoteAsSystem = !!opts.quoteAsSystem
+  // 全局AI模式下：本轮触发来源（艾特/前缀/全局AI），以及是否需要在系统提示里追加"轻量回复"约定。
+  const triggerTag = opts.triggerTag || ''
+  const globalAIEnabled = !!opts.globalAIEnabled
 
   let next = history.slice()
 
@@ -294,6 +297,14 @@ export function injectContextIntoHistory({ history, sysPrompt, parsed, opts, mod
         '第一行是发件人标识：【发送者：昵称】，若昵称以"（AI）"结尾，说明这条消息就是你（机器人/AI）之前发送的消息；' +
         '第二行是正文：消息内容：xxx。' +
         '请你只把第二行"消息内容："后面的文字当作真正要回复的内容，不要重复"【发送者：...】"和"消息内容："这些标签。'
+    )
+  }
+  if (globalAIEnabled) {
+    systemLines.push(
+      '【全局AI模式】当前群已开启全局AI：发件人标识可能带 "·艾特触发 / ·前缀触发 / ·全局AI触发"，' +
+        '表示本条因何触发回复（·艾特触发=被单独点名；·全局AI触发=群内随口发言）。' +
+        '如果一条消息没有艾特机器人，那它大概率不是特别发给你的，请轻量回复即可' +
+        '（简短作答，不主动展开长篇或执行重任务）；只有当内容明显在直接向你提问或求助时，才正常详细回复。'
     )
   }
   if (systemLines.length) {
@@ -381,7 +392,7 @@ export function injectContextIntoHistory({ history, sysPrompt, parsed, opts, mod
     next.push({
       role: 'user',
       content: includeSenderTag
-        ? helper.formatTurnForPrompt({ ...cur, tagBotAs: modelConfigName })
+        ? helper.formatTurnForPrompt({ ...cur, tagBotAs: modelConfigName, triggerTag })
         : cur.text
     })
   }
@@ -785,6 +796,16 @@ export async function handleChat(e) {
 
   if (!matched) return false
 
+  // 触发来源标注：仅当开启全局AI时，在发件人标识中标注本条是"艾特/前缀触发"还是"全局AI触发"，
+  // 便于模型区分"被单独点名"与"群里随口一说"（后者按 injectContextIntoHistory 的全局AI约定轻量回复）。
+  const globalAIEnabled = globalAI === true
+  const globalAIInGroup = globalAIEnabled && isGroup && globalAIGroups.includes(String(groupId))
+  const triggerTag = globalAIInGroup
+    ? (helper.isAtBot(e)
+      ? '艾特触发'
+      : (triggerPrefix.some(p => text.startsWith(p)) ? '前缀触发' : '全局AI触发'))
+    : ''
+
   // 防 AI 互聊循环：确认要回复前登记一次触发；若判定循环冷却中则静默跳过，
   // 避免与同群的其他机器人互相 @ 无限互答烧 token/余额。
   if (loopGuardReport(groupId, userId).suppressed) return false
@@ -893,6 +914,10 @@ export async function handleChat(e) {
   const rawTimeout = Number(modelCfg2.timeout)
   const deepThink = cfg.getDeepThinkConfig(defaultKey)
   const relaxTimeout = cfg.shouldRelaxLlmTimeout(defaultKey)
+  // 是否允许把"思考过程"发送给用户：该模型深度思考开启（response.deepThink 全局优先，旧 per-model 兜底）
+  // 且未显式关闭 response.showReasoning。response.deepThink=false 时即使上游仍返回 reasoning 也不再外发。
+  const showReasoningCfg = cfg.get('response.showReasoning', true) !== false
+  const reasoningVisible = (modelKey) => showReasoningCfg && cfg.getDeepThinkConfig(modelKey).enabled
   const hardTimeout = cfg.resolveChatHardTimeoutMs({
     enabled: relaxTimeout,
     timeout: deepThink.timeout,
@@ -1040,7 +1065,7 @@ export async function handleChat(e) {
     history,
     sysPrompt: finalSysPrompt,
     parsed,
-    opts: contextOpts,
+    opts: { ...contextOpts, triggerTag, globalAIEnabled: globalAIInGroup },
     modelConfigName: modelNameCfg
   })
 
@@ -1186,12 +1211,10 @@ export async function handleChat(e) {
           ? ok.map((r) => `【${modelDisplay(r.modelKey)}】${r.text}`).join('\n\n')
           : `(所有模型均调用出错：${userFacingLLMError(failed[0]?.message)})`
         modelName = ok.map((r) => modelDisplay(r.modelKey)).join('、')
-        // 多模型模式的深度思考：分别发送各模型思考过程
-        if (cfg.get('response.showReasoning', true) !== false) {
-          for (const r of ok) {
-            if (r.reasoning) {
-              try { await helper.replyReasoningAsChat(e, r.reasoning) } catch (_) {}
-            }
+        // 多模型模式的深度思考：分别发送各模型思考过程（仅该模型深度思考开启时）
+        for (const r of ok) {
+          if (r.reasoning && reasoningVisible(r.modelKey)) {
+            try { await helper.replyReasoningAsChat(e, r.reasoning) } catch (_) {}
           }
         }
       } else {
@@ -1199,7 +1222,7 @@ export async function handleChat(e) {
         const res = ok[0]
         replyText = res ? res.text : `(模型调用出错：${userFacingLLMError(failed[0]?.message)})`
         modelName = res?.modelName || ''
-        if (res?.reasoning && cfg.get('response.showReasoning', true) !== false) {
+        if (res?.reasoning && reasoningVisible(res.modelKey || defaultChatKey)) {
           try {
             await helper.replyReasoningAsChat(e, res.reasoning)
           } catch (err) {
@@ -1411,7 +1434,7 @@ export async function handleChat(e) {
       // 累计每轮深度思考，Agent 长任务默认不逐轮发送，任务结束/出错后统一汇总一次性发送（防刷屏）
       const agentReasonings = []
       const finishReasoning = async () => {
-        if (agentReasonings.length && cfg.get('response.showReasoning', true) !== false) {
+        if (agentReasonings.length && reasoningVisible(defaultKey)) {
           try {
             // 一次性汇总发送；prefix 标注这是汇总，避免与普通深度思考混淆
             const summary = agentReasonings.join('\n\n')

@@ -135,6 +135,27 @@ describe('chatService: N7 system 头替换而非追加', () => {
   })
 })
 
+describe('chatService: 全局AI触发标注与轻量回复约定', () => {
+  test('globalAIEnabled 时注入全局AI约定，并在发件人标识标注触发来源', () => {
+    const opts = { includeQuote: false, includeForward: false, includeSenderTag: true, triggerTag: '全局AI触发', globalAIEnabled: true }
+    const parsed = makeParsed({ current: { text: '今天天气不错', name: '张三', isBot: false, user_id: '1' } })
+    const out = injectContextIntoHistory({ history: [], sysPrompt: '你是助手', parsed, opts })
+    const joined = out.map((m) => m.content).join('\n')
+    assert.ok(joined.includes('【全局AI模式】'), '应注入全局AI约定')
+    assert.ok(joined.includes('轻量回复'), '应含轻量回复提示')
+    assert.ok(joined.includes('【发送者：张三·全局AI触发】'), '发件人标识应标注全局AI触发')
+  })
+
+  test('未开启全局AI时不注入约定、不标注触发来源', () => {
+    const opts = { includeQuote: false, includeForward: false, includeSenderTag: true }
+    const parsed = makeParsed({ current: { text: 'hi', name: '李四', isBot: false, user_id: '2' } })
+    const out = injectContextIntoHistory({ history: [], sysPrompt: '你是助手', parsed, opts })
+    const joined = out.map((m) => m.content).join('\n')
+    assert.ok(!joined.includes('【全局AI模式】'), '不应注入全局AI约定')
+    assert.ok(joined.includes('【发送者：李四】'), '发件人标识不应带触发来源')
+  })
+})
+
 describe('chatService: 会话按群/私聊隔离', () => {
   test('同一用户群聊与私聊使用不同会话', () => {
     const uid = 'sess-iso-' + Date.now()

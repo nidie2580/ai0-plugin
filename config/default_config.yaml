@@ -308,7 +308,7 @@ response:
   # 深度思考全局开关（作用于所有模型，如 DeepSeek-R1 / Qwen3 thinking 等）：
   #   true  → ① 思考过程会以"聊天记录"形式发送（可关 response.showReasoning）
   #          ② 所有模型的单次请求超时放宽到 deepThinkTimeout（见下），避免思考被切断
-  #   false → 所有模型均不按深度思考处理（可用来强制关掉旧 per-model thinking 遗留配置）
+  #   false → 所有模型均不按深度思考处理（不外发思考过程，可强制关掉旧 per-model thinking 遗留配置）
   #   （未配置时回退读旧版 model.xxx.thinking 字段）
   deepThink: false
   # 深度思考模型单次请求超时（毫秒，可选，仅在 deepThink:true 时生效，兜底 300s）
