@@ -47,6 +47,10 @@ describe('botIdentity 多账号身份', () => {
       assert.equal(id.adapter, 'napcat')
       assert.equal(id.selfId, '1111')
     })
+
+    it('单账号不对回应归属做限制', () => {
+      assert.equal(botIdentity.shouldAccountRespond({ self_id: '1111' }, ['2222']), true)
+    })
   })
 
   describe('多账号场景（运行时自动发现）', () => {
@@ -80,6 +84,34 @@ describe('botIdentity 多账号身份', () => {
       assert.equal(helper.isSelfId({ self_id: '1111' }, '1111'), true)
       assert.equal(helper.isSelfId({ self_id: '1111' }, '3333'), true)
       assert.equal(helper.isSelfId({ self_id: '1111' }, '9999'), false)
+    })
+
+    it('helper.listAtTargets 提取全部 @ 目标', () => {
+      const e = { message: [{ type: 'at', qq: '3333' }, { type: 'text', text: '你好' }, { type: 'at', data: { qq: '4444' } }] }
+      assert.deepEqual(helper.listAtTargets(e).sort(), ['3333', '4444'])
+      assert.deepEqual(helper.listAtTargets({ at: '2222' }), ['2222'])
+      assert.deepEqual(helper.listAtTargets(null), [])
+    })
+
+    it('@ 指定账号时仅该账号回应', () => {
+      const e = (sid) => ({ self_id: sid, group_id: '999' })
+      assert.equal(botIdentity.shouldAccountRespond(e('3333'), ['3333']), true)
+      assert.equal(botIdentity.shouldAccountRespond(e('2222'), ['3333']), false)
+      assert.equal(botIdentity.shouldAccountRespond(e('2222'), ['3333', '2222']), true)
+    })
+
+    it('未 @ 任何自身账号时仅主账号回应', () => {
+      const e = (sid) => ({ self_id: sid, group_id: '999' })
+      assert.equal(botIdentity.shouldAccountRespond(e('1111'), []), true)
+      assert.equal(botIdentity.shouldAccountRespond(e('2222'), []), false)
+      assert.equal(botIdentity.shouldAccountRespond(e('2222'), [], { primarySid: '2222' }), true)
+      // 配置的主账号不在集合内时回退到第一个自身账号
+      assert.equal(botIdentity.shouldAccountRespond(e('1111'), [], { primarySid: '9999' }), true)
+      assert.equal(botIdentity.shouldAccountRespond(e('2222'), [], { primarySid: '9999' }), false)
+    })
+
+    it('非本插件账号不被干预', () => {
+      assert.equal(botIdentity.shouldAccountRespond({ self_id: '9999', group_id: '999' }, []), true)
     })
   })
 })

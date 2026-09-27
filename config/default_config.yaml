@@ -58,6 +58,9 @@ bot:
   self_persona: ""
   # 本插件连接的全部 QQ 账号（用于把兄弟账号识别为机器人）。留空则仅用运行时自动发现 + accounts 推导。
   selfIds: []
+  # 主账号：全局AI模式下未被 @ 任何自身账号时，由该账号统一回应（避免多号刷屏）。
+  # 留空则取 selfIds 的第一个。
+  primarySid: ""
   # 按账号覆盖名称/人设。key 可为 "适配器_QQ号"（如 snowluma_222）或纯 "QQ号"（如 222）。
   # accounts:
   #   "snowluma_222":

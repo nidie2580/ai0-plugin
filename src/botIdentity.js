@@ -107,20 +107,24 @@ export function discoverSelfIds() {
   const add = (v) => { const s = String(v ?? '').trim(); if (/^\d{4,}$/.test(s)) out.add(s) }
   try {
     const g = globalThis
-    const bots = [g.Bot, g.bot].filter(Boolean)
-    for (const b of bots) {
-      add(b.uin); add(b.self_id)
-      if (Array.isArray(b.uin)) for (const u of b.uin) add(u)
-      if (Array.isArray(b.uinList)) for (const u of b.uinList) add(u)
-      if (Array.isArray(b.botList)) for (const u of b.botList) add(u?.uin ?? u)
-      if (b.adapter) {
-        const arr = Array.isArray(b.adapter) ? b.adapter : [b.adapter]
-        for (const a of arr) { add(a?.uin); add(a?.self_id) }
+    const roots = [g.Bot, g.bot, g.Bots].filter(Boolean)
+    for (const root of roots) {
+      const bots = Array.isArray(root) ? root : [root]
+      for (const b of bots) {
+        if (!b || typeof b !== 'object') continue
+        add(b.uin); add(b.self_id); add(b.id)
+        if (Array.isArray(b.uin)) for (const u of b.uin) add(u)
+        if (Array.isArray(b.uinList)) for (const u of b.uinList) add(u)
+        if (Array.isArray(b.botList)) for (const u of b.botList) add(u?.uin ?? u)
+        if (b.adapter) {
+          const arr = Array.isArray(b.adapter) ? b.adapter : [b.adapter]
+          for (const a of arr) { add(a?.uin); add(a?.self_id); add(a?.account?.uin) }
+        }
+        for (const coll of [b.bots, b.botList, b.bot]) {
+          if (coll && typeof coll === 'object') for (const k of Object.keys(coll)) add(k)
+        }
+        for (const k of Object.keys(b)) add(k)
       }
-      for (const coll of [b.bots, b.botList]) {
-        if (coll && typeof coll === 'object') for (const k of Object.keys(coll)) add(k)
-      }
-      if (typeof b === 'object') for (const k of Object.keys(b)) add(k)
     }
   } catch (_) {}
   _discoverCache = { at: now, ids: [...out] }
@@ -132,6 +136,28 @@ export function isMultiAccountConfigured() {
   if (cfg.get('bot.injectIdentity', false) === true) return true
   if (Object.keys(getAccountsMap()).length > 0) return true
   return listSelfIds().length > 1
+}
+
+/**
+ * 多账号应答归属判定：本次事件所属账号是否应当回应。
+ * 规则（仅在识别到多个自身账号时生效）：
+ *   - 消息 @ 了某些自身账号：仅被 @ 的账号回应；
+ *   - 消息未 @ 任何自身账号：仅主账号（primarySid，缺省取 selfIds 第一个）回应；
+ *   - 当前账号不在自身账号集合内：不干预（返回 true）。
+ * @param {object} e 事件
+ * @param {string[]} atTargets 本条消息被 @ 的 QQ 号（由 helper.listAtTargets 提供）
+ * @param {{primarySid?: string}} [opts]
+ */
+export function shouldAccountRespond(e, atTargets = [], { primarySid = '' } = {}) {
+  const selfIdSet = listSelfIds().map(String)
+  if (selfIdSet.length <= 1) return true
+  const me = String(e?.self_id ?? e?.bot?.uin ?? e?.bot?.self_id ?? '')
+  if (!me || !selfIdSet.includes(me)) return true
+  const mentioned = (Array.isArray(atTargets) ? atTargets : []).map(String).filter(q => selfIdSet.includes(q))
+  if (mentioned.length > 0) return mentioned.includes(me)
+  const configured = String(primarySid || '').trim()
+  const primary = configured && selfIdSet.includes(configured) ? configured : selfIdSet[0]
+  return me === primary
 }
 
 /**

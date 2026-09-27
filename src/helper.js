@@ -373,6 +373,25 @@ export function isAtBot(e) {
   return false
 }
 
+/** 列出本条消息里被 @ 的全部 QQ 号（用于多账号下判断"@ 的是哪个号"） */
+export function listAtTargets(e) {
+  const out = []
+  const add = (v) => { const s = String(v ?? '').trim(); if (/^\d+$/.test(s) && s !== '0') out.push(s) }
+  try {
+    const msg = Array.isArray(e?.message) ? e.message : []
+    for (const seg of msg) {
+      if (!seg || seg.type !== 'at') continue
+      add(seg.qq ?? seg.data?.qq ?? seg.user_id ?? seg.data?.user_id)
+    }
+    if (e?.at) add(e.at)
+    if (e?.atBot && typeof e.atBot === 'object') add(e.atBot.qq ?? e.atBot.user_id)
+    for (const seg of (Array.isArray(e?.raw_message) ? e.raw_message : [])) {
+      if (seg && seg.type === 'at') add(seg.qq ?? seg.data?.qq)
+    }
+  } catch (_) {}
+  return [...new Set(out)]
+}
+
 /* -------------------------------------------------------------------------- */
 /*                      图片段提取 + 图片转 base64 data URL                  */
 /* -------------------------------------------------------------------------- */

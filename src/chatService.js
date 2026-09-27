@@ -815,6 +815,14 @@ export async function handleChat(e) {
 
   if (!matched) return false
 
+  // 多账号应答归属：@ 指定账号时仅该账号回应；未 @ 任何自身账号时仅主账号回应（避免多号同时刷屏）。
+  // 仅在成功识别到多个自身账号时生效；单账号或识别不到时保持原行为。
+  if (isGroup) {
+    const atTargets = helper.listAtTargets(e)
+    const primarySid = String(cfg.get('bot.primarySid', '') || '')
+    if (!botIdentity.shouldAccountRespond(e, atTargets, { primarySid })) return false
+  }
+
   // 触发来源标注：仅当开启全局AI时，在发件人标识中标注本条是"艾特/前缀触发"还是"全局AI触发"，
   // 便于模型区分"被单独点名"与"群里随口一说"（后者按 injectContextIntoHistory 的全局AI约定轻量回复）。
   const globalAIEnabled = globalAI === true
