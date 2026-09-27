@@ -443,7 +443,7 @@ export function countPages(providerData) {
 }
 
 // ============================================================
-//   点歌卡片（"{botName}为您点歌" 风格，仿音乐 App 分享卡）
+//   点歌卡片（纯歌曲信息卡，无署名标题，仿音乐 App 播放页风格）
 // ============================================================
 
 /** 秒 → "mm:ss"（非法/0 返回 ''） */
@@ -456,54 +456,73 @@ function fmtDuration(sec) {
 }
 
 /**
- * 渲染点歌卡片 → 落盘 SVG，返回绝对路径。
- * item: { title, artist, album, cover, pageUrl, durationSec, source }
+ * 渲染点歌信息卡片 → 落盘 SVG，返回绝对路径。
+ * item: { title, alias, artist, album, cover, pageUrl, durationSec, source, commentCount, shareCount }
+ * 仅展示歌曲信息（歌名/别名/歌手/专辑/时长/评论/分享/来源），不含"XX为您点歌"类署名标题。
  * 失败抛异常，由调用方降级为原生卡片/文本。
  */
-export function renderSongCard(item, botName = 'AI') {
+export function renderSongCard(item) {
   const title = String(item?.title || '未知歌曲').slice(0, 40)
+  const alias = String(item?.alias || '').slice(0, 40)
   const artist = String(item?.artist || '未知歌手').slice(0, 40)
   const album = String(item?.album || '').slice(0, 40)
   const dur = fmtDuration(item?.durationSec)
-  const link = String(item?.pageUrl || '')
   const cover = String(item?.cover || '')
   const srcLabel = item?.source === 'qq' ? 'QQ音乐' : '网易云音乐'
+  const commentCount = Number(item?.commentCount) > 0 ? Number(item.commentCount) : 0
+  const shareCount = Number(item?.shareCount) > 0 ? Number(item.shareCount) : 0
 
-  const W = 520
-  const H = 268
+  // 卡片布局：左侧 200px 封面 + 右侧信息区（对齐 zhenxun info.html 的 600x220 比例）
+  const W = 600
+  const H = 220
+  const COVER = 200
+
   const coverSvg = cover
-    ? `<image x="24" y="86" width="150" height="150" href="${esc(cover)}" preserveAspectRatio="xMidYMid slice" clip-path="url(#coverClip)"/>`
-    : `<rect x="24" y="86" width="150" height="150" rx="10" fill="#FBCFE8"/>
-       <text x="99" y="170" text-anchor="middle" font-size="56" fill="#F472B6">🎵</text>`
+    ? `<image x="0" y="0" width="${COVER}" height="${H}" href="${esc(cover)}" preserveAspectRatio="xMidYMid slice" clip-path="url(#coverClip)"/>`
+    : `<rect x="0" y="0" width="${COVER}" height="${H}" fill="#FFEBF1"/>
+       <text x="${COVER / 2}" y="${H / 2 + 22}" text-anchor="middle" font-size="64" fill="#F472B6">🎵</text>`
 
+  const infoX = COVER + 28
+  const infoW = W - infoX - 24
+  let y = 44
   const rows = []
-  let ry = 116
-  const pushRow = (label, value, fill) => {
-    if (!value) return
-    rows.push(`<text x="196" y="${ry}" font-size="14" fill="#9CA3AF">${esc(label)}</text>
-    <text x="${196 + label.length * 14 + 8}" y="${ry}" font-size="14" fill="${fill || '#6B7280'}">${esc(String(value).slice(0, 30))}</text>`)
-    ry += 30
+  const pushLine = (text, size, weight, fill) => {
+    if (!text) return
+    rows.push(`<text x="${infoX}" y="${y}" font-size="${size}" font-weight="${weight}" fill="${fill}">${esc(text)}</text>`)
+    y += size + 8
   }
-  pushRow('歌手:', artist)
-  if (album) pushRow('专辑:', album)
-  if (dur) pushRow('时长:', dur, '#EC4899')
-  pushRow('来源:', srcLabel, '#6B7280')
+  pushLine(title, 24, '700', '#FF4D8A')
+  pushLine(alias ? `别名: ${alias}` : '', 14, '400', '#FF8FB3')
+  pushLine(artist, 18, '400', '#FF6B9E')
+  pushLine(album ? `专辑: ${album}` : '', 15, '400', '#999999')
+  pushLine(dur ? `时长: ${dur}` : '', 14, '400', '#999999')
+
+  // 底部统计行：评论 / 分享 / 来源
+  const stats = []
+  if (commentCount) stats.push(`💬 ${commentCount}评论`)
+  if (shareCount) stats.push(`↗️ ${shareCount}分享`)
+  stats.push(srcLabel)
+  const statsY = H - 28
 
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family='PingFang SC,Microsoft YaHei,Helvetica Neue,Arial,sans-serif'>
   <defs>
-    <clipPath id="coverClip"><rect x="24" y="86" width="150" height="150" rx="10"/></clipPath>
-    <linearGradient id="songBg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#FFF1F7"/>
-      <stop offset="100%" stop-color="#FFE4F1"/>
+    <clipPath id="coverClip"><rect x="0" y="0" width="${COVER}" height="${H}"/></clipPath>
+    <linearGradient id="songBg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#FFF9FB"/>
+    </linearGradient>
+    <linearGradient id="songProgress" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FF8FB3"/>
+      <stop offset="100%" stop-color="#FF6B9E"/>
     </linearGradient>
   </defs>
-  <rect x="0" y="0" width="${W}" height="${H}" rx="18" fill="url(#songBg)" stroke="#FBCFE8"/>
-  <text x="${W / 2}" y="48" text-anchor="middle" font-size="22" font-weight="700" fill="#EC4899">🎁 ${esc(botName)}为您点歌</text>
+  <rect x="0" y="0" width="${W}" height="${H}" fill="url(#songBg)" stroke="#FFD6E4" stroke-width="1"/>
   ${coverSvg}
-  <text x="196" y="106" font-size="19" font-weight="700" fill="#BE185D">${esc(title)}</text>
   ${rows.join('\n  ')}
-  ${link ? `<text x="${W / 2}" y="${H - 18}" text-anchor="middle" font-size="13" fill="#3B82F6">${esc(link)}</text>` : ''}
+  <text x="${infoX}" y="${statsY}" font-size="13" fill="#FF8FB3">${esc(stats.join('    '))}</text>
+  <rect x="${COVER}" y="${H - 4}" width="${infoW}" height="4" fill="rgba(255,107,158,0.1)"/>
+  <rect x="${COVER}" y="${H - 4}" width="${Math.round(infoW * 0.3)}" height="4" fill="url(#songProgress)"/>
 </svg>`
   return writeSvg(svg, 'song')
 }
