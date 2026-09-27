@@ -174,58 +174,74 @@ describe('parse*SearchList', () => {
 })
 
 describe('searchSongs', () => {
-  it('M2a：默认网易云源，注入 httpPostFn 走 v1/search/get 返回列表', async () => {
-    writeConfig(false)
-    const res = await music.searchSongs({ keyword: '晴天', httpPostFn: async () => neteaseV1Json() })
-    assert.equal(res.ok, true)
-    assert.equal(res.source, 'netease')
-    assert.equal(res.songs[0].title, '晴天(深情版)')
+  // v2 网易云链路：/api/search/get/ → /api/v3/song/detail → commentInfo；直链单独 GET。
+  // 全部通过 httpPostFn/httpFn 注入，不触网。
+  const ncmPost = async (url) => {
+    if (url.includes('/api/search/get/')) return { code: 200, result: { songs: [{ id: 186016, name: '晴天' }] } }
+    if (url.includes('/api/v3/song/detail')) {
+      return { songs: [{ name: '晴天', ar: [{ name: '周杰伦' }], al: { name: '叶惠美', picUrl: 'http://p1.music.126.net/x/cover.jpg' }, dt: 269000 }] }
+    }
+    if (url.includes('/api/resource/commentInfo/list')) return { data: [{ commentCount: 100, shareCount: 10 }] }
+    return {}
+  }
+  const ncmGetOk = async () => ({ status: 200, data: { data: [{ url: 'https://cdn/ncm-320.mp3' }] } })
+  const ncmGetEmpty = async () => ({ status: 200, data: { data: [] } })
+  const qqGetOk = async () => ({
+    status: 200,
+    data: {
+      code: 0,
+      data: { id: 9001, song: '晴天', singer: '周杰伦', album: '叶惠美', cover: 'https://y.gtimg.cn/x.jpg', time: 269, music: 'https://cdn/qq.m4a' },
+    },
   })
 
-  it('M2b：网易云封面粉缺失时用歌曲页 og:image 爬虫兜底', async () => {
+  it('M2a：强制网易云源（source=ncm）走 search/get→detail 返回归一化歌曲', async () => {
     writeConfig(false)
-    const res = await music.searchSongs({
-      keyword: '晴天',
-      httpPostFn: async () => ({ code: 200, result: { songs: [{ id: 186016, name: '晴天', artists: [{ name: '周杰伦' }], album: '叶惠美', duration: 269000 }] } }),
-      httpPageFn: async () => '<meta property="og:title" content="晴天（Sunny Day） - 周杰伦 - 单曲 - 网易云音乐"><meta property="og:image" content="https://p1.music.126.net/x/cover.jpg">',
-    })
+    const res = await music.searchSongs({ keyword: '晴天', source: 'ncm', httpPostFn: ncmPost, httpFn: ncmGetOk })
+    assert.equal(res.ok, true)
+    assert.equal(res.source, 'ncm')
+    assert.equal(res.songs[0].title, '晴天')
+    assert.equal(res.songs[0].artist, '周杰伦')
+  })
+
+  it('M2b：网易云封面粉 http→https 归一化，直链走 320k 接口', async () => {
+    writeConfig(true)
+    const res = await music.searchSongs({ keyword: '晴天', source: 'ncm', httpPostFn: ncmPost, httpFn: ncmGetOk })
     assert.equal(res.ok, true)
     assert.equal(res.songs[0].cover, 'https://p1.music.126.net/x/cover.jpg')
+    assert.equal(res.songs[0].playUrl, 'https://cdn/ncm-320.mp3')
   })
 
-  it('M2d：QQ 源被 500 风控 → 自动回退网易云成功', async () => {
+  it('M2c：强制网易云源接口异常 → ok=false 且提示失败', async () => {
     writeConfig(false)
-    const res = await music.searchSongs({
-      keyword: '晴天',
-      source: 'qq',
-      httpFn: async () => { throw new Error('500') },
-      httpPostFn: async () => neteaseV1Json(),
-    })
-    assert.equal(res.ok, true)
-    assert.equal(res.source, 'netease')
-    assert.equal(res.songs[0].title, '晴天(深情版)')
-  })
-
-  it('M2e：QQ 源空结果 → 自动回退网易云', async () => {
-    writeConfig(false)
-    const res = await music.searchSongs({
-      keyword: '晴天',
-      source: 'qq',
-      httpFn: async () => ({ data: { song: { list: [] } } }),
-      httpPostFn: async () => neteaseV1Json(),
-    })
-    assert.equal(res.ok, true)
-    assert.equal(res.source, 'netease')
-  })
-
-  it('M2c：网易云源风控 code≠200 → ok=false 且提示风控（不再让填 Cookie）', async () => {
-    writeConfig(false)
-    const res = await music.searchSongs({
-      keyword: '晴天',
-      httpPostFn: async () => ({ code: -462 }),
-    })
+    const res = await music.searchSongs({ keyword: '晴天', source: 'ncm', httpPostFn: async () => { throw new Error('风控') } })
     assert.equal(res.ok, false)
-    assert.match(res.msg, /风控|失败/)
+    assert.match(res.msg, /失败|没找到/)
+  })
+
+  it('M2d：自动模式网易云有可播直链 → 命中网易云（不回退）', async () => {
+    writeConfig(true)
+    const res = await music.searchSongs({ keyword: '晴天', httpPostFn: ncmPost, httpFn: ncmGetOk })
+    assert.equal(res.ok, true)
+    assert.equal(res.source, 'ncm')
+    assert.equal(res.songs[0].playUrl, 'https://cdn/ncm-320.mp3')
+  })
+
+  it('M2e：自动模式网易云无可用直链 → 回退 QQ 音源', async () => {
+    writeConfig(true)
+    const res = await music.searchSongs({
+      keyword: '晴天',
+      httpPostFn: ncmPost,
+      httpFn: async (url) => (/enhance/.test(url) ? ncmGetEmpty() : qqGetOk()),
+    })
+    assert.equal(res.ok, true)
+    assert.equal(res.source, 'qq')
+    assert.equal(res.songs[0].playUrl, 'https://cdn/qq.m4a')
+  })
+
+  it('M2f：强制 QQ 源接口异常 → ok=false（v2 强制源不回退网易云）', async () => {
+    writeConfig(false)
+    const res = await music.searchSongs({ keyword: '晴天', source: 'qq', httpFn: async () => { throw new Error('500') } })
+    assert.equal(res.ok, false)
   })
 
   it('M4a：关键词为空/超长直接拒绝', async () => {
@@ -237,9 +253,13 @@ describe('searchSongs', () => {
     assert.match(r2.msg, /过长/)
   })
 
-  it('M4b：搜索无结果给友好提示', async () => {
+  it('M4b：两源都无结果给友好提示', async () => {
     writeConfig(false)
-    const res = await music.searchSongs({ keyword: '不存在的歌', httpPostFn: async () => ({ code: 200, result: { songs: [] } }) })
+    const res = await music.searchSongs({
+      keyword: '不存在的歌',
+      httpPostFn: async () => ({ code: 200, result: { songs: [] } }),
+      httpFn: async () => ({ status: 200, data: { code: 0, data: null } }),
+    })
     assert.equal(res.ok, false)
     assert.match(res.msg, /没有找到/)
   })
@@ -262,17 +282,29 @@ describe('neteaseCrawlSongPage（歌曲页 og: 元数据爬虫）', () => {
 })
 
 describe('buildMusicCardSegment / buildShareSegment / buildSongsText', () => {
-  const playable = { pageUrl: 'https://y.qq.com/x', playUrl: 'https://cdn/x.mp3', title: '晴天', artist: '周杰伦', cover: '' }
+  // v2 卡片段依赖 OneBot 全局 segment（按 id 生成原生 music/share 卡），测试内桩注入。
+  const playable = { id: 9001, source: 'qq', pageUrl: 'https://y.qq.com/x', playUrl: 'https://cdn/x.mp3', title: '晴天', artist: '周杰伦', cover: '' }
 
-  it('M5a：无可播直链 → 卡片段为 null', () => {
-    assert.equal(music.buildMusicCardSegment({ ...playable, playUrl: '' }), null)
+  before(() => {
+    globalThis.segment = {
+      music: (o) => ({ type: 'music', data: o }),
+      share: (o) => ({ type: 'share', data: o }),
+    }
+  })
+  after(() => { delete globalThis.segment })
+
+  it('M5a：无有效歌曲 id → 卡片段为 null', () => {
+    assert.equal(music.buildMusicCardSegment({ ...playable, id: 0 }), null)
+    assert.equal(music.buildMusicCardSegment({ ...playable, id: 'abc' }), null)
   })
 
-  it('M5b：可播直链 → 返回 OneBot music 段', () => {
+  it('M5b：有 id → 返回 OneBot music 段（source 映射 163/qq）', () => {
     const seg = music.buildMusicCardSegment(playable)
     assert.equal(seg.type, 'music')
-    assert.equal(seg.data.type, 'custom')
-    assert.equal(seg.data.audio, 'https://cdn/x.mp3')
+    assert.equal(seg.data.type, 'qq')
+    assert.equal(seg.data.id, 9001)
+    const seg2 = music.buildMusicCardSegment({ ...playable, source: 'netease', id: 186016 })
+    assert.equal(seg2.data.type, '163')
   })
 
   it('M5c：share 段与纯文本降级内容', () => {
@@ -283,34 +315,39 @@ describe('buildMusicCardSegment / buildShareSegment / buildSongsText', () => {
     assert.match(text, /QQ音乐/)
     assert.match(text, /https:\/\/y\.qq\.com/)
   })
+
+  it('M5d：无 pageUrl/playUrl → share 段为 null', () => {
+    assert.equal(music.buildShareSegment({ title: '晴天' }), null)
+  })
 })
 
-describe('sendSongsResult（三级发送策略）', () => {
+describe('sendSongsResult（纯文本降级兼容）', () => {
   async function makeE() {
     const calls = []
     return { calls, e: { reply: async (m) => { calls.push(m) } } }
   }
 
-  it('M6a：首条可播 → 发音乐卡片并返回 sentCard', async () => {
+  it('M6a：有歌曲 → 返回纯文本（不再发 music 段）', async () => {
     const { calls, e } = await makeE()
     const songs = [{
       pageUrl: 'https://y.qq.com/x', playUrl: 'https://cdn/x.mp3', title: '晴天', artist: '周杰伦', cover: '',
     }]
     const res = await music.sendSongsResult(e, songs, { source: 'qq' })
     assert.equal(res.ok, true)
-    assert.equal(res.sentCard, true)
+    assert.equal(res.sentCard, false)
+    assert.equal(res.voiceSent, false)
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].type, 'music')
+    assert.match(String(calls[0]), /晴天/)
   })
 
-  it('M6b：无可播直链 → 降级 share 卡片', async () => {
+  it('M6b：无直链同样纯文本降级', async () => {
     const { calls, e } = await makeE()
     const songs = [{ pageUrl: 'https://y.qq.com/x', playUrl: '', title: '晴天', artist: '周杰伦' }]
     const res = await music.sendSongsResult(e, songs, { source: 'qq' })
     assert.equal(res.ok, true)
     assert.equal(res.sentCard, false)
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].type, 'share')
+    assert.match(String(calls[0]), /晴天/)
   })
 
   it('M6c：空列表 → 返回提示文本', async () => {
@@ -324,10 +361,12 @@ describe('sendSongsResult（三级发送策略）', () => {
 // ===== 直连点歌命令 / 待歌名状态 / 富格式发送 =====
 
 describe('matchSongCommand / 待歌名状态', () => {
-  it('M7a：命中"点歌"/"点歌 歌名"/"#点歌 xxx"，不误伤普通文本', () => {
-    assert.deepEqual(music.matchSongCommand('点歌'), { keyword: '' })
-    assert.deepEqual(music.matchSongCommand('点歌 晴天'), { keyword: '晴天' })
-    assert.deepEqual(music.matchSongCommand('#点歌 晴天'), { keyword: '晴天' })
+  it('M7a：命中"点歌"/"点歌 歌名"/"#点歌"/音源命令，不误伤普通文本', () => {
+    assert.deepEqual(music.matchSongCommand('点歌'), { keyword: '', source: '' })
+    assert.deepEqual(music.matchSongCommand('点歌 晴天'), { keyword: '晴天', source: '' })
+    assert.deepEqual(music.matchSongCommand('#点歌 晴天'), { keyword: '晴天', source: '' })
+    assert.deepEqual(music.matchSongCommand('网易点歌 晴天'), { keyword: '晴天', source: 'ncm' })
+    assert.deepEqual(music.matchSongCommand('QQ点歌 晴天'), { keyword: '晴天', source: 'qq' })
     assert.equal(music.matchSongCommand('点歌晴天'), null)
     assert.equal(music.matchSongCommand('我想点歌'), null)
     assert.equal(music.matchSongCommand(''), null)
@@ -422,13 +461,14 @@ describe('sendSongsResultRich（语音+点歌卡片图+链接）', () => {
     assert.notEqual(res.msg, 'premium_required')
   })
 
-  it('M9d：卡片渲染落盘且内容含歌名（自动清理前可读）', async () => {
+  it('M9d：卡片渲染落盘且内容含歌名、不含署名标题', async () => {
     const svg = await import('../../src/svgRender.js')
-    const p = svg.renderSongCard({ title: '晴天', artist: '周杰伦', album: '叶惠美', durationSec: 269, pageUrl: 'https://music.163.com/#/song?id=1', source: 'netease' }, '小真哥')
+    const p = svg.renderSongCard({ title: '晴天', artist: '周杰伦', album: '叶惠美', durationSec: 269, pageUrl: 'https://music.163.com/#/song?id=1', source: 'netease' })
     assert.ok(fs.existsSync(p))
     const content = fs.readFileSync(p, 'utf-8')
     assert.match(content, /晴天/)
-    assert.match(content, /为您点歌/)
+    assert.match(content, /网易云音乐/)
+    assert.doesNotMatch(content, /为您点歌/)
     try { fs.unlinkSync(p) } catch (_) {}
   })
 })

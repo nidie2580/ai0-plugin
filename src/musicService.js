@@ -70,9 +70,10 @@ async function httpGetJson(url, headers = {}, httpFn = null) {
   return data
 }
 
-/** 网易云 form POST（对齐 model_ncm.request：X-Real-IP 绕限） */
-async function ncmFormPost(uri, params) {
+/** 网易云 form POST（对齐 model_ncm.request：X-Real-IP 绕限）；httpPostFn 供单测注入 */
+async function ncmFormPost(uri, params, httpPostFn = null) {
   const body = new URLSearchParams(params).toString()
+  if (typeof httpPostFn === 'function') return httpPostFn(NCM_DOMAIN + uri, body)
   const resp = await safeAxiosRequest('post', NCM_DOMAIN + uri, body, {
     headers: {
       'User-Agent': MUSIC_UA,
@@ -88,23 +89,23 @@ async function ncmFormPost(uri, params) {
 }
 
 /** 网易云搜索（默认取第一条） */
-export async function ncmSearch(keywords, limit = 1) {
-  return ncmFormPost('/api/search/get/', { s: keywords, limit, type: 1, offset: 0 })
+export async function ncmSearch(keywords, limit = 1, httpPostFn = null) {
+  return ncmFormPost('/api/search/get/', { s: keywords, limit, type: 1, offset: 0 }, httpPostFn)
 }
 
 /** 网易云歌曲详情 */
-export async function ncmSongDetail(id) {
-  return ncmFormPost('/api/v3/song/detail', { c: JSON.stringify([{ id }]) })
+export async function ncmSongDetail(id, httpPostFn = null) {
+  return ncmFormPost('/api/v3/song/detail', { c: JSON.stringify([{ id }]) }, httpPostFn)
 }
 
 /** 网易云评论/分享数 */
-export async function ncmCommentInfo(id) {
+export async function ncmCommentInfo(id, httpPostFn = null) {
   return ncmFormPost('/api/resource/commentInfo/list', {
     fixliked: true,
     needupgradedinfo: true,
     resourceIds: JSON.stringify([id]),
     resourceType: 4,
-  })
+  }, httpPostFn)
 }
 
 function joinArtistNames(artists) {
@@ -114,20 +115,20 @@ function joinArtistNames(artists) {
 }
 
 /** 网易云元数据（对齐 model_ncm.MusicHelper163.meta_data） */
-export async function ncmMeta(keywords) {
-  const ret0 = await ncmSearch(keywords, 1)
+export async function ncmMeta(keywords, httpPostFn = null) {
+  const ret0 = await ncmSearch(keywords, 1, httpPostFn)
   const songs = Array.isArray(ret0?.result?.songs) ? ret0.result.songs : []
   if (!songs.length) return null
   const songId = String(songs[0]?.id ?? '').trim()
   if (!songId) return null
 
-  const ret1 = await ncmSongDetail(songId)
+  const ret1 = await ncmSongDetail(songId, httpPostFn)
   const detail = Array.isArray(ret1?.songs) ? ret1.songs[0] : null
   if (!detail) return null
 
   let comment = {}
   try {
-    const ret2 = await ncmCommentInfo(songId)
+    const ret2 = await ncmCommentInfo(songId, httpPostFn)
     const list = Array.isArray(ret2?.data) ? ret2.data : []
     if (list.length) comment = list[0] || {}
   } catch (_) {}
@@ -150,19 +151,19 @@ export async function ncmMeta(keywords) {
 }
 
 /** 网易云 320kbps 播放直链（对齐 MusicVoiceService.get_play_url_ncm） */
-export async function ncmPlayUrl(songId) {
+export async function ncmPlayUrl(songId, httpFn = null) {
   try {
     const u = new URL(`${NCM_DOMAIN}/api/song/enhance/player/url`)
     u.searchParams.set('ids', `[${songId}]`)
     u.searchParams.set('br', '320000')
-    const resp = await safeAxiosRequest('get', u.toString(), null, {
-      headers: {
-        'User-Agent': MUSIC_UA,
-        Referer: NCM_DOMAIN,
-        Cookie: NCM_COOKIE,
-      },
-      timeout: HTTP_TIMEOUT_MS * 2,
-    })
+    const headers = {
+      'User-Agent': MUSIC_UA,
+      Referer: NCM_DOMAIN,
+      Cookie: NCM_COOKIE,
+    }
+    const resp = typeof httpFn === 'function'
+      ? await httpFn(u.toString(), { headers })
+      : await safeAxiosRequest('get', u.toString(), null, { headers, timeout: HTTP_TIMEOUT_MS * 2 })
     if (resp.status === 200) {
       const urls = Array.isArray(resp.data?.data) ? resp.data.data : []
       const url = String(urls[0]?.url || '')
@@ -176,16 +177,16 @@ export async function ncmPlayUrl(songId) {
 }
 
 /** QQ 音乐元数据（对齐 model_qq.MusicHelperQQ.meta_data，第三方聚合 API） */
-export async function qqMeta(keywords) {
+export async function qqMeta(keywords, httpFn = null) {
   const u = new URL(QQ_API_URL)
   u.searchParams.set('msg', keywords)
   u.searchParams.set('num', '1')
   u.searchParams.set('n', '1')
   u.searchParams.set('type', '4')
-  const resp = await safeAxiosRequest('get', u.toString(), null, {
-    headers: { 'User-Agent': MUSIC_UA, Referer: 'https://y.qq.com/' },
-    timeout: HTTP_TIMEOUT_MS * 2,
-  })
+  const headers = { 'User-Agent': MUSIC_UA, Referer: 'https://y.qq.com/' }
+  const resp = typeof httpFn === 'function'
+    ? await httpFn(u.toString(), { headers })
+    : await safeAxiosRequest('get', u.toString(), null, { headers, timeout: HTTP_TIMEOUT_MS * 2 })
   if (resp.status !== 200) throw new Error(`QQ音乐接口失败(HTTP ${resp.status})`)
   const data = typeof resp.data === 'object' ? resp.data : JSON.parse(resp.data || '{}')
   if (data?.code !== 0) throw new Error(String(data?.msg || 'QQ音乐返回错误'))
@@ -362,9 +363,9 @@ export async function searchSongs({ keyword, source, httpFn, httpPostFn, httpPag
 
   const tryNcm = async (requirePlayUrl) => {
     if (!cfgObj.enableNcm) return null
-    const meta = await ncmMeta(kw)
+    const meta = await ncmMeta(kw, httpPostFn)
     if (!meta || !meta.id) return null
-    const url320 = cfgObj.tryPlayUrl ? await ncmPlayUrl(meta.id) : ''
+    const url320 = cfgObj.tryPlayUrl ? await ncmPlayUrl(meta.id, httpFn) : ''
     if (url320) {
       meta.playUrl = url320
       return meta
@@ -377,7 +378,7 @@ export async function searchSongs({ keyword, source, httpFn, httpPostFn, httpPag
 
   const tryQQ = async (requirePlayUrl) => {
     if (!cfgObj.enableQq) return null
-    const meta = await qqMeta(kw)
+    const meta = await qqMeta(kw, httpFn)
     if (!meta) return null
     if (!meta.playUrl && requirePlayUrl) return null
     return meta
@@ -462,7 +463,7 @@ export function buildSongsText(songs, opts = {}) {
  */
 export async function neteaseV1Search({ keyword, limit = 3, httpPostFn } = {}) {
   try {
-    const ret = await ncmFormPost('/api/search/get/', { s: String(keyword || '').trim(), limit, type: 1, offset: 0 })
+    const ret = await ncmFormPost('/api/search/get/', { s: String(keyword || '').trim(), limit, type: 1, offset: 0 }, httpPostFn)
     const songs = parseNeteaseSearchList(ret)
     if (!songs.length) return { ok: false, songs: [], msg: `没有找到与「${keyword}」相关的歌曲` }
     return { ok: true, songs }
