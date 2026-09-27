@@ -5,6 +5,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { isAllowedOutboundUrl, safeFetchWithRedirects } from './security.js'
 import { safeLogger } from './globals.js'
+import * as botIdentity from './botIdentity.js'
 
 // 系统提示词"注入段"的起止标记。仅用于持久化历史里的"上轮注入段剥离 + 本轮重建"记账，
 // 发送给模型的请求体必须先把这两个标记从 system 内容里剥掉（见 llm.stripInjectionMarkers），
@@ -485,9 +486,14 @@ function guessMimeFromBuffer(buf) {
 /*                  消息解构 + 引用/合并转发消息的上下文提取                  */
 /* -------------------------------------------------------------------------- */
 
-function isSelfId(e, uin) {
+export function isSelfId(e, uin) {
   if (uin == null) return false
-  if (e?.self_id != null && String(uin) === String(e.self_id)) return true
+  const s = String(uin)
+  if (e?.self_id != null && s === String(e.self_id)) return true
+  // 多账号：同一插件实例连接的其他自身账号（bot.selfIds / bot.accounts）也视为机器人
+  try {
+    if (botIdentity.listSelfIds().includes(s)) return true
+  } catch (_) {}
   try {
     const b = e?.bot ?? Bot
     if (b?.uin != null && String(uin) === String(b.uin)) return true

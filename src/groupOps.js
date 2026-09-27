@@ -303,12 +303,12 @@ export function _roleOf(obj) {
 /** 获取机器人在群内的角色
  *  兼容：group.is_owner（XRK适配器直接布尔字段）+ getMemberMap 查自己条目
  */
-async function getBotRole(groupId) {
+async function getBotRole(groupId, selfId = null) {
   if (!groupId) return null
   try {
     const bot = global.Bot || global.bot
-    const selfId = String(bot?.uin || bot?.self_id || '')
-    if (!selfId) return null
+    const botUin = String(selfId || bot?.uin || bot?.self_id || '')
+    if (!botUin) return null
     const group = resolveGroup(groupId)
     if (!group) return null
 
@@ -321,7 +321,7 @@ async function getBotRole(groupId) {
     if (group.isOwner === true) return 'owner'
 
     // 查 getMemberInfo 自己条目（老逻辑 + 新兼容）
-    const info = await getMemberInfo(groupId, selfId)
+    const info = await getMemberInfo(groupId, botUin)
     const r = _roleOf(info)
     if (r) return r
 
@@ -462,12 +462,12 @@ function cacheWrite(key, value) {
   groupApiCache.set(key, { value, expireAt: Date.now() + GROUP_API_CACHE_TTL })
 }
 
-async function getBotRoleCached(groupId) {
+async function getBotRoleCached(groupId, selfId = null) {
   if (!groupId) return null
-  const key = `r:${groupId}`
+  const key = `r:${groupId}:${selfId || ''}`
   const hit = cacheRead(key)
   if (hit !== undefined) return hit
-  const v = await getBotRole(groupId)
+  const v = await getBotRole(groupId, selfId)
   cacheWrite(key, v)
   return v
 }
@@ -499,12 +499,14 @@ function roleToLabel(role, unknownAsMember = false) {
   return '未检测到（机器人接口未返回，不要脑补为普通群员）'
 }
 
-/** 获取机器人自身的 QQ 号和昵称 */
-function getBotSelf() {
+/** 获取机器人自身的 QQ 号和昵称（优先取事件所属账号，全局 Bot 仅兜底） */
+function getBotSelf(e = null) {
   try {
-    const bot = global.Bot || global.bot
-    const uin = bot?.uin || bot?.self_id
-    const nickname = bot?.nickname || bot?.nickName || bot?.info?.nickname || '机器人'
+    const eventUin = e ? (e.self_id ?? e.bot?.uin ?? e.bot?.self_id ?? e.bot?.account?.uin ?? null) : null
+    const eventNick = e ? (e.bot?.nickname || e.bot?.nickName || e.bot?.info?.nickname || '') : ''
+    const bot = e?.bot || global.Bot || global.bot
+    const uin = eventUin ?? bot?.uin ?? bot?.self_id
+    const nickname = eventNick || bot?.nickname || bot?.nickName || bot?.info?.nickname || '机器人'
     return { uin: uin != null ? String(uin) : null, nickname: String(nickname) }
   } catch (_) {
     return { uin: null, nickname: '机器人' }
@@ -530,10 +532,10 @@ export async function buildIdentityContext(e, out = null) {
   // 从 e 上兜底抓群名（很多适配器会把 group_name 挂在事件对象上）
   const eGroupName = e.groupName || e.group_name || e.group?.groupName || e.group?.name || null
 
-  const botSelf = getBotSelf()
+  const botSelf = getBotSelf(e)
   const startedAt = Date.now()
   const [botRoleRaw, requesterInfo, groupInfo] = await Promise.all([
-    getBotRoleCached(groupId),
+    getBotRoleCached(groupId, botSelf.uin),
     userId ? getMemberInfoCached(groupId, userId) : null,
     getGroupInfoCached(groupId)
   ])
@@ -753,10 +755,11 @@ export async function buildGroupContext(e) {
   const userId = helper.getUserId(e)
   const masters = helper.listMasters()
   const targetUid = extractAtTarget(e)
+  const botSelf = getBotSelf(e)
 
   // 并行获取角色信息
   const [botRoleRaw, requesterInfo, targetInfo, groupInfoRaw] = await Promise.all([
-    getBotRoleCached(groupId),
+    getBotRoleCached(groupId, botSelf.uin),
     userId ? getMemberInfoCached(groupId, userId) : null,
     targetUid ? getMemberInfoCached(groupId, targetUid) : null,
     getGroupInfoCached(groupId)
@@ -781,8 +784,7 @@ export async function buildGroupContext(e) {
   let botInferred = botRole
   if (ownerUin && userId && String(userId) === ownerUin && requesterRole === 'unknown') requesterInferred = 'owner'
   if (ownerUin) {
-    const bSelf = getBotSelf()
-    if (bSelf.uin && String(bSelf.uin) === ownerUin && botRole === 'unknown') botInferred = 'owner'
+    if (botSelf.uin && String(botSelf.uin) === ownerUin && botRole === 'unknown') botInferred = 'owner'
   }
 
   // 身份规则：只有明确是 owner/admin/member 才允许；unknown 一律当作"角色未知 → 不能执行操作 / 只能保守放行"

@@ -13,22 +13,36 @@ import * as chatLog from './chatLog.js'
 import * as groupConfirm from './groupConfirm.js'
 import * as deliberate from './deliberate.js'
 import * as musicService from './musicService.js'
+import * as botIdentity from './botIdentity.js'
 import { INJECT_BEGIN, INJECT_END } from './helper.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
 // Web 后台保存/返回的原始模板不做替换，保证编辑框里始终看到 <master> 等标记。
 // 支持：<master> 主人 QQ（逗号分隔） <user> 当前发送者 <bot> 机器人自身 <admin> 管理员列表
+//       <botname> 当前账号名 <botpersona> 当前账号人设 <botlist> 本插件全部账号
 function resolvePromptVars(prompt, e) {
   const list = (a) => (Array.isArray(a) ? a : [a]).map((x) => String(x)).filter(Boolean).join('、')
   const masters = list(helper.listMasters()) || '未设置'
   const admins = list(helper.listAdmins()) || masters
   const bot = String(e?.self_id || e?.bot?.uin || e?.bot?.self_id || '')
   const user = String(helper.getUserId(e) ?? '')
+  let botName = ''
+  let botPersona = ''
+  let botList = ''
+  try {
+    const id = botIdentity.resolveBotIdentity(e)
+    botName = id.name || ''
+    botPersona = id.persona || ''
+    botList = botIdentity.listSelfIds().join('、')
+  } catch (_) {}
   try {
     return String(prompt || '')
       .split('<master>').join(masters)
       .split('<user>').join(user)
       .split('<bot>').join(bot)
+      .split('<botname>').join(botName)
+      .split('<botpersona>').join(botPersona)
+      .split('<botlist>').join(botList)
       .split('<admin>').join(admins)
   } catch (_) {
     return String(prompt || '')
@@ -1051,10 +1065,18 @@ export async function handleChat(e) {
     safeLogger.warn(`[ai0-plugin] 构建 agent 上下文失败: ${err.message}`)
   }
 
+  // 多账号身份：每轮以"事件所属账号"为准注入，且放在最前，避免模型把自己与同群兄弟账号搞混
+  let botIdentityContext = null
+  try {
+    botIdentityContext = botIdentity.buildBotIdentityContext(e, parsed)
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 构建机器人身份上下文失败: ${err.message}`)
+  }
+
   // 合并所有上下文到 system prompt（身份信息放最前面，让 AI 优先记住真实数据）
   // 动态变量在"发送前的最终 prompt"处替换：Web 后台保存的原始模板保持不变
   const basePrompt = resolvePromptVars(sysPrompt, e)
-  const extraContext = [identityContext, groupContext, imageContext, videoContext, musicContext, agentContext].filter(Boolean).join('\n\n')
+  const extraContext = [botIdentityContext, identityContext, groupContext, imageContext, videoContext, musicContext, agentContext].filter(Boolean).join('\n\n')
   let finalSysPrompt = (extraContext ? basePrompt + '\n\n' + extraContext : basePrompt)
 
   // 多模型互聊：给所有参与模型注入"机器人消息 [*] 标记协议"，让它们能辨认并选择回应/忽略彼此发言。
