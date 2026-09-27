@@ -387,18 +387,13 @@ export function injectContextIntoHistory({ history, sysPrompt, parsed, opts, mod
   }
 
   // 5) 当前用户的正文（helper 已剥离 reply/quote 段，避免重复注入引用）
-  // 纯图片消息（无文字）也要生成 user 轮：用 [图片] 占位，图片由 applyImagesToHistory
-  // 注入/替换；否则 cur.text 为空时本轮没有 user 消息，图片会注入到上一轮旧消息上，
-  // 模型收到"空白消息"。
   const cur = parsed.current
-  const hasImageThisTurn = !!opts.hasImage
-  if (cur && (cur.text || hasImageThisTurn)) {
-    let turnContent = cur.text
-    if (!turnContent) turnContent = '[图片]'
-    else if (includeSenderTag) turnContent = helper.formatTurnForPrompt({ ...cur, tagBotAs: modelConfigName, triggerTag })
+  if (cur && cur.text) {
     next.push({
       role: 'user',
-      content: turnContent
+      content: includeSenderTag
+        ? helper.formatTurnForPrompt({ ...cur, tagBotAs: modelConfigName, triggerTag })
+        : cur.text
     })
   }
 
@@ -1070,7 +1065,7 @@ export async function handleChat(e) {
     history,
     sysPrompt: finalSysPrompt,
     parsed,
-    opts: { ...contextOpts, triggerTag, globalAIEnabled: globalAIInGroup, hasImage: hasImageSegs },
+    opts: { ...contextOpts, triggerTag, globalAIEnabled: globalAIInGroup },
     modelConfigName: modelNameCfg
   })
 
