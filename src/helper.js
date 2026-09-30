@@ -438,18 +438,22 @@ export async function imageSegmentToDataUrl(seg, maxBytes = 8 * 1024 * 1024) {
 
   // 1) 已是 data:image URL
   if (typeof seg.data === 'string' && /^data:image\//i.test(seg.data)) {
-    const b64 = seg.data.split(',')[1] || ''
+    const b64 = (seg.data.split(',')[1] || '').trim()
     const bytes = Buffer.byteLength(b64, 'base64')
+    // 空载荷 data URL（data:image/png;base64,）会被上游按"内容段缺来源"整轮 400，直接拒绝
+    if (bytes === 0) return { ok: false, error: '空图片（data URL 无 base64 载荷）' }
     if (bytes > maxBytes) return { ok: false, error: `图片过大(${Math.round(bytes / 1024 / 1024)}MB)已拒绝` }
     return { ok: true, dataUrl: seg.data, bytes }
   }
 
   // 2) base64 data（字段 data/base64 前缀缺失时补全）
   if (typeof seg.data === 'string' && seg.data) {
-    const bytes = Buffer.byteLength(seg.data, 'base64')
-    if (bytes > maxBytes) return { ok: false, error: `图片过大(${Math.round(bytes / 1024 / 1024)}MB)已拒绝` }
-    const mime = guessMimeFromBuffer(Buffer.from(seg.data, 'base64')) || 'image/png'
-    return { ok: true, dataUrl: `data:${mime};base64,${seg.data}`, bytes }
+    const buf = Buffer.from(seg.data, 'base64')
+    if (!buf.length) return { ok: false, error: '空图片数据' }
+    if (buf.length > maxBytes) return { ok: false, error: `图片过大(${Math.round(buf.length / 1024 / 1024)}MB)已拒绝` }
+    const mime = guessMimeFromBuffer(buf)
+    if (!mime) return { ok: false, error: '数据不是可识别的图片格式' }
+    return { ok: true, dataUrl: `data:${mime};base64,${seg.data}`, bytes: buf.length }
   }
 
   // 3) 本地文件路径（NapCat 等适配器的图片缓存通常不在插件允许根目录内，故不用根目录白名单，
@@ -473,7 +477,11 @@ export async function imageSegmentToDataUrl(seg, maxBytes = 8 * 1024 * 1024) {
     try {
       const dl = await downloadImageViaFetch(seg.url, maxBytes)
       if (!dl.ok) return { ok: false, error: dl.error }
-      const mime = guessMimeFromBuffer(dl.buffer) || 'image/png'
+      if (!dl.buffer || dl.buffer.length === 0) {
+        return { ok: false, error: '图片下载到空内容（图床 rkey 可能已过期或需要 Referer）' }
+      }
+      const mime = guessMimeFromBuffer(dl.buffer)
+      if (!mime) return { ok: false, error: '下载内容不是可识别的图片格式' }
       return { ok: true, dataUrl: `data:${mime};base64,${dl.buffer.toString('base64')}`, bytes: dl.buffer.length }
     } catch (err) {
       return { ok: false, error: `下载图片失败: ${err.message}` }
@@ -1360,11 +1368,22 @@ function guessExtFromBuffer(buf) {
 }
 
 async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {
-  const result = await safeFetchWithRedirects(url, { signal: AbortSignal.timeout(30000), maxBytes })
+  const headers = {}
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    // QQ 图床（gchat.qpic.cn / multimedia.nt.qq.com.cn）rkey 短时有效且常要求 Referer；
+    // 无 UA 的请求可能拿到 HTTP 200 + 空 body，补上请求头降低被拒概率。
+    if (/(^|\.)qpic\.cn$|(^|\.)qq\.com$/.test(host)) {
+      headers['Referer'] = 'https://qun.qq.com/'
+      headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+  } catch (_) {}
+  const result = await safeFetchWithRedirects(url, { signal: AbortSignal.timeout(30000), maxBytes, headers })
   if (!result.ok) return { ok: false, error: result.error }
   // axios 响应：resp.data 已经是 Buffer/ArrayBuffer
   const resp = result.response
   const buf = Buffer.isBuffer(resp.data) ? resp.data : Buffer.from(resp.data)
+  if (buf.length === 0) return { ok: false, error: '图片下载到空内容（图床 rkey 可能已过期或需要 Referer）' }
   if (buf.length > maxBytes) return { ok: false, error: `图片过大(>${Math.round(maxBytes / 1024 / 1024)}MB)已拒绝` }
   return { ok: true, buffer: buf }
 }

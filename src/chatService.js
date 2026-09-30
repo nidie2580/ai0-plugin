@@ -602,7 +602,8 @@ export async function prepareImageAssets(e, { modelKeys = [] } = {}) {
   for (const seg of segs) {
     try {
       const r = await helper.imageSegmentToDataUrl(seg)
-      if (r.ok) dataUrls.push(r.dataUrl)
+      if (r.ok && r.bytes > 0) dataUrls.push(r.dataUrl)
+      else safeLogger.warn(`[ai0-plugin] 图片段解析失败/为空，已跳过: ${r && r.error ? r.error : 'bytes=0'}`)
     } catch (err) {
       safeLogger.warn(`[ai0-plugin] 图片解析失败: ${err.message}`)
     }
@@ -670,9 +671,14 @@ export function applyImagesToHistory(history, assets, modelKey) {
 
   if (mainVision) {
     // 多模态：text + 若干 image_url
+    // 双保险：空载荷/畸形 data URL 一律不注入（空 base64 会被上游按 1214 file 报 400）
+    const OK_DATA_URL = /^data:image\/[\w.+-]+;base64,.{16,}$/i
     const contentParts = []
     if (cleanText) contentParts.push({ type: 'text', text: cleanText })
-    for (const u of assets.dataUrls) contentParts.push({ type: 'image_url', image_url: { url: u } })
+    for (const u of assets.dataUrls) {
+      if (!OK_DATA_URL.test(u)) continue
+      contentParts.push({ type: 'image_url', image_url: { url: u } })
+    }
     if (contentParts.length === 0) contentParts.push({ type: 'text', text: '（用户发送了一张图片）' })
     newUser.content = contentParts
   } else if (assets.ocrText) {

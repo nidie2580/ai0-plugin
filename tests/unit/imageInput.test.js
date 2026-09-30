@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../../config/index.js'
 
@@ -304,6 +305,93 @@ describe('图片输入', () => {
       const history = [{ role: 'user', content: '/vlm 原始提问' }]
       const out = chatService.applyAtUserText(history, '追问')
       assert.equal(out[0].content, '追问')
+    })
+  })
+
+  // —— 空图片段防线：QQ 图床下载到空响应体时，旧实现会拼出 data:image/png;base64,
+  //    （前缀在、载荷为空）注入请求，上游 GLM 按 1214 "file 必须传入 file_id/file_url/file_data" 整轮 400。
+  //    详见 2026-09-30 现场排查技术档。
+  describe('G9: 空图片段防线（空载荷 data URL 修复）', () => {
+    const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02, 0x03])
+    let server
+    let baseUrl
+
+    before(async () => {
+      // 本地回环 HTTP 服务：imageSegmentToDataUrl 走 safeFetchWithRedirects（默认拒绝私有地址），
+      // 测试用 security.allowPrivateHosts 显式放行 127.0.0.1
+      writeConfig({ security: { allowPrivateHosts: ['127.0.0.1'] } })
+      server = http.createServer((req, res) => {
+        if (req.url === '/empty') { res.writeHead(200, { 'content-type': 'image/png' }); res.end(); return }
+        if (req.url === '/html') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body>Forbidden</body></html>'); return }
+        if (req.url === '/png') { res.writeHead(200, { 'content-type': 'image/png' }); res.end(PNG_BYTES); return }
+        if (req.url === '/big') { res.writeHead(200, { 'content-type': 'image/png' }); res.end(Buffer.alloc(64, 1)); return }
+        res.writeHead(404); res.end()
+      })
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+      baseUrl = `http://127.0.0.1:${server.address().port}`
+    })
+
+    after(async () => {
+      if (server) await new Promise((resolve) => server.close(resolve))
+      restoreConfig()
+    })
+
+    it('下载返回 HTTP 200 + 空 body → 拒绝（不再拼出空载荷 data URL）', async () => {
+      const r = await helper.imageSegmentToDataUrl({ url: `${baseUrl}/empty` })
+      assert.equal(r.ok, false)
+      assert.match(String(r.error), /空内容/)
+    })
+
+    it('下载返回 HTML 错误页（非图片魔数）→ 拒绝', async () => {
+      const r = await helper.imageSegmentToDataUrl({ url: `${baseUrl}/html` })
+      assert.equal(r.ok, false)
+      assert.match(String(r.error), /不是可识别的图片格式/)
+    })
+
+    it('正常 PNG 下载 → dataUrl 前缀与字节数正确', async () => {
+      const r = await helper.imageSegmentToDataUrl({ url: `${baseUrl}/png` })
+      assert.equal(r.ok, true)
+      assert.match(r.dataUrl, /^data:image\/png;base64,/)
+      assert.equal(r.bytes, PNG_BYTES.length)
+      const b64 = r.dataUrl.split(',')[1]
+      assert.equal(Buffer.byteLength(b64, 'base64'), PNG_BYTES.length)
+    })
+
+    it('空载荷 data URL（data:image/png;base64,）→ 拒绝', async () => {
+      const r = await helper.imageSegmentToDataUrl({ data: 'data:image/png;base64,' })
+      assert.equal(r.ok, false)
+      assert.match(String(r.error), /空图片/)
+    })
+
+    it('base64 字段解码后非图片 → 拒绝（去掉 || image/png 假兜底）', async () => {
+      const b64 = Buffer.from('hello world, not an image').toString('base64')
+      const r = await helper.imageSegmentToDataUrl({ data: b64 })
+      assert.equal(r.ok, false)
+      assert.match(String(r.error), /不是可识别的图片格式/)
+    })
+
+    it('超限下载仍被拒绝（回归）', async () => {
+      const r = await helper.imageSegmentToDataUrl({ url: `${baseUrl}/big` }, 4)
+      assert.equal(r.ok, false)
+      assert.match(String(r.error), /图片过大/)
+    })
+
+    it('applyImagesToHistory 双保险：空载荷 data URL 不注入', () => {
+      writeConfig({ model: { default: 'vlm9', vlm9: {
+        apiBase: 'https://api.openai.com/v1', apiKey: 'k', model: 'gpt-4o', vision: true } } })
+      const history = [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: '看图 [图片:https://x.com/a.png]' },
+      ]
+      const assets = { dataUrls: ['data:image/png;base64,', pngDataUrlPayload()], ocrText: '' }
+      const out = chatService.applyImagesToHistory(history, assets, 'vlm9')
+      const parts = out[1].content
+      assert.ok(Array.isArray(parts))
+      const imgs = parts.filter((p) => p.type === 'image_url')
+      assert.equal(imgs.length, 1, '空载荷段被过滤，仅注入合法图片')
+      const payload = String(imgs[0].image_url.url.split(',')[1] || '')
+      assert.ok(payload.length >= 16, '注入的图片必须有非空 base64 载荷')
+      assert.ok(parts.some((p) => p.type === 'text' && p.text === '看图'))
     })
   })
 })
