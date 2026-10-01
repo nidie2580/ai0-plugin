@@ -15,19 +15,23 @@
  */
 import * as cfg from '../config/index.js'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { safeLogger } from './globals.js'
 import { safeAxiosRequest } from './security.js'
-import { safeSegmentImage, safeSegmentImageWithFallback } from './helper.js'
+import { safeSegmentImage, safeSegmentImageWithFallback, unlinkStaleFilesInDir } from './helper.js'
 import { renderSongCard } from './svgRender.js'
 
 const MUSIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
 const HTTP_TIMEOUT_MS = 8000
 
-const AUDIO_TMP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'tmp')
+// 语音临时目录放 os.tmpdir()（跨用户可进入），文件 0o644 落盘，避免适配器
+// 以独立用户运行时 stat 插件 data/ 下文件报 EACCES（同 helper.getImageSegment）
+const LEGACY_AUDIO_TMP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'tmp')
+const AUDIO_TMP_DIR = path.join(os.tmpdir(), 'ai0-plugin-audio')
 const AUDIO_MAX_BYTES = 20 * 1024 * 1024
 const AUDIO_MAX_REDIRECTS = 5
 
@@ -660,10 +664,18 @@ export async function downloadAudioForVoice(item) {
     if (!looksAudio) {
       return { ok: false, reason: `响应非音频格式(${ct || 'content-type 缺失'}, ${buf.length}B)`, copyright: true }
     }
-    if (!fs.existsSync(AUDIO_TMP_DIR)) fs.mkdirSync(AUDIO_TMP_DIR, { recursive: true, mode: 0o700 })
+    if (!fs.existsSync(AUDIO_TMP_DIR)) fs.mkdirSync(AUDIO_TMP_DIR, { recursive: true, mode: 0o755 })
+    // 陈旧音频清理（发送失败时 setTimeout 兜底删不掉），10 分钟节流
+    try {
+      if (!downloadAudioForVoice._lastSweep || Date.now() - downloadAudioForVoice._lastSweep > 10 * 60 * 1000) {
+        downloadAudioForVoice._lastSweep = Date.now()
+        unlinkStaleFilesInDir(AUDIO_TMP_DIR, Date.now(), 60 * 60 * 1000)
+        unlinkStaleFilesInDir(LEGACY_AUDIO_TMP_DIR, Date.now(), 60 * 60 * 1000)
+      }
+    } catch (_) {}
     const isMp3 = (buf.length > 3 && buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33)
     const filePath = path.join(AUDIO_TMP_DIR, `song-${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}.${isMp3 ? 'mp3' : 'm4a'}`)
-    fs.writeFileSync(filePath, buf, { mode: 0o600 })
+    fs.writeFileSync(filePath, buf, { mode: 0o644 })
     raw = filePath
   } catch (err) {
     return { ok: false, reason: `音频下载异常：${err?.message || err}` }

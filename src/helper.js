@@ -1,5 +1,6 @@
 import * as cfg from '../config/index.js'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -89,14 +90,19 @@ const __dirname = path.dirname(__filename)
 const PLUGIN_ROOT = path.resolve(__dirname, '..')
 const DATA_DIR = path.join(PLUGIN_ROOT, 'data')
 const WEB_DIR = path.join(PLUGIN_ROOT, 'web')
-const TMP_DIR = path.join(DATA_DIR, 'tmp-stickers')
+// 临时媒体文件目录：放 os.tmpdir()（如 /tmp/ai0-plugin-tmp）而不是插件 data/ 下。
+// 原因：Yunzai 常以 root 运行（/root 及 data/ 目录 0700），而适配器（NapCat/Lagrange 等）
+// 以独立用户运行，stat 插件 data/ 下的文件会 EACCES（retcode 100，发送图片失败）。
+// /tmp 全局可进入，文件再以 0o644 落盘，任意用户的适配器进程都能 stat+read。
+const LEGACY_TMP_DIR = path.join(DATA_DIR, 'tmp-stickers')
+const TMP_DIR = path.join(os.tmpdir(), 'ai0-plugin-tmp')
 // 允许本地图片路径访问的根目录白名单：
-//   DATA_DIR：会话历史/临时文件/加密会话
+//   DATA_DIR：会话历史/临时文件/加密会话（含旧版 tmp-stickers，读回兼容）
 //   WEB_DIR：  前端静态资源（网页内嵌图片/Logo 之类）
 //   TMP_DIR：  临时图片（getImageSegment 写的主路径）
 // 其他任何路径（/etc/passwd、~/.ssh/id_rsa 等）都一律拒绝。
 const ALLOWED_IMAGE_ROOTS = [DATA_DIR, WEB_DIR, TMP_DIR]
-try { if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 }) } catch (_) {}
+try { if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o755 }) } catch (_) {}
 // 判断绝对路径是否落在任一允许的根目录下，防范路径穿越（`..` / 符号链接跟随用 realpath 二次校验）
 function isPathWithinAllowedRoots(filePath) {
   if (!filePath || typeof filePath !== 'string') return false
@@ -119,7 +125,7 @@ function isPathWithinAllowedRoots(filePath) {
 
 // 临时文件清理：只保留近 1 小时内的，避免长期运行堆积；重启后扫遗留 .tmp / 音频 / SVG
 let _cleanupRan = 0
-function unlinkStaleFilesInDir(dir, now, maxAgeMs, nameRe = null) {
+export function unlinkStaleFilesInDir(dir, now, maxAgeMs, nameRe = null) {
   try {
     if (!fs.existsSync(dir)) return
     for (const f of fs.readdirSync(dir)) {
@@ -139,6 +145,7 @@ export function cleanupStaleRuntimeFiles({ maxAgeMs = 60 * 60 * 1000, force = fa
   _cleanupRan = now
   const age = force ? 0 : maxAgeMs
   unlinkStaleFilesInDir(TMP_DIR, now, age)
+  unlinkStaleFilesInDir(LEGACY_TMP_DIR, now, age)
   unlinkStaleFilesInDir(path.join(DATA_DIR, 'tmp'), now, age)
   try {
     const histDir = path.join(DATA_DIR, 'history')
@@ -1230,7 +1237,7 @@ export async function getImageSegment(src) {
       }
       const ext = guessExtFromBuffer(src) || '.img'
       const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
-      fs.writeFileSync(tmp, src)
+      fs.writeFileSync(tmp, src, { mode: 0o644 })
       return safeSegmentImage(tmp)
     }
 
@@ -1249,7 +1256,7 @@ export async function getImageSegment(src) {
         return null
       }
       const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
-      fs.writeFileSync(tmp, buf)
+      fs.writeFileSync(tmp, buf, { mode: 0o644 })
       return safeSegmentImage(tmp)
     }
 
@@ -1264,7 +1271,7 @@ export async function getImageSegment(src) {
       const extFromUrl = urlPath ? path.extname(urlPath) : ''
       const ext = extFromUrl || guessExtFromBuffer(dl.buffer) || '.img'
       const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
-      fs.writeFileSync(tmp, dl.buffer)
+      fs.writeFileSync(tmp, dl.buffer, { mode: 0o644 })
       return safeSegmentImage(tmp)
     }
 
@@ -1336,7 +1343,7 @@ export async function getVideoSegment(src) {
   cleanupTmpDir()
   try {
     const tmp = path.join(TMP_DIR, `vid-${Date.now()}-${rand6()}.mp4`)
-    fs.writeFileSync(tmp, src)
+    fs.writeFileSync(tmp, src, { mode: 0o644 })
     return safeSegmentVideo(tmp)
   } catch (err) {
     safeLogger.warn(`[ai0-plugin] getVideoSegment 异常: ${err.message}`)
