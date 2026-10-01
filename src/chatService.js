@@ -446,7 +446,7 @@ async function sendOnlyAtDefaultReply(e, config) {
   // 1) 随机挑 1 条文案
   const text = texts.length ? texts[Math.floor(Math.random() * texts.length)] : ''
 
-  // 2) 随机挑 1 张图（可能没有）→ 统一用 helper.getImageSegment 走"本地临时文件路径"策略，避免 rich media transfer failed
+  // 2) 随机挑 1 张图（可能没有）→ 统一用 helper.getImageSegment 走 base64:// 内联（适配器容器看不到本地临时文件）
   let stickerSeg = null
   if (stickers.length) {
     const pick = stickers[Math.floor(Math.random() * stickers.length)]
@@ -1388,7 +1388,7 @@ export async function handleChat(e) {
             // 再发送图片
             if (imgResult.imageBuffer) {
               try {
-                // 注意：getImageSegment 是 async（内部要落临时文件），必须 await 出 segment 再发，
+                // 注意：getImageSegment 是 async（Buffer 需转 base64 内联），必须 await 出 segment 再发，
                 // 否则传进 e.reply 的是 Promise → 图片必然发送失败（2026-09 安全审查发现）。
                 const imgSeg = await helper.getImageSegment(imgResult.imageBuffer)
                 if (!imgSeg) throw new Error('图片 segment 构造失败')

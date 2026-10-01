@@ -90,19 +90,18 @@ const __dirname = path.dirname(__filename)
 const PLUGIN_ROOT = path.resolve(__dirname, '..')
 const DATA_DIR = path.join(PLUGIN_ROOT, 'data')
 const WEB_DIR = path.join(PLUGIN_ROOT, 'web')
-// 临时媒体文件目录：放 os.tmpdir()（如 /tmp/ai0-plugin-tmp）而不是插件 data/ 下。
-// 原因：Yunzai 常以 root 运行（/root 及 data/ 目录 0700），而适配器（NapCat/Lagrange 等）
-// 以独立用户运行，stat 插件 data/ 下的文件会 EACCES（retcode 100，发送图片失败）。
-// /tmp 全局可进入，文件再以 0o644 落盘，任意用户的适配器进程都能 stat+read。
+// 临时文件目录说明：
+//   media 发送已全部改为 base64:// 内联（适配器常以独立用户/容器运行，看不到
+//   Yunzai 写的本地文件：/root 0700 → EACCES；容器内 /tmp → ENOENT），以下两个
+//   临时目录仅保留用于清理旧版本遗留文件与白名单读回兼容。
 const LEGACY_TMP_DIR = path.join(DATA_DIR, 'tmp-stickers')
 const TMP_DIR = path.join(os.tmpdir(), 'ai0-plugin-tmp')
 // 允许本地图片路径访问的根目录白名单：
-//   DATA_DIR：会话历史/临时文件/加密会话（含旧版 tmp-stickers，读回兼容）
+//   DATA_DIR：会话历史/临时文件/加密会话（含旧版 tmp-stickers/tmp，读回兼容）
 //   WEB_DIR：  前端静态资源（网页内嵌图片/Logo 之类）
-//   TMP_DIR：  临时图片（getImageSegment 写的主路径）
+//   TMP_DIR：  旧版临时图片目录（读回兼容）
 // 其他任何路径（/etc/passwd、~/.ssh/id_rsa 等）都一律拒绝。
 const ALLOWED_IMAGE_ROOTS = [DATA_DIR, WEB_DIR, TMP_DIR]
-try { if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o755 }) } catch (_) {}
 // 判断绝对路径是否落在任一允许的根目录下，防范路径穿越（`..` / 符号链接跟随用 realpath 二次校验）
 function isPathWithinAllowedRoots(filePath) {
   if (!filePath || typeof filePath !== 'string') return false
@@ -1217,9 +1216,59 @@ export async function sendPrivate(userId, content) {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Buffer → base64:// 内联 image segment。
+ * 为什么内联：适配器（NapCat/Lagrange 等）常以独立用户或容器运行，看不到
+ * Yunzai 进程写的本地临时文件（/root 0700 → EACCES；容器内 /tmp → ENOENT）；
+ * base64:// 由 OneBot 协议原生支持，发送零文件系统依赖。base64:// 引用格式
+ * 对 ICQQ/NapCat/Lagrange 均可用，替代早年"本地临时文件路径"策略。
+ *
+ * @param {Buffer} buf - 图片数据
+ * @returns {segment|null} 失败返回 null（caller 应静默降级）
+ */
+export function imageSegmentFromBuffer(buf) {
+  if (!Buffer.isBuffer(buf) || !buf.length) return null
+  if (buf.length > 20 * 1024 * 1024) {
+    safeLogger.warn(`[ai0-plugin] Buffer 图片过大(${Math.round(buf.length / 1024 / 1024)}MB)，已拒绝`)
+    return null
+  }
+  const ref = 'base64://' + buf.toString('base64')
+  // segment 是 Yunzai 全局对象；缺失时兜底为手动组装的 segment 对象
+  try {
+    if (typeof segment !== 'undefined' && segment && typeof segment.image === 'function') {
+      return segment.image(ref)
+    }
+  } catch (_) {}
+  return { type: 'image', file: ref }
+}
+
+/**
+ * 本地图片文件 → base64 内联 segment。
+ * 仅允许白名单根目录内的路径（P3-6），realpath 跟随符号链接比对，
+ * 防止把指向 /etc/passwd 的 symlink 当成"允许的"图片读回来。
+ * @param {string} filePath
+ * @returns {segment|null}
+ */
+export function imageSegmentFromFile(filePath) {
+  try {
+    if (!isPathWithinAllowedRoots(filePath)) {
+      safeLogger.warn(`[ai0-plugin] 本地图片路径超出允许根目录，已跳过: ${String(filePath).slice(0, 120)}`)
+      return null
+    }
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      safeLogger.warn(`[ai0-plugin] 本地图片文件不存在或不可读，已跳过: ${String(filePath).slice(0, 120)}`)
+      return null
+    }
+    return imageSegmentFromBuffer(fs.readFileSync(filePath))
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 本地图片读取失败: ${err?.message || err}`)
+    return null
+  }
+}
+
+/**
  * 把一个「图片来源」（本地路径 / http(s) URL / Buffer / base64 dataURL）
- * 转成 Yunzai/NapCat 能稳定发送的 segment.image（统一通过"本地临时文件路径"发送，
- * 避免直接发 Buffer/URL 导致的 rich media transfer failed）。
+ * 转成 Yunzai/NapCat 能稳定发送的 segment.image（base64:// 内联，
+ * 避免适配器进程访问不到本地临时文件）。
  *
  * @param {string|Buffer} src - 图片来源
  * @returns {Promise<segment|null>} 失败返回 null（caller 应静默降级）
@@ -1229,17 +1278,8 @@ export async function getImageSegment(src) {
   cleanupTmpDir()
 
   try {
-    // 1) Buffer → 写临时文件（防御：超大 Buffer 拒绝落盘，防止临时目录内存/磁盘被撑爆）
-    if (Buffer.isBuffer(src)) {
-      if (src.length > 20 * 1024 * 1024) {
-        safeLogger.warn(`[ai0-plugin] Buffer 图片过大(${Math.round(src.length / 1024 / 1024)}MB)，已拒绝`)
-        return null
-      }
-      const ext = guessExtFromBuffer(src) || '.img'
-      const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
-      fs.writeFileSync(tmp, src, { mode: 0o644 })
-      return safeSegmentImage(tmp)
-    }
+    // 1) Buffer → 直接内联
+    if (Buffer.isBuffer(src)) return imageSegmentFromBuffer(src)
 
     if (typeof src !== 'string') return null
     const s = src.trim()
@@ -1249,46 +1289,23 @@ export async function getImageSegment(src) {
     if (/^data:image\//i.test(s)) {
       const m = s.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,(.+)$/i)
       if (!m) return null
-      const ext = m[1] ? '.' + (m[1].split('+')[0].replace('jpeg', 'jpg')) : '.img'
-      const buf = Buffer.from(m[2], 'base64')
-      if (buf.length > 20 * 1024 * 1024) {
-        safeLogger.warn(`[ai0-plugin] data:URL 图片过大(${Math.round(buf.length / 1024 / 1024)}MB)，已拒绝`)
-        return null
-      }
-      const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
-      fs.writeFileSync(tmp, buf, { mode: 0o644 })
-      return safeSegmentImage(tmp)
+      return imageSegmentFromBuffer(Buffer.from(m[2], 'base64'))
     }
 
-    // 3) http(s) URL → 下载 → 写临时文件
+    // 3) http(s) URL → 下载 → 内联
     if (/^https?:\/\//i.test(s)) {
       const dl = await downloadImageViaFetch(s)
       if (!dl.ok) {
         safeLogger.warn(`[ai0-plugin] 默认回复图片下载失败(${s.slice(0,80)}): ${dl.error}`)
         return null
       }
-      const urlPath = safeUrlPathname(s) || ''
-      const extFromUrl = urlPath ? path.extname(urlPath) : ''
-      const ext = extFromUrl || guessExtFromBuffer(dl.buffer) || '.img'
-      const tmp = path.join(TMP_DIR, `stk-${Date.now()}-${rand6()}${ext}`)
-      fs.writeFileSync(tmp, dl.buffer, { mode: 0o644 })
-      return safeSegmentImage(tmp)
+      return imageSegmentFromBuffer(dl.buffer)
     }
 
-    // 4) 本地文件路径 → 仅允许落在 DATA_DIR / WEB_DIR / TMP_DIR 内（P3-6）
-    //    realpath 跟随符号链接后再比对根目录，防止把指向 /etc/passwd 的 symlink 当成"允许的"图片读回来
-    try {
-      if (!isPathWithinAllowedRoots(s)) {
-        safeLogger.warn(`[ai0-plugin] 本地图片路径超出允许根目录，已跳过: ${s.slice(0, 120)}`)
-        return null
-      }
-      if (fs.existsSync(s) && fs.statSync(s).isFile()) {
-        return safeSegmentImage(s)
-      }
-    } catch (_) {}
-
-    safeLogger.warn(`[ai0-plugin] 无法识别的图片来源，已跳过: ${s.slice(0, 80)}`)
-    return null
+    // 4) 本地文件路径 → 白名单校验后读取内联
+    const seg = imageSegmentFromFile(s)
+    if (!seg) safeLogger.warn(`[ai0-plugin] 无法识别的图片来源，已跳过: ${s.slice(0, 80)}`)
+    return seg
   } catch (err) {
     safeLogger.warn(`[ai0-plugin] getImageSegment 异常: ${err.message}`)
     return null
@@ -1320,17 +1337,9 @@ export function safeSegmentImageWithFallback(filePath) {
   }
 }
 
-export function safeSegmentVideo(filePath) {
-  try {
-    if (typeof segment !== 'undefined' && segment && typeof segment.video === 'function') {
-      return segment.video(filePath)
-    }
-  } catch (_) {}
-  return { type: 'video', file: filePath }
-}
-
 /**
- * 把视频 Buffer 落临时文件并构造视频 segment。超过 50MB 拒绝，避免临时目录被撑爆。
+ * 把视频 Buffer 转成 base64:// 内联 video segment。超过 50MB 拒绝，
+ * 避免 base64 后撑爆 WS 载荷（适配器同样看不到本地临时文件）。
  * @param {Buffer} src
  * @returns {Promise<object|null>}
  */
@@ -1341,37 +1350,13 @@ export async function getVideoSegment(src) {
     return null
   }
   cleanupTmpDir()
+  const ref = 'base64://' + src.toString('base64')
   try {
-    const tmp = path.join(TMP_DIR, `vid-${Date.now()}-${rand6()}.mp4`)
-    fs.writeFileSync(tmp, src, { mode: 0o644 })
-    return safeSegmentVideo(tmp)
-  } catch (err) {
-    safeLogger.warn(`[ai0-plugin] getVideoSegment 异常: ${err.message}`)
-    return null
-  }
-}
-
-function rand6() {
-  return crypto.randomBytes(3).toString('hex')
-}
-
-function safeUrlPathname(u) {
-  try { return new URL(u).pathname || '' } catch (_) { return '' }
-}
-
-/** 根据 Buffer 的 magic number 判断扩展名（尽量猜，猜不到就 null） */
-function guessExtFromBuffer(buf) {
-  if (!buf || buf.length < 4) return null
-  const b0 = buf[0], b1 = buf[1], b2 = buf[2], b3 = buf[3]
-  if (b0 === 0x89 && b1 === 0x50 && b2 === 0x4E && b3 === 0x47) return '.png'
-  if (b0 === 0xFF && b1 === 0xD8 && b2 === 0xFF) return '.jpg'
-  if (b0 === 0x47 && b1 === 0x49 && b2 === 0x46) return '.gif'
-  if (b0 === 0x52 && b1 === 0x49 && b2 === 0x46 && b3 === 0x46) {
-    // RIFF → 接下来 4 字节是 size, 再接下来 4 字节应该是 WEBP
-    if (buf.length >= 12 && buf.toString('ascii', 8, 12) === 'WEBP') return '.webp'
-  }
-  if (b0 === 0x42 && b1 === 0x4D) return '.bmp'
-  return null
+    if (typeof segment !== 'undefined' && segment && typeof segment.video === 'function') {
+      return segment.video(ref)
+    }
+  } catch (_) {}
+  return { type: 'video', file: ref }
 }
 
 async function downloadImageViaFetch(url, maxBytes = 20 * 1024 * 1024) {

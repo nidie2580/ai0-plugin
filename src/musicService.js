@@ -22,7 +22,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { safeLogger } from './globals.js'
 import { safeAxiosRequest } from './security.js'
-import { safeSegmentImage, safeSegmentImageWithFallback, unlinkStaleFilesInDir } from './helper.js'
+import { safeSegmentImageWithFallback, imageSegmentFromFile, unlinkStaleFilesInDir } from './helper.js'
 import { renderSongCard } from './svgRender.js'
 
 const MUSIC_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
@@ -690,12 +690,15 @@ export async function downloadAudioForVoice(item) {
     }
   } catch (_) {}
 
-  // 5 分钟后清理（语音发送链路已完成）
+  // 5 分钟后清理（语音已按 base64 内联发送，本地文件无保留价值）
   const finalPath = raw
   setTimeout(() => {
     try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath) } catch (_) {}
   }, 5 * 60 * 1000).unref?.()
-  return { ok: true, filePath: finalPath }
+  // 读出转 base64:// 内联返回（适配器容器可能看不到本机路径）；读取失败退回本地路径
+  let fileRef = finalPath
+  try { fileRef = 'base64://' + fs.readFileSync(finalPath).toString('base64') } catch (_) {}
+  return { ok: true, filePath: fileRef }
 }
 
 function getBotName(e) {
@@ -746,7 +749,9 @@ export async function sendSongsResultRich(e, songs, opts = {}) {
   // ② 点歌信息卡片图 + ③ 可点链接（版权受限时附说明）
   try {
     const svgPath = await renderSongCard(item, getBotName(e))
-    await e.reply(safeSegmentImageWithFallback(svgPath))
+    // base64 内联发送；转换失败（非白名单/文件缺失）退回本地路径 segment
+    const cardSeg = imageSegmentFromFile(svgPath) || safeSegmentImageWithFallback(svgPath)
+    await e.reply(cardSeg)
     if (item.pageUrl) {
       const linkText = voiceSent || !dl?.copyright
         ? String(item.pageUrl)
