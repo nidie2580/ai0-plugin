@@ -263,6 +263,7 @@ export function buildOfficialAssociatePayload({
   username,
   operatorId,
   email,
+  bindCode,
   pluginVersion,
 } = {}) {
   const plugin = OFFICIAL_PLUGIN_NAME
@@ -272,6 +273,7 @@ export function buildOfficialAssociatePayload({
   const user = sanitizeOfficialUsername(username)
   const operator = sanitizeOfficialQq(operatorId)
   const userEmail = sanitizeOfficialEmail(email)
+  const code = String(bindCode == null ? '' : bindCode).replace(/\s+/g, '')
   const payload = {
     plugin,
     pluginVersion: version,
@@ -281,6 +283,9 @@ export function buildOfficialAssociatePayload({
     providerKey: key,
     provider_key: key,
   }
+  // 归属证明：平台网页「个人中心 → 插件关联」生成的 6 位一次性关联码。
+  // 平台已不再仅凭「用户名 + 邮箱文本一致」改绑实例（防 QQ 邮箱可猜测被冒用）。
+  if (code) payload.bind_code = code
   // 用户名可选：留空表示「按 QQ 优先匹配」，由合作方依据 operatorId 反查账号。
   if (user) {
     payload.username = user

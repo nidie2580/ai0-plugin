@@ -1357,6 +1357,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     associateTargetIdx = idx
     const qqEl = $('#officialAssociateQq')
     const userEl = $('#officialAssociateUser')
+    const bindCodeEl = $('#officialAssociateBindCode')
     const emailWrap = $('#officialAssociateEmailWrap')
     const emailEl = $('#officialAssociateEmail')
     const hintEl = $('#officialAssociateHint')
@@ -1364,6 +1365,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const qq = String(preset.operatorId || '').trim()
     if (qqEl) qqEl.textContent = qq ? `当前登录 QQ：${qq}` : '当前登录 QQ：未绑定（请用主人 QQ 发 #ai网页管理 重新打开直链）'
     if (userEl) userEl.value = String(preset.username || '').trim()
+    if (bindCodeEl) bindCodeEl.value = ''
     if (emailEl) emailEl.value = ''
     if (emailWrap) emailWrap.classList.add('hidden')
     if (hintEl) {
@@ -1379,14 +1381,17 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     const p = providersList[associateTargetIdx]
     const msgEl = $('#officialAssociateMsg')
     const userEl = $('#officialAssociateUser')
+    const bindCodeEl = $('#officialAssociateBindCode')
     const emailWrap = $('#officialAssociateEmailWrap')
     const emailEl = $('#officialAssociateEmail')
     if (!p || p.kind !== 'official') return
     const username = String((userEl && userEl.value) || '').trim()
+    const bindCode = String((bindCodeEl && bindCodeEl.value) || '').trim()
     const email = String((emailEl && emailEl.value) || '').trim()
     if (msgEl) { msgEl.className = 'save-msg'; msgEl.textContent = username ? '正在关联…' : '正在按 QQ 匹配并关联…' }
     const body = { providerKey: p.key }
     if (username) body.username = username
+    if (bindCode) body.bindCode = bindCode
     if (email) body.email = email
     const r = await api('/api/official/associate', { method: 'POST', body })
     if (r.ok) {
@@ -1394,6 +1399,13 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
       const pageMsg = $('#provMsg')
       if (pageMsg) { pageMsg.className = 'save-msg ok'; pageMsg.textContent = r.msg || '已关联官方平台用户名。' }
       closeOfficialAssociate()
+      return
+    }
+    // 平台归属证明校验：缺关联码 / 关联码错误或过期（10 分钟一次性）。
+    // 保留表单内容，聚焦关联码输入框让用户补填后重试（平台 message 已是可读中文）。
+    if (r.needBindCode) {
+      if (msgEl) { msgEl.className = 'save-msg err'; msgEl.textContent = r.msg || '请在平台网页「个人中心 → 插件关联」生成关联码后填写。' }
+      if (bindCodeEl) bindCodeEl.focus()
       return
     }
     // QQ 未匹配到账号 → 让用户补充平台用户名后重试

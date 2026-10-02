@@ -166,6 +166,24 @@ describe('officialApi', () => {
     assert.equal(parseOfficialAssociateResponse(404, { ok: false, message: 'no user' }).code, 'USER_NOT_FOUND')
   })
 
+  it('关联请求体携带平台关联码（去空格，仅在有值时输出）', () => {
+    const withCode = buildOfficialAssociatePayload({
+      instanceId: 'abc123',
+      providerKey: 'official',
+      username: 'alice',
+      operatorId: '10001',
+      bindCode: ' 389 772 ',
+    })
+    assert.equal(withCode.bind_code, '389772')
+    const noCode = buildOfficialAssociatePayload({
+      instanceId: 'abc123',
+      providerKey: 'official',
+      username: 'alice',
+      operatorId: '10001',
+    })
+    assert.equal(noCode.bind_code, undefined)
+  })
+
   it('关联校验：只有合作方证明邮箱匹配才算成功', () => {
     const okOpts = { expectedEmail: '10001@qq.com', expectedUsername: 'alice' }
     // 显式 verified 标志

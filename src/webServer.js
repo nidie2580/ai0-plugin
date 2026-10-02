@@ -1537,12 +1537,13 @@ export function createApp() {
 
   app.post('/api/official/associate', requireAuth, requireCsrf, requireApiRate('official-associate', 8, 60_000), async (req, res) => {
     try {
-      const { providerKey, username, email } = req.body || {}
+      const { providerKey, username, email, bindCode } = req.body || {}
       const result = await associateOfficialAccount({
         providerKey,
         username,
         operatorId: getWebIdentity(req),
         email,
+        bindCode,
       })
       if (result.ok) {
         return res.json({
@@ -1559,6 +1560,7 @@ export function createApp() {
         code: result.code,
         needEmail: !!result.needEmail,
         needUsername: !!result.needUsername,
+        needBindCode: !!result.needBindCode,
       })
     } catch (err) {
       safeLogger.error(`[ai0-plugin] 官方账号关联失败: ${redactOfficialText(err.message)}`)

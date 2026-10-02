@@ -329,9 +329,13 @@
     <label>平台用户名（可留空）
       <input id="officialAssociateUser" maxlength="64" placeholder="留空则按 QQ 匹配；未匹配到时再填写" autocomplete="off" />
     </label>
+    <label>平台关联码（选填，6 位数字）
+      <input id="officialAssociateBindCode" maxlength="6" inputmode="numeric" placeholder="平台生成的一次性关联码" autocomplete="off" />
+    </label>
     <label id="officialAssociateEmailWrap" class="hidden">绑定邮箱
       <input id="officialAssociateEmail" maxlength="254" placeholder="该用户名实际绑定的邮箱，如 abc123@qq.com" autocomplete="off" />
     </label>
+    <p class="hint">关联码获取：登录平台网页 → 个人中心 → 🔗 插件关联 → 生成关联码（10 分钟内有效，只能用一次）。平台地址：<a href="https://api.djyun.click/" target="_blank" rel="noopener">https://api.djyun.click/</a></p>
     <p class="hint" id="officialAssociateHint"></p>
     <div class="actions official-associate-actions">
       <button class="btn primary" id="officialAssociateOk">关联</button>

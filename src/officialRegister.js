@@ -132,7 +132,7 @@ export async function registerOfficialKey({ providerKey, displayName, operatorId
   }
 }
 
-export async function associateOfficialAccount({ providerKey, username, operatorId, email } = {}, deps = {}) {
+export async function associateOfficialAccount({ providerKey, username, operatorId, email, bindCode } = {}, deps = {}) {
   const request = typeof deps.request === 'function' ? deps.request : safeAxiosRequest
   const loadConfig = typeof deps.loadConfig === 'function' ? deps.loadConfig : cfg.loadConfig
   const instanceId = typeof deps.getInstanceId === 'function' ? deps.getInstanceId() : getOrCreateInstanceId()
@@ -149,6 +149,12 @@ export async function associateOfficialAccount({ providerKey, username, operator
   if (hasEmailInput && !userEmail) {
     return { ok: false, msg: '邮箱格式不正确，请填写该用户名实际绑定的邮箱（如 abc123@qq.com）' }
   }
+  // 归属证明：平台一次性关联码（6 位数字）。本地先挡掉明显格式错误，
+  // 避免占用平台「同一实例+密钥 1 小时内 3 次失败」的限流额度。
+  const bindCodeNorm = String(bindCode == null ? '' : bindCode).replace(/\s+/g, '')
+  if (bindCodeNorm && !/^\d{6}$/.test(bindCodeNorm)) {
+    return { ok: false, msg: '关联码格式不正确（应为 6 位数字），请在平台网页「个人中心 → 插件关联」重新生成' }
+  }
   const config = loadConfig() || {}
   const entry = config.model?.[key]
   if (!entry || typeof entry !== 'object' || !isOfficialKind(entry.kind)) {
@@ -161,6 +167,7 @@ export async function associateOfficialAccount({ providerKey, username, operator
     username: user,
     operatorId: qq,
     email: userEmail,
+    bindCode: bindCodeNorm,
     pluginVersion: readPluginVersion(),
   })
   // 第一段期望 `<QQ>@qq.com`；第二段期望用户手填的邮箱。
@@ -204,6 +211,18 @@ export async function associateOfficialAccount({ providerKey, username, operator
         needUsername: true,
         code: 'USER_NOT_FOUND',
         msg: parsed.message || '未找到与该 QQ 关联的平台账号，请填写你在该平台注册的用户名后重试',
+      }
+    }
+    // 平台归属证明校验：未带关联码（PROOF_REQUIRED）/ 关联码错误或过期（PROOF_INVALID）。
+    // 平台 message 已是可读中文，直接透传；前端据此展开关联码输入框让用户补填后重试。
+    if (parsed.code === 'PROOF_REQUIRED' || parsed.code === 'PROOF_INVALID') {
+      return {
+        ok: false,
+        needBindCode: true,
+        code: parsed.code,
+        msg: parsed.message || (parsed.code === 'PROOF_REQUIRED'
+          ? '请在平台网页「个人中心 → 插件关联」生成关联码后填写'
+          : '关联码或密码不正确（关联码 10 分钟内有效且只能用一次），请重新生成'),
       }
     }
     // 第一段（未提供邮箱）且平台要求补充邮箱 → 让前端弹窗收集邮箱后重试

@@ -152,6 +152,72 @@ describe('officialRegister', () => {
     assert.match(result.msg, /1 小时后再试/)
   })
 
+  it('关联：携带关联码时透传 bind_code（去空格）', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', username: 'alice', operatorId: '10001', bindCode: ' 389 772 ' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async (method, url, payload) => {
+          assert.equal(payload.bind_code, '389772')
+          return { status: 200, data: { ok: true, username: 'alice', verified: true } }
+        },
+      },
+    )
+    assert.equal(result.ok, true)
+  })
+
+  it('关联：关联码格式错误时本地拒绝，不发请求（省限流额度）', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', username: 'alice', operatorId: '10001', bindCode: '38a772' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => { throw new Error('should not call') },
+      },
+    )
+    assert.equal(result.ok, false)
+    assert.match(result.msg, /关联码格式不正确/)
+  })
+
+  it('关联：平台要求归属证明(PROOF_REQUIRED)时透传提示并让前端补关联码', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', username: 'alice', operatorId: '10001' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => ({
+          status: 403,
+          data: { ok: false, code: 'PROOF_REQUIRED', message: '请在平台网页「个人中心 → 插件关联」生成关联码后填写' },
+        }),
+      },
+    )
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'PROOF_REQUIRED')
+    assert.equal(result.needBindCode, true)
+    assert.match(result.msg, /生成关联码/)
+  })
+
+  it('关联：关联码错误或过期(PROOF_INVALID)时透传提示，不当作用户名/邮箱错误', async () => {
+    const result = await associateOfficialAccount(
+      { providerKey: 'official', username: 'alice', operatorId: '10001', bindCode: '111111' },
+      {
+        loadConfig: () => ({ model: { official: { kind: 'official', apiKey: 'sk-x' } } }),
+        getInstanceId: () => 'ee'.repeat(16),
+        request: async () => ({
+          status: 403,
+          data: { ok: false, code: 'PROOF_INVALID', message: '关联码或密码不正确（关联码 10 分钟内有效且只能用一次），请重新生成' },
+        }),
+      },
+    )
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'PROOF_INVALID')
+    assert.equal(result.needBindCode, true)
+    assert.equal(result.needUsername, undefined)
+    assert.equal(result.needEmail, undefined)
+    assert.match(result.msg, /10 分钟内有效/)
+  })
+
   it('关联：合作方未证明邮箱匹配时拒绝，防用户名冒充（第一段转为要求补邮箱）', async () => {
     const result = await associateOfficialAccount(
       { providerKey: 'official', username: 'admin', operatorId: '10001' },
