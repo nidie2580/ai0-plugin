@@ -8,6 +8,8 @@
  *   safeSegment.image(buf)   // 等价于 segment?.image?.(buf)
  */
 
+import { scrubSensitiveTokens } from './scrub.js'
+
 /** 安全的 logger 代理：框架存在时用框架的，否则降级 console */
 function createLoggerProxy() {
   const noop = () => {}
@@ -43,11 +45,12 @@ export const safeSegment = createSegmentProxy()
 /**
  * 日志净化：剥离 \r \n 以及其它 C0 控制字符/ANSI 转义/Unicode 换行类，
  * 防止外部数据在日志中注入伪造行、通过 \r 覆盖前条或通过 ANSI 序列伪造终端内容。
- * 用于任何拼入 safeLogger 的外部输入（API 错误消息、响应体预览等）。
+ * 另对可识别的密钥/令牌做脱敏（上游 provider 报错偶尔夹带 key 片段，
+ * 2026-10 安全审计 P2-3）。用于任何拼入 safeLogger 的外部输入。
  */
 export function sanitizeLog(s) {
-  return String(s ?? '')
+  return scrubSensitiveTokens(String(s ?? '')
     .replace(/[\x00-\x1F\x7F\u0085\u2028\u2029]/g, ' ')
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/gi, '')  // 剥离 ANSI/VT100 转义序列
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/gi, ''))  // 剥离 ANSI/VT100 转义序列
     .trim()
 }

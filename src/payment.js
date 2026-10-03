@@ -9,6 +9,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import YAML from 'yaml'
 import { safeAxiosRequest } from './security.js'
+import { safeCompare } from './auth.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN_ROOT = path.join(__dirname, '..')
@@ -183,7 +184,8 @@ export class YiPayment {
   verifyCallbackSignature(callbackData) {
     const { signature, ...params } = callbackData
     const generatedSignature = this.generateSignature(params)
-    return signature === generatedSignature
+    // 恒时比较（2026-10 安全审计）：防时序侧信道逐字节猜签名
+    return safeCompare(signature, generatedSignature)
   }
 
   /**

@@ -4,7 +4,7 @@
 > 基于 OpenAI 兼容协议,可无缝接入 ChatGPT、DeepSeek、Kimi、通义千问、本地 Ollama 等任意大模型。
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
-![Node](https://img.shields.io/badge/Node.js-%3E%3D16-green)
+![Node](https://img.shields.io/badge/Node.js-%3E%3D18.17-green)
 ![Version](https://img.shields.io/badge/version-1.2.0-brightgreen)
 ![Mirror](https://img.shields.io/badge/mirror-Gitee%20%2F%20GitHub%20%2F%20GitCode-orange)
 
@@ -87,7 +87,7 @@ npm install
 
 ## 📦 安装与启动
 
-> 依赖要求:Node.js ≥ 16,适用于 **XRK-Yunzai**(及大部分 Yunzai V3 衍生版本)。
+> 依赖要求:Node.js ≥ 18.17,适用于 **XRK-Yunzai**(及大部分 Yunzai V3 衍生版本)。
 
 在 Yunzai 项目目录下执行(**三选一**):
 
@@ -231,7 +231,7 @@ system:
 ## ❓ 常见问题 (FAQ)
 
 **Q:安装或 `npm install` 失败/卡住怎么办?**
-A:先确认 Node.js ≥ 16;网络慢可切换国内镜像 `npm config set registry https://registry.npmmirror.com`;若仍失败,删除 `node_modules` 后重试。
+A:先确认 Node.js ≥ 18.17;网络慢可切换国内镜像 `npm config set registry https://registry.npmmirror.com`;若仍失败,删除 `node_modules` 后重试。
 
 **Q:网页后台打不开?**
 A:依次检查:① 后台端口 12580 是否被占用(改 `web.port`);② 是否在 Yunzai 环境内运行/已重启;③ 局域网访问需把 `web.host` 改为 `0.0.0.0` 并放行防火墙端口。

@@ -149,7 +149,7 @@ const DEFAULT_ALLOWED = new Set([
   // 基本文件/目录/文本
   'ls', 'cd', 'cat', 'head', 'tail', 'wc', 'echo', 'printf', 'pwd', 'whoami', 'date',
   'grep', 'find', 'which', 'tree', 'stat', 'file', 'du', 'df', 'sort', 'uniq',
-  'cut', 'tr', 'sed', 'awk', 'basename', 'dirname', 'realpath', 'readlink',
+  'cut', 'tr', 'sed', 'basename', 'dirname', 'realpath', 'readlink',
   'diff', 'cmp',
   // 文件操作（rm 受黑名单限制：禁止 -r/-f）
   'mkdir', 'touch', 'cp', 'mv', 'rm', 'ln', 'tar', 'unzip', 'zip', 'gzip', 'gunzip', 'chmod',
@@ -164,6 +164,11 @@ const DEFAULT_ALLOWED = new Set([
   //    再 `git pwn`，都能直接执行任意 shell 命令（hook/filter/pager/editor 同理），
   //    而工作区完全可被模型写入，参数级规则无法约束 → 等同任意命令执行。
   //    确有需要请在 extraAllowedCommands 中显式加入 'git' 并自担风险。
+  //
+  // ⚠️ awk 默认不开放（2026-10 外部审计实证）：awk 是图灵完备解释器，除 system()/管道
+  //    coprocess 外还有 @include、getline、gawk /inet/ 网络扩展等，脚本正文完全在
+  //    引号内、路径校验不可见，参数级规则无法穷举 → 与 git 同理移出白名单。
+  //    确有需要请在 extraAllowedCommands 中显式加入 'awk' 并自担风险。
   'rg', 'fd', 'jq',
   // 只读系统信息
   'ps', 'free', 'uname', 'hostname', 'uptime', 'lsblk'
@@ -619,6 +624,91 @@ function assertNoGitDangerousOptions(cmd) {
   return { ok: true }
 }
 
+// —— 白名单工具的"自带执行开关"封禁（2026-10 外部审计 P0 实证）——
+// tar/zip/sort/rg/fd 按设计可执行外部程序（外部压缩程序、checkpoint hook、
+// 前置处理器、-x/--exec 等），sed 脚本正文里还有 e（执行命令）/ r w W（任意
+// 文件读写，脚本整体是单个引号 token，路径校验看不到其内部路径）。
+// 被诱导的模型可借这些开关逃出 execFile 参数级沙箱 → 任意命令执行。
+const TAR_EXEC_OPTS = new Set([
+  '--use-compress-program', '--checkpoint-action', '--info-script',
+  '--rmt-command', '--rsh-command', '--to-command',
+])
+// tar 短选项簇中的 I(-I=--use-compress-program) / F(-F=--info-script)
+const TAR_EXEC_SHORT_CLUSTER = /^-[a-zA-Z]*[IF][a-zA-Z]*$/
+
+function assertNoToolExecSwitches(cmd) {
+  const segs = splitSegments(cmd)
+  for (const seg of segs) {
+    const c0 = firstCommand(seg)
+    const tokens = tokenizeKeepQuoted(seg).slice(1)
+    // tar：外部压缩程序 / checkpoint 执行 / info 脚本 / rmt-rsh 远程命令
+    if (c0 === 'tar') {
+      for (const raw of tokens) {
+        const [opt] = expandLongOption(raw)
+        if (TAR_EXEC_OPTS.has(opt)) {
+          return { ok: false, reason: `tar 禁止使用 ${opt}（可执行任意程序，构成沙箱逃逸）` }
+        }
+        if (TAR_EXEC_SHORT_CLUSTER.test(opt)) {
+          return { ok: false, reason: 'tar 禁止使用 -I/-F（外部压缩程序/info 脚本可执行任意程序）' }
+        }
+      }
+    }
+    // zip：-TT/--unzip-command 用任意命令测试归档
+    if (c0 === 'zip') {
+      for (const raw of tokens) {
+        const [opt] = expandLongOption(raw)
+        if (opt === '-TT' || opt === '--unzip-command') {
+          return { ok: false, reason: `zip 禁止使用 ${opt}（可执行任意程序）` }
+        }
+      }
+    }
+    // sort：--compress-program 指定外部压缩程序
+    if (c0 === 'sort') {
+      for (const raw of tokens) {
+        const [opt] = expandLongOption(raw)
+        if (opt === '--compress-program') {
+          return { ok: false, reason: 'sort 禁止使用 --compress-program（可执行任意程序）' }
+        }
+      }
+    }
+    // rg：--pre/--pre-glob 前置处理器执行命令（rg -x 是 --line-regexp，合法，勿误伤）
+    if (c0 === 'rg') {
+      for (const raw of tokens) {
+        const [opt] = expandLongOption(raw)
+        if (opt === '--pre' || opt === '--pre-glob') {
+          return { ok: false, reason: `rg 禁止使用 ${opt}（前置处理器可执行任意程序）` }
+        }
+      }
+    }
+    // fd：-x/-X/--exec/--exec-batch 直接执行程序（短簇含 x/X 一并拦截）
+    if (c0 === 'fd') {
+      for (const raw of tokens) {
+        if (raw === '-x' || raw === '-X' || /^(?:--exec(?:-batch)?)(?:=|$)/.test(raw)
+          || /^-[a-zA-Z]*[xX][a-zA-Z]*$/.test(raw)) {
+          return { ok: false, reason: 'fd 禁止使用 -x/-X/--exec（直接执行任意程序）' }
+        }
+      }
+    }
+    // sed：脚本正文中的 e（执行命令）与 r R w W（任意文件读写）命令。
+    // 脚本/文件名参数是普通 token，这里按文本封禁 e 命令；绝对路径写读已有
+    // 全局黑名单兜底，相对路径落回 workspace 内无害。
+    if (c0 === 'sed') {
+      for (const raw of tokens) {
+        if (!raw || raw.startsWith('-')) continue
+        // e 命令：行首/分号/花括号/换行后（可带数字或 /re/ 地址）紧跟 e + 空白或结尾
+        if (/(?:^|[;\n}])(?:\d*[$]?\s*|\/[^/\n]*\/[a-zA-Z]*\s*)?e(?:\s|$|;)/.test(raw)) {
+          return { ok: false, reason: 'sed 禁止脚本中的 e 命令（执行替换结果/后续命令）' }
+        }
+        // r/R/w/W 文件读写命令（相对路径写入由 cwd=workspace 兜底，此处为纵深防御）
+        if (/(?:^|[;\n}])(?:\d*[$]?\s*|\/[^/\n]*\/[a-zA-Z]*\s*)[rwRW](?:\s|;|$)/.test(raw)) {
+          return { ok: false, reason: 'sed 禁止脚本中的 r/w/W 命令（任意文件读写）' }
+        }
+      }
+    }
+  }
+  return { ok: true }
+}
+
 // —— 解释器纵深防御：即使管理员在 extraAllowedCommands 放开了 node/python/npm 等解释器，
 // 也禁止用 -c / -e / -p / --eval / --print 等"内联代码求值"参数（解释器可执行任意代码、
 // 读写任意文件、发起任意网络请求，天然绕过白名单/黑名单）。禁止管道把解释器输出喂给 shell。
@@ -715,10 +805,15 @@ export function checkCommand(rawCmd, opts = {}) {
   if (hasDangerousRm(cmd)) return { ok: false, reason: '禁止递归/强制删除：rm -r / -f / --recursive / --force' }
 
   // 3) 参数级绕过检测（白名单命令本身可能被参数滥用）
-  // 3a) awk：阻止 system() 调用（执行任意 shell 命令）和 -f 读取外部文件
+  // 3a) awk 纵深防御（默认已移出白名单；若被 extraAllowedCommands 放开仍拦执行原语）：
+  //     system() 调用、-f/-file 读外部脚本、@include、管道 coprocess（print | "cmd"）、
+  //     gawk /inet/ 网络扩展 —— 脚本正文在引号内、路径校验不可见，只能文本级封禁。
   if (/\bawk\b/.test(cmd)) {
     if (/\bsystem\s*\(/.test(cmd)) return { ok: false, reason: 'awk 禁止使用 system() 调用 shell 命令' }
     if (/(?:^|[\s;|&])awk\s+-(?:f|file)\b/.test(cmd)) return { ok: false, reason: 'awk 禁止使用 -f/-file 读取外部文件' }
+    if (/@include\b/.test(cmd)) return { ok: false, reason: 'awk 禁止使用 @include 引入外部脚本' }
+    if (/\/inet\//.test(cmd)) return { ok: false, reason: 'awk 禁止使用 /inet/ 网络扩展' }
+    if (/\|/.test(cmd)) return { ok: false, reason: 'awk 禁止管道/coprocess（| "cmd" 或 |& "cmd" 可执行任意命令）' }
   }
   // 3b) sed：阻止 /e 标志（执行替换结果为 shell 命令）
   if (/\bsed\b/.test(cmd)) {
@@ -773,6 +868,10 @@ export function checkCommand(rawCmd, opts = {}) {
   const expandCheck = assertNoShellExpandTokens(cmd)
   if (!expandCheck.ok) return { ok: false, reason: expandCheck.reason }
 
+  // 5e) 白名单工具的"自带执行开关"（tar/zip/sort/rg/fd/sed，2026-10 审计 P0 修复）
+  const toolCheck = assertNoToolExecSwitches(cmd)
+  if (!toolCheck.ok) return { ok: false, reason: toolCheck.reason }
+
   return { ok: true, cmd }
 }
 
@@ -791,10 +890,11 @@ const WORKSPACE_FILES = {
 - 预置文件：AGENTS.md（本规范）、MEMORY.md（跨会话记忆）、README.md（工作区说明）
 
 ## 可用命令
-- 文件与目录：ls cat head tail wc grep find sed awk sort uniq cut mkdir touch cp mv rm tar unzip zip diff file stat du
-- 开发工具：jq（node/python/npm 等解释器、git 默认禁用，如确需由管理员在 extraAllowedCommands 开启并自担风险）
+- 文件与目录：ls cat head tail wc grep find sed sort uniq cut mkdir touch cp mv rm tar unzip zip diff file stat du
+- 开发工具：jq（node/python/npm/awk 等解释器、git 默认禁用，如确需由管理员在 extraAllowedCommands 开启并自担风险）
 - 网络：curl wget（仅 http/https；不允许 @文件 形式与 file:// 协议；禁止访问内网/本机/元数据地址；禁止跟随重定向，若遇 3xx 请直接用最终 URL 重试）
 - 其他：echo printf pwd whoami date which ps free tree rg fd
+- 执行类参数被禁止：tar --use-compress-program/-I/--checkpoint-action/-F、zip -TT、sort --compress-program、rg --pre、fd -x/-X/--exec、sed 的 e/r/w/W 命令（这些参数可执行任意程序）
 - 每次只能执行一条命令（禁止管道 / && / ; / 重定向）。命令不经过 /bin/sh，由 execFile 按参数数组执行。
 
 ## 路径边界（重要）
@@ -883,7 +983,7 @@ export function buildAgentContext() {
     '【格式红线】只允许上面这一种格式。禁止使用 <tool_calls>、<invoke>、<command>、<parameter>、<action:agent:...> 等 XML/尖括号标签，禁止用 markdown 代码块包裹命令，禁止输出函数调用 JSON。',
     '命令执行结果会作为后续上下文返回，你可以根据结果继续操作，直到任务完成。',
     `单次任务最多执行 ${maxRounds} 轮命令，完成后输出最终成果总结。`,
-    '支持 curl / wget / ls / cat / grep / find / sed / awk / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令（node/python 等解释器与 git 默认禁用；所有路径参数必须落在工作区内）。',
+    '支持 curl / wget / ls / cat / grep / find / sed / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令（node/python/awk 等解释器与 git 默认禁用；所有路径参数必须落在工作区内）。',
     'curl/wget 仅可访问公网 http/https：禁止内网/本机/元数据地址，且不跟随重定向（遇 3xx 请直接用最终 URL 重试）。',
     '每次只能执行一条命令：禁止管道 / && / ; / 重定向；命令不经过 /bin/sh。',
     '禁止 sudo / shutdown / reboot / mkfs / mount / chown / ssh / scp / nc / chmod（除+x）/ 命令替换 / 写入系统目录等危险操作。禁止修改 AGENTS.md。'

@@ -436,3 +436,72 @@ describe('agent: workspace 缺失时路径校验 fail-closed', () => {
     assert.equal(checkCommand('ls ./README.md').ok, true)
   })
 })
+
+describe('agent: 白名单工具"自带执行开关"封禁（2026-10 审计 P0 回归）', () => {
+  test('tar 执行类选项全部拦截', () => {
+    assert.equal(checkCommand("tar --use-compress-program='sh -c id' -cf out.tar README.md").ok, false)
+    assert.equal(checkCommand("tar -I 'sh -c id' -cf out.tar README.md").ok, false)
+    assert.equal(checkCommand('tar --checkpoint=1 --checkpoint-action=exec=touch p -cf o.tar README.md').ok, false)
+    assert.equal(checkCommand('tar -F touch p -cf o.tar README.md').ok, false)
+    assert.equal(checkCommand('tar --info-script=x -cf o.tar README.md').ok, false)
+    assert.equal(checkCommand('tar --rmt-command=id -cf o.tar README.md').ok, false)
+    assert.equal(checkCommand('tar --rsh-command=id -cf o.tar README.md').ok, false)
+    // 短选项簇内含 I/F 也拦截
+    assert.equal(checkCommand('tar -czFI out.tar README.md').ok, false)
+  })
+
+  test('tar 常规用法放行', () => {
+    assert.equal(checkCommand('tar -czf out.tar.gz README.md').ok, true)
+    assert.equal(checkCommand('tar -cf out.tar README.md docs/').ok, true)
+    assert.equal(checkCommand('tar -tf out.tar').ok, true)
+  })
+
+  test('zip -TT/--unzip-command 拦截，常规用法放行', () => {
+    assert.equal(checkCommand("zip -TT 'sh -c id' out.zip README.md").ok, false)
+    assert.equal(checkCommand('zip --unzip-command=id out.zip README.md').ok, false)
+    assert.equal(checkCommand('zip -r out.zip README.md').ok, true)
+    assert.equal(checkCommand('zip -T out.zip').ok, true)
+  })
+
+  test('sort --compress-program 拦截，常规用法放行', () => {
+    assert.equal(checkCommand("sort --compress-program='sh -c id' -o out.txt README.md").ok, false)
+    assert.equal(checkCommand('sort -o out.txt README.md').ok, true)
+    assert.equal(checkCommand('sort README.md').ok, true)
+  })
+
+  test('rg --pre/--pre-glob 拦截，-x（line-regexp）放行', () => {
+    assert.equal(checkCommand("rg --pre 'sh -c id' pat README.md").ok, false)
+    assert.equal(checkCommand('rg --pre-glob="*" pat README.md').ok, false)
+    assert.equal(checkCommand('rg -x pattern README.md').ok, true)
+    assert.equal(checkCommand('rg --ignore-case pat README.md').ok, true)
+  })
+
+  test('fd -x/-X/--exec/--exec-batch 拦截（含短簇），常规用法放行', () => {
+    assert.equal(checkCommand('fd . -x sh -c id').ok, false)
+    assert.equal(checkCommand('fd . -X touch {}').ok, false)
+    assert.equal(checkCommand('fd . --exec touch').ok, false)
+    assert.equal(checkCommand('fd . --exec-batch=touch').ok, false)
+    assert.equal(checkCommand('fd . -Hx touch').ok, false)
+    assert.equal(checkCommand('fd . -e txt').ok, true)
+    assert.equal(checkCommand('fd . -I --hidden').ok, true)
+  })
+
+  test('sed 脚本 e/r/w/W 命令拦截，常规替换放行', () => {
+    assert.equal(checkCommand("sed '1e id' README.md").ok, false)
+    assert.equal(checkCommand("sed 'e id' README.md").ok, false)
+    assert.equal(checkCommand("sed 's/a/b/;e id' README.md").ok, false)
+    assert.equal(checkCommand("sed '/x/e id' README.md").ok, false)
+    assert.equal(checkCommand("sed '$e id' README.md").ok, false)
+    assert.equal(checkCommand("sed '2r /etc/passwd' README.md").ok, false)
+    assert.equal(checkCommand("sed '2w out.txt' README.md").ok, false)
+    assert.equal(checkCommand("sed 's/hello/world/' README.md").ok, true)
+    assert.equal(checkCommand("sed -n 's/a:b/c d/p' ./f.txt").ok, true)
+    assert.equal(checkCommand('sed -i s/a/b/ ./f.txt').ok, true)
+  })
+
+  test('awk 默认拒绝（与 git 同理移出白名单）；extraAllowed 下仍拦执行原语', () => {
+    // 默认：白名单拒绝
+    assert.equal(checkCommand("awk 'BEGIN{print \"x\" | \"id > pwned_awk.txt\"}'").ok, false)
+    assert.equal(checkCommand("awk '{print $1}' README.md").ok, false)
+  })
+})

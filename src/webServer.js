@@ -276,8 +276,8 @@ export function createApp() {
       res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
     }
     // 基础 CSP：限制资源来源，脚本仅允许外部文件（移除 unsafe-inline 防止内联脚本注入）
-    // frame-ancestors 'self'：防止点击劫持（CSP2 版，替代 X-Frame-Options，二者同时设置更稳健）
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self'")
+    // frame-ancestors 'none' 与 X-Frame-Options: DENY 保持一致（2026-10 安全审计 P2-8）
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'")
     next()
   })
 
