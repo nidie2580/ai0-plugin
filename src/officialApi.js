@@ -1,4 +1,5 @@
 import https from 'node:https'
+import crypto, { X509Certificate } from 'node:crypto'
 
 export const OFFICIAL_KIND = 'official'
 export const CUSTOM_KIND = 'custom'
@@ -15,23 +16,109 @@ function normalizeHostname(value) {
 }
 
 /**
- * 目标主机是否为官方合作方域名（含其子域）。仅此类主机允许放宽 TLS 证书校验，
- * 避免官方证书链异常时注册/关联/拉模型列表全部失败，同时不对其他主机降级。
+ * 目标主机是否为官方合作方域名。
+ * 精确匹配（2026-10 安全审计 P1）：不再放宽任何子域，避免 *.api.djyun.click
+ * 被第三方注册后继承"跳过证书校验"的特权。
  */
 export function isOfficialHost(hostname) {
-  const h = normalizeHostname(hostname)
-  if (!h) return false
-  if (h === OFFICIAL_HOST) return true
-  return h.endsWith('.' + OFFICIAL_HOST)
+  return normalizeHostname(hostname) === OFFICIAL_HOST
+}
+
+/* -------------------------------------------------------------------------- */
+/*              官方域名 TLS 证书钉扎（2026-10 安全审计 P1）                   */
+/* -------------------------------------------------------------------------- */
+// 背景：官方 API 只下发叶子证书、不下发中间证书，标准信任链无法构建，历史实现对
+// api.djyun.click 及其所有子域无条件 rejectUnauthorized:false，任何持有该域证书的
+// 中间人都可解密流量。现改为：
+//   - 仅精确主机放宽 CA 链校验（链不完整，无法用系统信任库）；
+//   - 但强制校验证书公钥钉扎：叶子 SPKI 命中已知指纹，或叶子由固定的
+//     Let's Encrypt YR2 中间证书签发（容忍官方叶子轮换）。二者皆不满足即中止连接。
+// 说明：这是 fail-closed 设计——若官方更换 CA/中间证书或改用新密钥，连接会被拒绝，
+//       需同步更新下方指纹/中间证书。
+const OFFICIAL_LEAF_SPKI_SHA256 = 'wHjGum84n4Qt1hwIbGu3/zU8IKrtU/1sh2RQb10NUXU='
+const OFFICIAL_INTERMEDIATE_PEM = `-----BEGIN CERTIFICATE-----
+MIIE2jCCAsKgAwIBAgIQTr0klH4k05SALYSlL9WzGTANBgkqhkiG9w0BAQsFADAu
+MQswCQYDVQQGEwJVUzENMAsGA1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZUjAe
+Fw0yNTA5MDMwMDAwMDBaFw0yODA5MDIyMzU5NTlaMDMxCzAJBgNVBAYTAlVTMRYw
+FAYDVQQKEw1MZXQncyBFbmNyeXB0MQwwCgYDVQQDEwNZUjIwggEiMA0GCSqGSIb3
+DQEBAQUAA4IBDwAwggEKAoIBAQDZ0LxwBppqh84luqMerV/eeL/fXQ7mLQQv1Lnp
+WKZbyvGpx6wh6AfnslAnF6ewTkcHA+gSOoBvm3Dfm06AuGiF+KRut4fAcowqnAQQ
+CW98+QPP/eOv/wug7Iyk4NkOxf2I6g2f55T6nJoOTLFcukeRq80JGQEYan+dPFr9
+OGUgQK2hGKgNkW87pappsOAuUJcroYhRt5uUis4qaZireiseu32gzDJNBAiKtsvd
+6HX4v25bpkRNcS/B/Gtc9kVbUpD+2PLPxdei3Tim55k4tfAEXwD2qyiPTxrTNq6l
+N+AMr5g2c1dNqkOTwjxeV6L5lpP1rGiYvLnRaPlOqyZRPW+5AgMBAAGjge4wgesw
+DgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBIGA1UdEwEB/wQI
+MAYBAf8CAQAwHQYDVR0OBBYEFEAVLSZ57TIgnt+ach3WMh+BDIEMMB8GA1UdIwQY
+MBaAFN7nW2DQIm1AKH0/DQH+pLVStFGUMDIGCCsGAQUFBwEBBCYwJDAiBggrBgEF
+BQcwAoYWaHR0cDovL3lyLmkubGVuY3Iub3JnLzATBgNVHSAEDDAKMAgGBmeBDAEC
+ATAnBgNVHR8EIDAeMBygGqAYhhZodHRwOi8veXIuYy5sZW5jci5vcmcvMA0GCSqG
+SIb3DQEBCwUAA4ICAQB0ZUQWZ9/Yn9COEpo+JfecMnB0h0vwDm/M66IqXqw3LoaL
+mx9lZvRTeDIS67PUeI3yCA2W6PKRD0/FE/G57lOmS+Xy5AaaL00ICGOqjNcCaMWW
+8o8nevHOd4i4lqgtznE/28QwlcdJyF8yBiWHpnyjhEpmNWJURgOCOg2xpwRMBCsj
+MScqYPtOhBeuYQvSwAEeTML2Ukh6uGuX4E14q65Ja8cdjF5bAldnP1eE4FBaAwsZ
+G2fOqqrKV03Y85Nw2btedP1AtliQuJZs/Jo/gXxXdc7LrH3McgnpnbTiAncX7yES
+hP6kzQejllqMCIt52HOjxDGWafS7Xw+DKwqmH+Eqy8dcbOuag/1AYlQoKNVK3F5q
+Hh6tEDiMqQcLIibGKteE6iHo4A/bIScbzrhXUYuism42ZYzmc48FMVIH3qy4L84E
+TdAH2gtxw0PAhvRVXp8HP7wfngpzsN/8xOTpeRSbM4+Qbc56G6+Bifmv6sk1ieQb
+NA3wJdl4DDUuQSV8hBgx6zoI1ZSGORprDFux7c6rhc77QZMSRrEgomBeklervEve
+86ylWmZ3WWHV6RLMi8xNvjd71r4EPIGgY7BZU/VPBkq+uA7Gb6mbJnFgV43uh3xy
+LRFgxIAphIukwTGSMZZR+AI+Qnp0BYTWovHXozOf3H8r6hozEoT02JHn0AeTfA==
+-----END CERTIFICATE-----`
+const OFFICIAL_SPKI_PIN = Buffer.from(OFFICIAL_LEAF_SPKI_SHA256, 'base64')
+let _officialIntermediate = null
+function officialIntermediate() {
+  if (!_officialIntermediate) _officialIntermediate = new X509Certificate(OFFICIAL_INTERMEDIATE_PEM)
+  return _officialIntermediate
+}
+
+/**
+ * 校验官方域名 TLS 对端 socket 是否满足钉扎要求。
+ * 返回 true 当且仅当：叶子证书 SPKI 命中固定指纹，或叶子由固定 YR2 中间证书签发。
+ */
+export function isPinnedOfficialSocket(socket) {
+  try {
+    if (!socket || typeof socket.getPeerCertificate !== 'function') return false
+    const cert = socket.getPeerCertificate(true)
+    if (!cert || !cert.pubkey) return false
+    const spki = Buffer.isBuffer(cert.pubkey) ? cert.pubkey : Buffer.from(cert.pubkey)
+    const digest = crypto.createHash('sha256').update(spki).digest()
+    if (digest.length === OFFICIAL_SPKI_PIN.length && crypto.timingSafeEqual(digest, OFFICIAL_SPKI_PIN)) {
+      return true
+    }
+    // 兼容官方叶子轮换：只要叶子由固定的 LE YR2 中间证书签发即可
+    const leaf = typeof socket.getPeerX509Certificate === 'function' ? socket.getPeerX509Certificate() : null
+    return !!(leaf && typeof leaf.checkIssued === 'function' && leaf.checkIssued(officialIntermediate()))
+  } catch (_) {
+    return false
+  }
+}
+
+/**
+ * 官方域名专用 https agent：放宽 CA 链校验（链不完整），但在 secureConnect 后、
+ * 发送应用数据前核对证书钉扎，不匹配立即销毁 socket（fail-closed）。
+ * 不复用 checkServerIdentity——rejectUnauthorized:false 下其错误未必致命。
+ */
+class PinnedOfficialHttpsAgent extends https.Agent {
+  createConnection(options, callback) {
+    const socket = super.createConnection(options, callback)
+    socket.once('secureConnect', () => {
+      if (!isPinnedOfficialSocket(socket)) {
+        const err = new Error('官方域名证书钉扎校验失败，已中止连接（可能的中间人攻击）')
+        err.code = 'AI0_OFFICIAL_PIN_MISMATCH'
+        socket.destroy(err)
+      }
+    })
+    return socket
+  }
 }
 
 let _officialHttpsAgent = null
 /**
- * 供官方域名使用的 https agent（跳过证书校验）。全局复用，避免每次请求新建连接池。
+ * 供官方域名使用的 https agent。全局复用，避免每次请求新建连接池。
  */
 export function officialHttpsAgent() {
   if (!_officialHttpsAgent) {
-    _officialHttpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: false })
+    _officialHttpsAgent = new PinnedOfficialHttpsAgent({ rejectUnauthorized: false, keepAlive: false })
   }
   return _officialHttpsAgent
 }

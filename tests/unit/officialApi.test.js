@@ -1,5 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import https from 'node:https'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 import {
   allocateOfficialKey,
   isOfficialKind,
@@ -25,15 +30,16 @@ import {
   officialAssociateExpectedEmail,
   isOfficialHost,
   officialHttpsAgent,
+  isPinnedOfficialSocket,
   OFFICIAL_API_BASE,
 } from '../../src/officialApi.js'
 
 describe('officialApi', () => {
-  it('isOfficialHost 仅匹配官方域名及其子域', () => {
+  it('isOfficialHost 仅精确匹配官方域名（不再放宽子域）', () => {
     assert.equal(isOfficialHost('api.djyun.click'), true)
     assert.equal(isOfficialHost('API.DJYUN.CLICK'), true)
     assert.equal(isOfficialHost('  api.djyun.click  '), true)
-    assert.equal(isOfficialHost('sub.api.djyun.click'), true)
+    assert.equal(isOfficialHost('sub.api.djyun.click'), false)
     assert.equal(isOfficialHost('djyun.click'), false)
     assert.equal(isOfficialHost('evil-djyun.click'), false)
     assert.equal(isOfficialHost('api.djyun.click.evil.com'), false)
@@ -41,11 +47,69 @@ describe('officialApi', () => {
     assert.equal(isOfficialHost(null), false)
   })
 
-  it('officialHttpsAgent 返回跳验证的 agent 且复用同一实例', () => {
+  it('officialHttpsAgent 返回钉扎 agent 且复用同一实例', () => {
     const a = officialHttpsAgent()
     const b = officialHttpsAgent()
     assert.equal(a, b)
     assert.equal(a.options.rejectUnauthorized, false)
+  })
+
+  it('isPinnedOfficialSocket 校验叶子 SPKI 钉扎', () => {
+    // 无 socket / 无证书 / 无 pubkey 一律判失败（fail-closed）
+    assert.equal(isPinnedOfficialSocket(null), false)
+    assert.equal(isPinnedOfficialSocket({}), false)
+    assert.equal(isPinnedOfficialSocket({ getPeerCertificate: () => null }), false)
+    assert.equal(isPinnedOfficialSocket({ getPeerCertificate: () => ({}) }), false)
+    // 命中已知叶子 SPKI 指纹 → 通过
+    const pinnedPubkey = Buffer.from(
+      'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuYENE/5ueQTsBSaVcXLvCJBQaP9++wMegEwu7w5YO8Bncy8QASwnQSoMQrbNwFxUu8YT0hiNn4HSxDJtJ8lQRc5V6/kTsu9RrCPgDrs0Pfp8XasBrzGEgk6RPt/AKqfIjALyFQRL5emyecEIjAY3XpdsBXYGTlO4LJurDacWJrluJUS1dTCMaGCNZ3YOOkO73knbfTzUBb9NPrhLeztrviC2d09nypbqiPcCRiqRCkcoD33/PW8Z5mJE0mrM/s0sqHjn5p4G3wtZL8t+t/HxY4Cs8oLGCwYMEeeaoYLHRY1FUf4SO/DSAFTRNPy669w9Em358xpILWT9EwXQ0es6QwIDAQAB',
+      'base64',
+    )
+    const ok = isPinnedOfficialSocket({
+      getPeerCertificate: () => ({ pubkey: pinnedPubkey }),
+      getPeerX509Certificate: () => null,
+    })
+    assert.equal(ok, true)
+    // 未命中指纹且无可校验的 X509 对象 → 拒绝
+    const bad = isPinnedOfficialSocket({
+      getPeerCertificate: () => ({ pubkey: Buffer.alloc(32, 7) }),
+      getPeerX509Certificate: () => null,
+    })
+    assert.equal(bad, false)
+  })
+
+  it('officialHttpsAgent 对未钉扎证书 fail-closed（本地自签证书）', async (t) => {
+    let dir
+    try {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai0-pin-'))
+      execFileSync('openssl', [
+        'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+        '-keyout', path.join(dir, 'key.pem'),
+        '-out', path.join(dir, 'cert.pem'),
+        '-days', '1', '-subj', '/CN=not-official',
+      ], { stdio: 'ignore' })
+    } catch {
+      t.skip('openssl 不可用，跳过 TLS 钉扎端到端测试')
+      return
+    }
+    const server = https.createServer({
+      key: fs.readFileSync(path.join(dir, 'key.pem')),
+      cert: fs.readFileSync(path.join(dir, 'cert.pem')),
+    }, (_req, res) => res.end('ok'))
+    await new Promise((r) => server.listen(0, '127.0.0.1', r))
+    const port = server.address().port
+    try {
+      await new Promise((resolve) => {
+        const req = https.request({ host: '127.0.0.1', port, path: '/', agent: officialHttpsAgent() }, () => {
+          resolve(assert.fail('未钉扎证书本应中止连接，却建立了 TLS 会话'))
+        })
+        req.on('error', () => resolve())
+        req.end()
+      })
+    } finally {
+      await new Promise((r) => server.close(r))
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('allocateOfficialKey 避开已占用 key', () => {

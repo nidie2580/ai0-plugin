@@ -247,11 +247,12 @@ export function hasSystemProxy() {
 }
 
 /**
- * 官方合作方域名（api.djyun.click）跳过 TLS 证书校验。
+ * 官方合作方域名（api.djyun.click）放宽 CA 链校验，但强制证书公钥钉扎。
  *
- * 背景：官方 API 的证书链/域名与插件侧 TLS 栈不匹配时，拉取模型列表、注册、关联会报
- * "证书校验失败"。仅对官方域名放宽，其余主机一律保持完整证书校验；DNS pinning 与
- * Host/servername 逻辑不变（servername 仍为原始域名，SNI 正常）。
+ * 背景：官方 API 只下发叶子证书、不下发中间证书，标准信任链无法构建，历史实现对
+ * 官方域名无条件跳过证书校验。现改为（2026-10 安全审计 P1）：仅精确主机放宽，
+ * 且 officialHttpsAgent() 会在 secureConnect 后核对证书钉扎，不匹配即中止连接。
+ * 其余主机一律保持完整证书校验；DNS pinning 与 Host/servername 逻辑不变。
  */
 function applyOfficialTlsBypass(axiosOpts, url) {
   try {
