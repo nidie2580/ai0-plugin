@@ -450,7 +450,13 @@ function guessMimeFromBuffer(buf) {
   if (!buf || !buf.length) return null
   for (const it of MIME_BY_MAGIC) {
     if (buf.length >= it.head.length && buf.subarray(0, it.head.length).equals(it.head)) {
-      if (it.mime === 'image/webp') return 'image/webp'
+      // 2026-10 审查修复：RIFF 容器被 WAV/AVI/WEBP 共用，仅看前 4 字节会把
+      // 音频/视频误判为 image/webp 外传第三方接口。命中 RIFF 后必须校验
+      // 第 8-12 字节是否为 "WEBP"，否则拒绝（fail-closed）。
+      if (it.mime === 'image/webp') {
+        if (buf.length >= 12 && buf.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
+        return null
+      }
       return it.mime
     }
   }

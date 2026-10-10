@@ -85,9 +85,12 @@ export function isPinnedOfficialSocket(socket) {
     if (digest.length === OFFICIAL_SPKI_PIN.length && crypto.timingSafeEqual(digest, OFFICIAL_SPKI_PIN)) {
       return true
     }
-    // 兼容官方叶子轮换：只要叶子由固定的 LE YR2 中间证书签发即可
+    // 兼容官方叶子轮换：叶子必须由固定的 LE YR2 中间证书【真实签发】。
+    // checkIssued 仅比对 DN/AKID（可被伪造 CA 满足），必须叠加 verify 做签名校验，
+    // 二者同时满足才放行，防止自签 CA 伪造 DN 绕过钉扎（2026-10 审查修复）。
     const leaf = typeof socket.getPeerX509Certificate === 'function' ? socket.getPeerX509Certificate() : null
-    return !!(leaf && typeof leaf.checkIssued === 'function' && leaf.checkIssued(officialIntermediate()))
+    if (!leaf || typeof leaf.checkIssued !== 'function' || typeof leaf.verify !== 'function') return false
+    return !!(leaf.checkIssued(officialIntermediate()) && leaf.verify(officialIntermediate().publicKey))
   } catch (_) {
     return false
   }

@@ -162,6 +162,28 @@ describe('图片输入', () => {
         if (fs.existsSync(secret)) fs.unlinkSync(secret)
       }
     })
+
+    it('RIFF 魔数须含 WEBP 细标志（WAV 文件不得被误判为图片外传）', async () => {
+      // 2026-10 审查修复：RIFF 容器被 WAV/AVI/WEBP 共用，仅看前 4 字节会把
+      // 音频/视频判成 image/webp base64 后发给第三方接口（文件内容外传）。
+      const wav = path.join(TMP_DIR, 'not-an-image.wav')
+      const wavBuf = Buffer.concat([
+        Buffer.from('RIFF', 'ascii'),
+        Buffer.from([0x24, 0x08, 0x00, 0x00]),
+        Buffer.from('WAVE', 'ascii'),
+        Buffer.from('data', 'ascii'),
+        Buffer.from([0x10, 0x00, 0x00, 0x00]),
+        Buffer.from([0x01, 0x00, 0x02, 0x00]),
+      ])
+      fs.writeFileSync(wav, wavBuf)
+      try {
+        const r = await helper.imageSegmentToDataUrl({ file: wav })
+        assert.equal(r.ok, false, 'WAV 文件必须拒绝')
+        assert.match(String(r.error), /不是可识别的图片格式/)
+      } finally {
+        if (fs.existsSync(wav)) fs.unlinkSync(wav)
+      }
+    })
   })
 
   describe('G3: vision=true 注入 image_url', () => {

@@ -472,9 +472,9 @@ if (route === 'dashboard') {
       <label>API Base<input id="m_apiBase" value="${escapeHtml(model.apiBase || '')}" placeholder="https://.../v1"/></label>
       <label>API Key<input id="m_apiKey" value="${escapeHtml(model.apiKey || '')}" placeholder="sk-..." autocomplete="off"/></label>
       <label>模型 ID<input id="m_model" value="${escapeHtml(model.model || '')}"/></label>
-      <label>温度 (temperature)<input id="m_temperature" type="number" step="0.1" min="0" max="2" value="${((model.temperature) != null ? (model.temperature) : (0.8))}"/></label>
-      <label>Max Tokens<input id="m_maxTokens" type="number" min="1" value="${((model.maxTokens) != null ? (model.maxTokens) : (2000))}"/></label>
-      <label>超时 (ms)<input id="m_timeout" type="number" min="1000" value="${((model.timeout) != null ? (model.timeout) : (60000))}"/></label>
+      <label>温度 (temperature)<input id="m_temperature" type="number" step="0.1" min="0" max="2" value="${escapeHtml((model.temperature) != null ? (model.temperature) : (0.8))}"/></label>
+      <label>Max Tokens<input id="m_maxTokens" type="number" min="1" value="${escapeHtml((model.maxTokens) != null ? (model.maxTokens) : (2000))}"/></label>
+      <label>超时 (ms)<input id="m_timeout" type="number" min="1000" value="${escapeHtml((model.timeout) != null ? (model.timeout) : (60000))}"/></label>
       <label>支持图片输入 (vision)
         <select id="m_vision"><option value="false">关闭</option><option value="true">开启</option></select>
       </label>
@@ -1179,9 +1179,9 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
             </div>
             <select class="model-select hidden" data-idx="${idx}"></select>
           </label>
-          <label>温度<input data-idx="${idx}" data-field="temperature" type="number" step="0.1" min="0" max="2" value="${p.temperature}"/></label>
-          <label>Max Tokens<input data-idx="${idx}" data-field="maxTokens" type="number" min="1" value="${p.maxTokens}"/></label>
-          <label>超时(ms)<input data-idx="${idx}" data-field="timeout" type="number" min="1000" value="${p.timeout}"/></label>`
+          <label>温度<input data-idx="${idx}" data-field="temperature" type="number" step="0.1" min="0" max="2" value="${escapeHtml(p.temperature)}"/></label>
+          <label>Max Tokens<input data-idx="${idx}" data-field="maxTokens" type="number" min="1" value="${escapeHtml(p.maxTokens)}"/></label>
+          <label>超时(ms)<input data-idx="${idx}" data-field="timeout" type="number" min="1000" value="${escapeHtml(p.timeout)}"/></label>`
       const scopeCb = (scope, label) => `<label class="inline-toggle scope-item"><input type="checkbox" data-idx="${idx}" data-scope="${scope}"${p.scopes.includes(scope) ? ' checked' : ''}/> ${label}</label>`
       const selectedQuality = (q) => (String(p.imageQuality || '') === q ? ' selected' : '')
       const capBody = `
@@ -1197,10 +1197,10 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
             <div class="gen-params">
               <label>生图尺寸<input data-idx="${idx}" data-field="imageSize" value="${escapeHtml(p.imageSize)}" placeholder="1024x1024"/></label>
               <label>生图质量<select data-idx="${idx}" data-field="imageQuality"><option value=""${selectedQuality('')}>默认</option><option value="standard"${selectedQuality('standard')}>standard</option><option value="hd"${selectedQuality('hd')}>hd</option></select></label>
-              <label>生图超时(ms)<input data-idx="${idx}" data-field="imageTimeout" type="number" min="1000" value="${p.imageTimeout}"/></label>
-              <label>视频时长(秒)<input data-idx="${idx}" data-field="videoSeconds" type="number" min="1" max="60" value="${p.videoSeconds}"/></label>
+              <label>生图超时(ms)<input data-idx="${idx}" data-field="imageTimeout" type="number" min="1000" value="${escapeHtml(p.imageTimeout)}"/></label>
+              <label>视频时长(秒)<input data-idx="${idx}" data-field="videoSeconds" type="number" min="1" max="60" value="${escapeHtml(p.videoSeconds)}"/></label>
               <label>视频尺寸<input data-idx="${idx}" data-field="videoSize" value="${escapeHtml(p.videoSize)}" placeholder="1280x720"/></label>
-              <label>视频超时(ms)<input data-idx="${idx}" data-field="videoTimeout" type="number" min="1000" value="${p.videoTimeout}"/></label>
+              <label>视频超时(ms)<input data-idx="${idx}" data-field="videoTimeout" type="number" min="1000" value="${escapeHtml(p.videoTimeout)}"/></label>
             </div>
             <div class="model-row">
               <button class="btn sm" data-act="test-image" data-idx="${idx}">测试生图</button>

@@ -863,6 +863,18 @@ export function createApp() {
           }
           // 生成参数范围校验（时长/超时为正整数；尺寸限白名单或 WxH 格式）
           const intIn = (v, lo, hi) => v == null || v === '' || (Number.isInteger(Number(v)) && Number(v) >= lo && Number(v) <= hi)
+          // 2026-10 审查修复：对话参数（temperature/maxTokens/timeout）补类型与范围校验。
+          // 此前仅前端 type="number"，手编 config.yaml 或 API 可写入含恶意引号的字符串，
+          // 经后台配置页 value 属性插值形成存储型 XSS（前端已补 escapeHtml，此处纵深兜底）。
+          if (val.temperature != null && val.temperature !== '' && !(Number.isFinite(Number(val.temperature)) && Number(val.temperature) >= 0 && Number(val.temperature) <= 2)) {
+            return res.json({ ok: false, msg: `模型 "${key}" 的 temperature 必须为 0-2 的数字` })
+          }
+          if (val.maxTokens != null && val.maxTokens !== '' && !(Number.isInteger(Number(val.maxTokens)) && Number(val.maxTokens) >= 1 && Number(val.maxTokens) <= 1000000)) {
+            return res.json({ ok: false, msg: `模型 "${key}" 的 maxTokens 必须为 1-1000000 的整数` })
+          }
+          if (val.timeout != null && val.timeout !== '' && !(Number.isInteger(Number(val.timeout)) && Number(val.timeout) >= 1000 && Number(val.timeout) <= 600000)) {
+            return res.json({ ok: false, msg: `模型 "${key}" 的 timeout 必须为 1000-600000 毫秒` })
+          }
           if (!intIn(val.imageTimeout, 1000, 600000)) {
             return res.json({ ok: false, msg: `模型 "${key}" 的 imageTimeout 必须为 1000-600000 毫秒` })
           }

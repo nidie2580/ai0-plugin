@@ -560,6 +560,20 @@ export async function chatCompletions(messages, {
           if (typeof m2.content === 'string') {
             return { ...m2, content: scrubSensitiveTokens(m2.content) }
           }
+          // 2026-10 审查修复：多模态数组 content（vision 请求）的 text 段同样脱敏。
+          // applyImagesToHistory 会把带图轮次的 user 消息改造成数组，旧实现原样发出，
+          // 用户随图粘贴的密钥/令牌会以明文发往上游。
+          if (Array.isArray(m2.content)) {
+            return {
+              ...m2,
+              content: m2.content.map((part) => {
+                if (part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string') {
+                  return { ...part, text: scrubSensitiveTokens(part.text) }
+                }
+                return part
+              }),
+            }
+          }
           return m2
         })
       : messages,
@@ -659,6 +673,10 @@ export async function chatCompletions(messages, {
       const j = typeof resp.data === 'string' ? JSON.parse(resp.data) : resp.data
       providerMsg = j?.error?.message || j?.message || j?.msg || ''
     } catch (_) {}
+
+    // providerMsg 可能回显 Key 片段（部分服务商 401 会回显无效 key），
+    // 拼进错误信息前先脱敏，防止经 userFacingLLMError 回流到群聊（2026-10 审查修复）
+    if (providerMsg) providerMsg = scrubSensitiveTokens(providerMsg)
 
     const lower = String(providerMsg).toLowerCase()
     const looksModelError = /not found the model|model.*not found|permission denied|unknown model|model_not_found|invalid model|does not exist|model.*not allowed|模型.*不存在|模型.*未授权|无权访问.*模型/.test(lower)

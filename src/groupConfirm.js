@@ -219,8 +219,15 @@ export async function reviewGroupActions({ replyText, groupId, e, userText, judg
 
     return { actions, verdicts }
   } catch (err) {
+    // 2026-10 审查修复：评审内部异常一律 fail-closed。旧实现返回空 verdicts，
+    // 消费方只取消 !v.ok 命中项 → 全部操作放行，评审门整体失效。
+    // 这里改为逐条标记 ok:false，宁可误拦（有 groupOps 硬校验与人工重试兜底）也不误放。
     safeLogger.error(`[ai0-plugin] 群操作同行评审异常: ${err?.message || err}`)
-    return { actions: parseGroupActions(replyText), verdicts: [] }
+    const actions = parseGroupActions(replyText)
+    return {
+      actions,
+      verdicts: actions.map((a) => ({ full: a.full, type: a.type, ok: false, reasons: ['评审内部异常，操作取消'] })),
+    }
   }
 }
 
