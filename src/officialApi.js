@@ -1,5 +1,6 @@
 import https from 'node:https'
 import crypto, { X509Certificate } from 'node:crypto'
+import { safeLogger, sanitizeLog } from './globals.js'
 
 export const OFFICIAL_KIND = 'official'
 export const CUSTOM_KIND = 'custom'
@@ -27,16 +28,50 @@ export function isOfficialHost(hostname) {
 /* -------------------------------------------------------------------------- */
 /*              官方域名 TLS 证书钉扎（2026-10 安全审计 P1）                   */
 /* -------------------------------------------------------------------------- */
-// 背景：官方 API 只下发叶子证书、不下发中间证书，标准信任链无法构建，历史实现对
+// 背景：官方 API 历史上只下发叶子证书、不下发中间证书，标准信任链无法构建，旧实现对
 // api.djyun.click 及其所有子域无条件 rejectUnauthorized:false，任何持有该域证书的
 // 中间人都可解密流量。现改为：
 //   - 仅精确主机放宽 CA 链校验（链不完整，无法用系统信任库）；
-//   - 但强制校验证书公钥钉扎：叶子 SPKI 命中已知指纹，或叶子由固定的
-//     Let's Encrypt YR2 中间证书签发（容忍官方叶子轮换）。二者皆不满足即中止连接。
+//   - 但强制校验证书公钥钉扎：叶子 SPKI 命中已知指纹列表，或叶子由固定的
+//     Let's Encrypt YR1/YR2 中间证书真实签发（容忍官方叶子轮换）。二者皆不满足即中止连接。
+// 轮换记录：2026-10-11 官方 CDN 将叶子证书由 YR2 签发的旧叶子轮换为 YR1 签发的新叶子
+//   （有效期内 SPKI 见下），部分边缘线路可能仍回源旧证书，故新旧指纹同时保留；
+//   YR1 中间证书取自 2026-10-17 边缘实链（leaf checkIssued/verify 均通过）。
 // 说明：这是 fail-closed 设计——若官方更换 CA/中间证书或改用新密钥，连接会被拒绝，
-//       需同步更新下方指纹/中间证书。
-const OFFICIAL_LEAF_SPKI_SHA256 = 'wHjGum84n4Qt1hwIbGu3/zU8IKrtU/1sh2RQb10NUXU='
-const OFFICIAL_INTERMEDIATE_PEM = `-----BEGIN CERTIFICATE-----
+//       需同步更新下方指纹/中间证书（诊断日志会打印实际观测值，便于比对）。
+const OFFICIAL_LEAF_SPKI_SHA256_PINS = [
+  'rK/jlci9a5PbYu1mBdnIImXuG6illDiL9MbpIW4rNXg=', // 2026-10-11 轮换后的当前 CDN 叶子（LE YR1 签发）
+  'wHjGum84n4Qt1hwIbGu3/zU8IKrtU/1sh2RQb10NUXU=', // 2026-10-11 轮换前的旧叶子（LE YR2 签发），容忍边缘灰度
+]
+const OFFICIAL_INTERMEDIATE_YR1_PEM = `-----BEGIN CERTIFICATE-----
+MIIE2zCCAsOgAwIBAgIRAKICU/FfJpHAXcHOE7m8yk4wDQYJKoZIhvcNAQELBQAw
+LjELMAkGA1UEBhMCVVMxDTALBgNVBAoTBElTUkcxEDAOBgNVBAMTB1Jvb3QgWVIw
+HhcNMjUwOTAzMDAwMDAwWhcNMjgwOTAyMjM1OTU5WjAzMQswCQYDVQQGEwJVUzEW
+MBQGA1UEChMNTGV0J3MgRW5jcnlwdDEMMAoGA1UEAxMDWVIxMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoVi8X2xCYgMXvJxNPKp/oF13UMgmPABB07VC
+LNDtoXmt9luEZNJSBV10VyT1Pz6LD8Zq1d2gc43WNl1AdRrj4sEnazbOiz0nPpmG
+Bp2hui49oZtDIY6wdKeZAi5BbNU20CH6RSBBMLSQ9cXrH8dxdv4PAJ45ssGML68U
+SE3BsjC2a6cAN9L5CgXVIQi5tfNiTPoFZZ3S0OlXqLmmtdV95udWAb5b6e/F49Di
+CsH0Y00Ag72BVIb1hzynmKe+X0mERBTtsb3BwmpV9ipeBjMLoR/D9cHxHQCWoi5l
+TmXwY015J5rGelz1nZjJuxc2kioaX29XJBnhMkP531rSdG5uMwIDAQABo4HuMIHr
+MA4GA1UdDwEB/wQEAwIBhjATBgNVHSUEDDAKBggrBgEFBQcDATASBgNVHRMBAf8E
+CDAGAQH/AgEAMB0GA1UdDgQWBBQfLzW+RhSCzUCxrnksVXj699Ro+zAfBgNVHSME
+GDAWgBTe51tg0CJtQCh9Pw0B/qS1UrRRlDAyBggrBgEFBQcBAQQmMCQwIgYIKwYB
+BQUHMAKGFmh0dHA6Ly95ci5pLmxlbmNyLm9yZy8wEwYDVR0gBAwwCjAIBgZngQwB
+AgEwJwYDVR0fBCAwHjAcoBqgGIYWaHR0cDovL3lyLmMubGVuY3Iub3JnLzANBgkq
+hkiG9w0BAQsFAAOCAgEA0+zvMq3kHig1ddTmmm+RibTr9/RpX7k4buanMMRqbV/y
+IvP82zAHN3mvaw+cASuVsdpd0ikjhr4hnhJQLQOzOp2ccKrsdGOAgo0vddeISFAq
+EWEV4lmUM3vFF796up+bSgmJ1u6RupDCMxDgF8M3eLvGuj6L0lu3zkQ0KuQLnKxL
+tB0oQqn1Idg5CuuGpMvQzk29Pa3D/qHurc0EIM9SxukQuJqq63lxsYyRQFU8yMBO
+hq1w5LbfaWNRrz1uklOfI/pYkAb2E2MTZrAMQkBIE2S8Jt1F8gRc96o/xOsrgvSk
+a84AisX6xq1lz1Z7jGvrnXc4TMcjxZTjiTaihcYI1JIXZiLtEMSCa5l3cu8YWd6z
+dLRQlqRdclVjuQfNHawRJ6GWlkK0QJosivTKwdBw3KxEtzGo8yMHERbsy57gP1UX
+HOMcmZYQC0gtyR3SxfenIM/MxC3Ia2Ypab/kQ/CTnlIn2KQ5JUC6NYrGCbhFN9bp
+5lKJStEwCUnLpntcrXk5XVDCNv/5RyWpRThkGOV7GetKkQ0qAY8hCzWK6oqnAhDZ
+cjlYVdWfqOw3DIOX6EDNBgAqHarRVxyF9QZdOaXSyPJ0ueD2BYJEBgaCGQ8rAaU/
+Qc123V5LTXDZW4CcsPBDyhy4v+c8hClAyw/IkJlfBqxB9D+/wvIMHgECZ4ptP6o=
+-----END CERTIFICATE-----`
+const OFFICIAL_INTERMEDIATE_YR2_PEM = `-----BEGIN CERTIFICATE-----
 MIIE2jCCAsKgAwIBAgIQTr0klH4k05SALYSlL9WzGTANBgkqhkiG9w0BAQsFADAu
 MQswCQYDVQQGEwJVUzENMAsGA1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZUjAe
 Fw0yNTA5MDMwMDAwMDBaFw0yODA5MDIyMzU5NTlaMDMxCzAJBgNVBAYTAlVTMRYw
@@ -64,36 +99,104 @@ NA3wJdl4DDUuQSV8hBgx6zoI1ZSGORprDFux7c6rhc77QZMSRrEgomBeklervEve
 86ylWmZ3WWHV6RLMi8xNvjd71r4EPIGgY7BZU/VPBkq+uA7Gb6mbJnFgV43uh3xy
 LRFgxIAphIukwTGSMZZR+AI+Qnp0BYTWovHXozOf3H8r6hozEoT02JHn0AeTfA==
 -----END CERTIFICATE-----`
-const OFFICIAL_SPKI_PIN = Buffer.from(OFFICIAL_LEAF_SPKI_SHA256, 'base64')
-let _officialIntermediate = null
-function officialIntermediate() {
-  if (!_officialIntermediate) _officialIntermediate = new X509Certificate(OFFICIAL_INTERMEDIATE_PEM)
-  return _officialIntermediate
+const OFFICIAL_SPKI_PINS = OFFICIAL_LEAF_SPKI_SHA256_PINS.map((p) => Buffer.from(p, 'base64'))
+const OFFICIAL_INTERMEDIATE_PEMS = [OFFICIAL_INTERMEDIATE_YR1_PEM, OFFICIAL_INTERMEDIATE_YR2_PEM]
+let _officialIntermediates = null
+function officialIntermediates() {
+  if (!_officialIntermediates) {
+    _officialIntermediates = OFFICIAL_INTERMEDIATE_PEMS.map((pem) => new X509Certificate(pem))
+  }
+  return _officialIntermediates
 }
 
 /**
- * 校验官方域名 TLS 对端 socket 是否满足钉扎要求。
- * 返回 true 当且仅当：叶子证书 SPKI 命中固定指纹，或叶子由固定 YR2 中间证书签发。
+ * 对官方域名 TLS 对端 socket 做钉扎评估，返回各验证分支结果（供诊断日志与排障使用，
+ * 见 docs/CERT_PINNING_FIX_20261017.md 方案一）。
+ * pinned 为 true 当且仅当：叶子证书 SPKI 命中固定指纹，
+ * 或叶子 SAN 精确覆盖官方域名且由固定 YR1/YR2 中间证书【真实签发】。
+ */
+export function evaluateOfficialPinning(socket) {
+  const diag = {
+    pinned: false,
+    spkiMatched: false,
+    sanMatched: false,
+    issuerMatched: false,
+    signatureVerified: false,
+    spkiSha256: null,
+    fingerprint256: null,
+    pubkeyLen: null,
+    subject: null,
+    issuer: null,
+    subjectaltname: null,
+    error: null,
+  }
+  try {
+    if (!socket || typeof socket.getPeerCertificate !== 'function') {
+      diag.error = 'socket 未提供 getPeerCertificate'
+      return diag
+    }
+    const cert = socket.getPeerCertificate(true)
+    if (!cert || !cert.pubkey) {
+      diag.error = '未取得对端证书或证书无 pubkey'
+      return diag
+    }
+    const spki = Buffer.isBuffer(cert.pubkey) ? cert.pubkey : Buffer.from(cert.pubkey)
+    diag.pubkeyLen = spki.length
+    const digest = crypto.createHash('sha256').update(spki).digest()
+    diag.spkiSha256 = digest.toString('base64')
+    diag.fingerprint256 = cert.fingerprint256 || null
+    diag.subject = cert.subject ? JSON.stringify(cert.subject) : null
+    diag.issuer = cert.issuer ? JSON.stringify(cert.issuer) : null
+    diag.subjectaltname = typeof cert.subjectaltname === 'string' ? cert.subjectaltname : null
+    // 分支一：叶子 SPKI 钉扎
+    diag.spkiMatched = OFFICIAL_SPKI_PINS.some(
+      (pin) => digest.length === pin.length && crypto.timingSafeEqual(digest, pin),
+    )
+    // 分支二（SAN）：叶子必须精确覆盖官方域名，防御"合法 CA 签给别家域名"的证书
+    if (diag.subjectaltname) {
+      diag.sanMatched = diag.subjectaltname
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .includes(`dns:${OFFICIAL_HOST}`)
+    }
+    // 分支三/四（签发链）：checkIssued 仅比对 DN/AKID（可被伪造 CA 满足），必须叠加
+    // verify 做签名校验，二者同时满足才放行，防止自签 CA 伪造 DN 绕过钉扎（2026-10 审查修复）。
+    const leaf = typeof socket.getPeerX509Certificate === 'function' ? socket.getPeerX509Certificate() : null
+    if (leaf && typeof leaf.checkIssued === 'function' && typeof leaf.verify === 'function') {
+      for (const inter of officialIntermediates()) {
+        try {
+          if (leaf.checkIssued(inter) && leaf.verify(inter.publicKey)) {
+            diag.issuerMatched = true
+            diag.signatureVerified = true
+            break
+          }
+        } catch (_) {
+          // 该中间证书与叶子不匹配或校验异常，继续尝试下一张
+        }
+      }
+    }
+    diag.pinned = diag.spkiMatched || (diag.sanMatched && diag.issuerMatched && diag.signatureVerified)
+    return diag
+  } catch (err) {
+    // 不再静默吞异常（原 catch (_) 丢失定位线索）：记录到诊断字段，仍按 fail-closed 拒绝
+    diag.error = sanitizeLog(err?.message || err)
+    return diag
+  }
+}
+
+/**
+ * 校验官方域名 TLS 对端 socket 是否满足钉扎要求（fail-closed 布尔入口，保持旧 API）。
  */
 export function isPinnedOfficialSocket(socket) {
-  try {
-    if (!socket || typeof socket.getPeerCertificate !== 'function') return false
-    const cert = socket.getPeerCertificate(true)
-    if (!cert || !cert.pubkey) return false
-    const spki = Buffer.isBuffer(cert.pubkey) ? cert.pubkey : Buffer.from(cert.pubkey)
-    const digest = crypto.createHash('sha256').update(spki).digest()
-    if (digest.length === OFFICIAL_SPKI_PIN.length && crypto.timingSafeEqual(digest, OFFICIAL_SPKI_PIN)) {
-      return true
-    }
-    // 兼容官方叶子轮换：叶子必须由固定的 LE YR2 中间证书【真实签发】。
-    // checkIssued 仅比对 DN/AKID（可被伪造 CA 满足），必须叠加 verify 做签名校验，
-    // 二者同时满足才放行，防止自签 CA 伪造 DN 绕过钉扎（2026-10 审查修复）。
-    const leaf = typeof socket.getPeerX509Certificate === 'function' ? socket.getPeerX509Certificate() : null
-    if (!leaf || typeof leaf.checkIssued !== 'function' || typeof leaf.verify !== 'function') return false
-    return !!(leaf.checkIssued(officialIntermediate()) && leaf.verify(officialIntermediate().publicKey))
-  } catch (_) {
-    return false
-  }
+  return evaluateOfficialPinning(socket).pinned
+}
+
+/**
+ * 当前运行副本的叶子 SPKI 钉扎列表（base64）。公开只读副本，供测试与诊断比对，
+ * 用于确认"运行时加载的代码"与预期钉扎数据一致（诊断文档 3.C）。
+ */
+export function officialLeafSpkiSha256Pins() {
+  return [...OFFICIAL_LEAF_SPKI_SHA256_PINS]
 }
 
 /**
@@ -105,11 +208,28 @@ class PinnedOfficialHttpsAgent extends https.Agent {
   createConnection(options, callback) {
     const socket = super.createConnection(options, callback)
     socket.once('secureConnect', () => {
-      if (!isPinnedOfficialSocket(socket)) {
-        const err = new Error('官方域名证书钉扎校验失败，已中止连接（可能的中间人攻击）')
-        err.code = 'AI0_OFFICIAL_PIN_MISMATCH'
-        socket.destroy(err)
+      const r = evaluateOfficialPinning(socket)
+      const ctx =
+        `address=${sanitizeLog(socket.remoteAddress)} port=${socket.remotePort} ` +
+        `servername=${sanitizeLog(options?.servername)} pubkeyLen=${r.pubkeyLen ?? 'n/a'} ` +
+        `spkiSha256=${sanitizeLog(r.spkiSha256)} fingerprint256=${sanitizeLog(r.fingerprint256)} ` +
+        `subject=${sanitizeLog(r.subject)} issuer=${sanitizeLog(r.issuer)} ` +
+        `san=${sanitizeLog(r.subjectaltname)}`
+      if (r.pinned) {
+        // 方案一诊断：真实请求路径的观测值，与 agent 初始化日志中的钉扎列表比对即可定位数据漂移
+        safeLogger.info(`[ai0-plugin pin-debug] 官方域名证书钉扎命中 ${ctx}`)
+        return
       }
+      safeLogger.error(
+        `[ai0-plugin pin-reject] 官方域名证书钉扎校验失败 ${ctx} ` +
+          `spkiMatched=${r.spkiMatched} sanMatched=${r.sanMatched} ` +
+          `issuerMatched=${r.issuerMatched} signatureVerified=${r.signatureVerified}` +
+          (r.error ? ` error=${r.error}` : ''),
+      )
+      const err = new Error('官方域名证书钉扎校验失败，已中止连接（可能的中间人攻击）')
+      err.code = 'AI0_OFFICIAL_PIN_MISMATCH'
+      err.details = { ...r, address: socket.remoteAddress, servername: options?.servername }
+      socket.destroy(err)
     })
     return socket
   }
@@ -122,6 +242,12 @@ let _officialHttpsAgent = null
 export function officialHttpsAgent() {
   if (!_officialHttpsAgent) {
     _officialHttpsAgent = new PinnedOfficialHttpsAgent({ rejectUnauthorized: false, keepAlive: false })
+    // 打印当前运行副本的钉扎数据：用于排查"运行时加载的代码与手工测试代码不一致"
+    // （诊断文档 3.C，比对日志中 pin-debug 的 spkiSha256 即可确认）
+    safeLogger.info(
+      `[ai0-plugin] 官方域名钉扎 agent 初始化 leafSpkiPins=${OFFICIAL_LEAF_SPKI_SHA256_PINS.join(',')} ` +
+        `intermediates=${OFFICIAL_INTERMEDIATE_PEMS.length}`,
+    )
   }
   return _officialHttpsAgent
 }

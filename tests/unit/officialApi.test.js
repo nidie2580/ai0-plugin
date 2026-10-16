@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import https from 'node:https'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -31,6 +32,8 @@ import {
   isOfficialHost,
   officialHttpsAgent,
   isPinnedOfficialSocket,
+  evaluateOfficialPinning,
+  officialLeafSpkiSha256Pins,
   OFFICIAL_API_BASE,
 } from '../../src/officialApi.js'
 
@@ -76,6 +79,36 @@ describe('officialApi', () => {
       getPeerX509Certificate: () => null,
     })
     assert.equal(bad, false)
+  })
+
+  it('钉扎列表包含 2026-10-11 轮换前后的两枚叶子 SPKI', () => {
+    const pins = officialLeafSpkiSha256Pins()
+    assert.ok(pins.includes('rK/jlci9a5PbYu1mBdnIImXuG6illDiL9MbpIW4rNXg='), '缺少当前叶子（YR1 签发）钉扎')
+    assert.ok(pins.includes('wHjGum84n4Qt1hwIbGu3/zU8IKrtU/1sh2RQb10NUXU='), '缺少旧叶子（YR2 签发）钉扎')
+  })
+
+  it('evaluateOfficialPinning 输出分支结果且未命中时 fail-closed', () => {
+    // 无 getPeerCertificate：记录 error，pinned=false
+    const noSocket = evaluateOfficialPinning({})
+    assert.equal(noSocket.pinned, false)
+    assert.ok(noSocket.error)
+    // 自生成密钥对的 SPKI 必然未命中钉扎：spkiSha256 应与本地计算一致
+    const { publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
+    const spkiDer = publicKey.export({ type: 'spki', format: 'der' })
+    const expected = crypto.createHash('sha256').update(spkiDer).digest('base64')
+    const miss = evaluateOfficialPinning({ getPeerCertificate: () => ({ pubkey: spkiDer }) })
+    assert.equal(miss.spkiMatched, false)
+    assert.equal(miss.pinned, false)
+    assert.equal(miss.spkiSha256, expected)
+    assert.equal(miss.sanMatched, false)
+    // SAN 覆盖官方域名但 SPKI 未命中且无 X509 对象：sanMatched=true，仍 fail-closed
+    const sanOnly = evaluateOfficialPinning({
+      getPeerCertificate: () => ({ pubkey: spkiDer, subjectaltname: 'DNS:api.djyun.click, DNS:evil.example' }),
+    })
+    assert.equal(sanOnly.sanMatched, true)
+    assert.equal(sanOnly.issuerMatched, false)
+    assert.equal(sanOnly.signatureVerified, false)
+    assert.equal(sanOnly.pinned, false)
   })
 
   it('officialHttpsAgent 对未钉扎证书 fail-closed（本地自签证书）', async (t) => {
