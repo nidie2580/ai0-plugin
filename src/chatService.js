@@ -14,6 +14,7 @@ import * as groupConfirm from './groupConfirm.js'
 import * as deliberate from './deliberate.js'
 import * as musicService from './musicService.js'
 import * as botIdentity from './botIdentity.js'
+import * as asr from './asr.js'
 import { INJECT_BEGIN, INJECT_END, scrubSensitiveTokens } from './helper.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
@@ -755,7 +756,11 @@ export async function handleChat(e) {
   const imageInputEnabled = cfg.get('imageInput.enabled', true) !== false
   const hasImageSegs = imageInputEnabled && helper.getImageSegments(e).length > 0
 
-  if (!userId || (!text && !hasImageSegs)) return false
+  // 语音输入开关：启用时允许"纯语音"消息通过入口守卫，转写后再交给模型
+  const voiceInputEnabled = cfg.get('voiceInput.enabled', true) !== false
+  const hasVoiceSegs = voiceInputEnabled && helper.getVoiceSegments(e).length > 0
+
+  if (!userId || (!text && !hasImageSegs && !hasVoiceSegs)) return false
 
   if (!helper.isUserAllowed(userId, groupId, e)) {
     return false
@@ -851,6 +856,31 @@ export async function handleChat(e) {
   // 避免与同群的其他机器人互相 @ 无限互答烧 token/余额。
   if (loopGuardReport(groupId, userId).suppressed) return false
   if (!isGroup && privateRateReport(userId).suppressed) return false
+
+  // 语音转写：只在确认要处理该消息后才调用 ASR，避免对未触发的群语音白跑接口。
+  // 转写结果回填到 parsed.current.text，替换 extractTextFromMessage 生成的 `[语音]` 占位符；
+  // 后面的 baseForPure 会优先采用它，从而让模型拿到语音内容。
+  if (hasVoiceSegs) {
+    let voice = null
+    try {
+      voice = await asr.transcribeVoiceMessage(e)
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 语音转写异常: ${err?.message || err}`)
+    }
+    if (voice && voice.ok) {
+      // 兜底：任何适配器都应能产出 parsed.current；缺失时用原始正文补一个
+      if (!parsed.current || typeof parsed.current !== 'object') {
+        parsed.current = { user_id: userId != null ? String(userId) : null, name: '', text, isBot: false }
+      }
+      parsed.current.text = helper.replaceVoicePlaceholders(parsed.current.text || text, voice.texts)
+    } else {
+      // 纯语音消息转写失败：没有可交给模型的内容，静默跳过（维持旧行为）
+      if (!text && !hasImageSegs) return false
+      if (voice && Array.isArray(voice.errors) && voice.errors.length) {
+        safeLogger.warn(`[ai0-plugin] 语音转写失败: ${voice.errors.join('; ')}`)
+      }
+    }
+  }
 
   // 直连点歌命令（"点歌"/"点歌 歌名"/"#点歌 xxx"）——遵守触发规则，命中即不再走 AI
   if (musicService.isMusicEnabled?.()) {

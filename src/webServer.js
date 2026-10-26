@@ -723,6 +723,11 @@ export function createApp() {
       const k = safe.imageInput.ocr.apiKey
       safe.imageInput.ocr.apiKey = (!/^\s*$/.test(k) && !/^\*+$/.test(k)) ? API_KEY_PLACEHOLDER : k
     }
+    // 语音转写（ASR）apiKey 同样脱敏
+    if (safe.voiceInput && safe.voiceInput.asr && safe.voiceInput.asr.apiKey) {
+      const k = safe.voiceInput.asr.apiKey
+      safe.voiceInput.asr.apiKey = (!/^\s*$/.test(k) && !/^\*+$/.test(k)) ? API_KEY_PLACEHOLDER : k
+    }
     // 兼容：把 config.yaml 中被写成顶层 "web.trustProxy"/"web.host"/"web.port" 带点键的值
     //       合并进 safe.web，让前端始终能看到一致、正确的结构。吸收后删除顶层带点键（避免在前端显示/保存时产生 unknownKey 报错）。
     for (const badKey of ['web.trustProxy', 'web.host', 'web.port']) {
@@ -796,7 +801,7 @@ export function createApp() {
 
     // — P0-2: 白名单校验顶层字段 —
     const ALLOWED_TOP_KEYS = new Set([
-      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web', 'securityLog', 'imageInput', 'security'
+      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web', 'securityLog', 'imageInput', 'voiceInput', 'security'
     ])
     const unknownKeys = Object.keys(config).filter(k => !ALLOWED_TOP_KEYS.has(k))
     if (unknownKeys.length) {
@@ -1063,6 +1068,15 @@ export function createApp() {
         if (typeof newVal === 'string' && newVal === API_KEY_PLACEHOLDER && typeof oldVal === 'string') {
           cleaned.model[k].apiKey = oldVal
         }
+      }
+    }
+
+    // 图片 OCR / 语音 ASR 子配置的 apiKey 同样需要还原（GET 已脱敏为占位符，避免保存时把占位符写盘）
+    for (const [section, sub] of [['imageInput', 'ocr'], ['voiceInput', 'asr']]) {
+      const newKey = cleaned?.[section]?.[sub]?.apiKey
+      const oldKey = old?.[section]?.[sub]?.apiKey
+      if (typeof newKey === 'string' && newKey === API_KEY_PLACEHOLDER && typeof oldKey === 'string') {
+        cleaned[section][sub].apiKey = oldKey
       }
     }
 

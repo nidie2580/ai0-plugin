@@ -374,6 +374,60 @@ export function getImageSegments(e) {
   return segs
 }
 
+/* -------------------------------------------------------------------------- */
+/*                       语音段提取（ASR 转写用）                              */
+/* -------------------------------------------------------------------------- */
+
+const VOICE_SEG_CONTEXT = 'voiceSegments'
+
+/**
+ * 从 e.message 中提取所有语音段（type === 'record' | 'voice'），并缓存到 e[VOICE_SEG_CONTEXT]。
+ * 兼容段结构：{ type:'record', file, url } / { type:'record', data:{ file, url, path } }。
+ * @returns {Array<{file?:string, url?:string, path?:string}>} 空数组 = 无语音
+ */
+export function getVoiceSegments(e) {
+  if (!e) return []
+  if (e[VOICE_SEG_CONTEXT]) return e[VOICE_SEG_CONTEXT]
+  const segs = []
+  const msg = Array.isArray(e.message) ? e.message : null
+  if (!msg) {
+    e[VOICE_SEG_CONTEXT] = segs
+    return segs
+  }
+  for (const seg of msg) {
+    if (!seg || typeof seg !== 'object') continue
+    const type = seg.type ?? seg.msg_type ?? seg.post_type
+    if (type !== 'record' && type !== 'voice') continue
+    const d = seg.data && typeof seg.data === 'object' ? seg.data : {}
+    const item = {
+      file: seg.file ?? d.file ?? null,
+      url: seg.url ?? d.url ?? d.fileUrl ?? null,
+      path: seg.path ?? seg.file_path ?? d.path ?? d.file_path ?? null,
+    }
+    if (item.file || item.url || item.path) segs.push(item)
+  }
+  e[VOICE_SEG_CONTEXT] = segs
+  return segs
+}
+
+/**
+ * 用 ASR 转写结果替换正文里的 `[语音]` 占位符。
+ * 转写结果按语音段顺序消费；多余的占位符保留 `[语音]`（转写失败时也保留）。
+ * @param {string} text
+ * @param {string[]|string} transcripts 按语音段顺序的转写文本（空串表示该段失败）
+ * @returns {string}
+ */
+export function replaceVoicePlaceholders(text, transcripts) {
+  const s = String(text ?? '')
+  const list = Array.isArray(transcripts) ? transcripts : [transcripts]
+  if (!s || list.length === 0) return s
+  let i = 0
+  return s.replace(/\[语音\]/g, () => {
+    const t = String(list[i++] ?? '').trim()
+    return t || '[语音]'
+  })
+}
+
 /**
  * 将单个图片段解析为 base64 data URL（OpenAI 兼容多模态 image_url 标准格式）。
  * 优先级：data:URL 原样 → base64 data → 本地文件读取 → http(s) 下载。
@@ -1388,7 +1442,7 @@ export function normalizeApiBase(rawBase) {
     base = base.split('?')[0].split('#')[0]
   }
 
-  const re = /(.*?)\/?v(\d+(?:[\.-]\w+)*)?\/?(images\/generations|chat\/completions|models|embeddings)?\/?$/i
+  const re = /(.*?)\/?v(\d+(?:[\.-]\w+)*)?\/?(images\/generations|chat\/completions|audio\/transcriptions|models|embeddings)?\/?$/i
   const m = base.match(re)
   if (m && m[3]) {
     const host = m[1]

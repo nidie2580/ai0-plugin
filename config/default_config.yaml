@@ -272,6 +272,32 @@ imageInput:
     # 给 OCR 模型的系统提示：让它只输出图里的文字
     systemPrompt: "你是OCR工具，请把输入图片里的所有文字完整、逐行地提取出来。只输出提取到的文字，不要任何解释、前缀或闲聊。若图里没有文字，输出：<无文字>"
 
+# 语音输入设置（接收用户发的语音，经 ASR 转成文字后交给模型）
+# 处理策略：收到语音（type=record/voice）→ 下载音频 → 调用 ASR → 用转写文本参与对话。
+#   - 转写成功：用文本替换正文里的 [语音] 占位符，模型按普通消息理解。
+#   - 转写失败：保留 [语音] 占位；纯语音消息不触发回复（维持旧行为）。
+# 说明：QQ 语音常见 SILK/AMR 格式，需本机 ffmpeg 转码后才能被多数 ASR 接口识别；
+#       无 ffmpeg 时仅 mp3/wav/ogg/m4a/flac/webm 可直接转写。
+voiceInput:
+  # 是否启用语音输入。false 时不处理任何语音（只保留 [语音] 占位）。
+  enabled: true
+  # ASR 接口（OpenAI 兼容 /audio/transcriptions）
+  asr:
+    # 接口地址；留空则复用 model.<default> 的 apiBase（官方模型自动走证书钉扎）
+    apiBase: ""
+    # 密钥；留空则复用 model.<default> 的 apiKey
+    apiKey: ""
+    # 转写模型（以服务商支持为准，OpenAI 兼容常见为 whisper-1）
+    model: "whisper-1"
+    # 语言提示（如 zh）；留空由服务端自动识别
+    language: "zh"
+    # 单次请求超时（毫秒）
+    timeout: 60000
+    # 单条语音最大体积（字节，默认 25MB，即 OpenAI 上传上限）
+    maxBytes: 26214400
+    # 可选提示词：补充专有名词等上下文
+    prompt: ""
+
 # Agent 能力设置（AI 在受控沙箱工作区执行命令完成任务，仅主人可触发）
 agent:
   # 是否启用 Agent 能力。默认关闭（P0 安全策略）：首次安装需主人手动开启。
