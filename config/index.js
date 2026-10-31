@@ -303,7 +303,7 @@ voiceInput:
     apiBase: ""
     # 密钥；留空则复用 model.<default> 的 apiKey
     apiKey: ""
-    # 转写模型（以服务商支持为准，OpenAI 兼容常见为 whisper-1）
+    # 转写模型；留空或 whisper-1 时，若最近一次 /models 列表含 ASR 名称（whisper/paraformer/sensevoice），自动改用该名称
     model: "whisper-1"
     # 语言提示（如 zh）；留空由服务端自动识别
     language: "zh"

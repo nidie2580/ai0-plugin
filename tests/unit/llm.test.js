@@ -255,6 +255,17 @@ describe('llm: interpretModelsListResponse /models 探测判定', () => {
     assert.equal(r.count, 2)
   })
 
+  test('200 同时返回 details（含 ASR 推断）', () => {
+    const r = interpretModelsListResponse(200, {
+      data: [{ id: 'gpt-4o' }, { id: 'whisper-1' }, { id: 'dall-e-3' }],
+    }, 'https://api.djyun.click/v1/models')
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.models, ['gpt-4o', 'whisper-1', 'dall-e-3'])
+    assert.equal(r.details.find((d) => d.id === 'whisper-1').kind, 'asr')
+    assert.equal(r.details.find((d) => d.id === 'dall-e-3').kind, 'image')
+    assert.ok(r.details.find((d) => d.id === 'gpt-4o').scopes.includes('vision'))
+  })
+
   test('200 但空结构标 unsupported，不报未返回任何可用模型', () => {
     const r = interpretModelsListResponse(200, { object: 'list' }, 'https://x/v1/models')
     assert.equal(r.ok, true)
