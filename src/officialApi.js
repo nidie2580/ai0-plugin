@@ -241,7 +241,7 @@ let _officialHttpsAgent = null
  */
 export function officialHttpsAgent() {
   if (!_officialHttpsAgent) {
-    _officialHttpsAgent = new PinnedOfficialHttpsAgent({ rejectUnauthorized: false, keepAlive: false })
+    _officialHttpsAgent = new PinnedOfficialHttpsAgent({ rejectUnauthorized: false, keepAlive: true, maxSockets: 8, maxFreeSockets: 4, timeout: 30000 })
     // 打印当前运行副本的钉扎数据：用于排查"运行时加载的代码与手工测试代码不一致"
     // （诊断文档 3.C，比对日志中 pin-debug 的 spkiSha256 即可确认）
     safeLogger.info(

@@ -640,7 +640,7 @@ export async function chatCompletions(messages, {
       // 官方域名经 CDN 时偶发新 TLS 握手被掐（钉扎层报「未取得对端证书」）：
       // 属传输层抖动而非真实 MITM。每次尝试都独立做钉扎校验，重试不放松安全性；
       // 最多重试 2 次（递增退避），真实证书不匹配依然 fail-closed。
-      if (s.code === 'AI0_OFFICIAL_PIN_MISMATCH' && pinRetryCount < 2) {
+      if ((s.code === 'AI0_OFFICIAL_PIN_MISMATCH' || s.code === 'ECONNRESET' || s.code === 'EPIPE') && pinRetryCount < 2) {
         pinRetryCount += 1
         const waitMs = pinRetryCount === 1 ? 300 : 700
         safeLogger.warn(`[ai0-plugin] 官方域名 TLS 握手被 CDN 掐断，${waitMs}ms 后第${pinRetryCount}次重试`)

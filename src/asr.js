@@ -434,7 +434,7 @@ export async function transcribeAudioBuffer(buffer, opts = {}, deps = {}) {
     })
   } catch (err) {
     // CDN 偶发掐断新 TLS 握手（钉扎层「未取得对端证书」）：传输层抖动，新建连接最多重试 2 次
-    if (err && err.code === 'AI0_OFFICIAL_PIN_MISMATCH' && uploadRetryCount < 2) {
+    if (err && (err.code === 'AI0_OFFICIAL_PIN_MISMATCH' || err.code === 'ECONNRESET' || err.code === 'EPIPE') && uploadRetryCount < 2) {
       uploadRetryCount += 1
       const waitMs = uploadRetryCount === 1 ? 300 : 700
       safeLogger.warn(`[ai0-plugin] ASR 上传连接被 CDN 掐断，${waitMs}ms 后第${uploadRetryCount}次重试`)
