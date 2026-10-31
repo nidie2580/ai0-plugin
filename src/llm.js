@@ -6,6 +6,7 @@ import * as cfg from '../config/index.js'
 import { safeAxiosRequest, isAllowedOutboundUrl } from './security.js'
 import { normalizeApiBase, stripInjectionMarkers, scrubSensitiveTokens } from './helper.js'
 import { safeLogger, sanitizeLog } from './globals.js'
+import { inferModelMeta, rememberModelCatalog } from './modelCapabilities.js'
 
 export { normalizeApiBase }
 
@@ -417,17 +418,25 @@ async function retryWithZhipuJwt(resp, { url, method, body, apiKey, apiBase, tim
 export function interpretModelsListResponse(status, data, modelsUrl = '') {
   if (status >= 200 && status < 300) {
     const arr = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : []
-    const ids = arr.map((x) => x?.id).filter(Boolean)
-    if (ids.length > 0) {
-      return { ok: true, status, url: modelsUrl, models: ids, count: ids.length }
+    const details = []
+    const ids = []
+    for (const item of arr) {
+      const meta = inferModelMeta(item)
+      if (!meta) continue
+      ids.push(meta.id)
+      details.push(meta)
     }
-    return { ok: true, status, url: modelsUrl, models: [], count: 0, unsupported: true, note: '/models 未返回模型列表（不影响对话，请手动填写模型名）' }
+    if (ids.length > 0) {
+      rememberModelCatalog(String(modelsUrl || '').replace(/\/models\/?$/, ''), ids)
+      return { ok: true, status, url: modelsUrl, models: ids, details, count: ids.length }
+    }
+    return { ok: true, status, url: modelsUrl, models: [], details: [], count: 0, unsupported: true, note: '/models 未返回模型列表（不影响对话，请手动填写模型名）' }
   }
   // GLM Coding 等端点只提供 /chat/completions：/models 可能 401/403/404/405/501。
   if (status === 401 || status === 403 || status === 404 || status === 405 || status === 501) {
-    return { ok: true, status, url: modelsUrl, models: [], count: 0, unsupported: true, note: `HTTP ${status}：该服务商不提供 /models 列表（不影响对话，请手动填写模型名）` }
+    return { ok: true, status, url: modelsUrl, models: [], details: [], count: 0, unsupported: true, note: `HTTP ${status}：该服务商不提供 /models 列表（不影响对话，请手动填写模型名）` }
   }
-  return { ok: false, status, url: modelsUrl, models: [], error: `HTTP ${status}` }
+  return { ok: false, status, url: modelsUrl, models: [], details: [], error: `HTTP ${status}` }
 }
 
 export async function listAvailableModels({ modelKey = null } = {}) {

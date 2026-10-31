@@ -413,6 +413,14 @@ if (route === 'dashboard') {
     $('#chat_music_maxResults').value =((muCfg.maxResults) != null ? (muCfg.maxResults) : (3))
     $('#chat_music_tryPlayUrl').value = String(muCfg.tryPlayUrl !== false)
 
+    const viCfg = resp.config.voiceInput || {}
+    const asrCfg = viCfg.asr || {}
+    $('#voice_enabled').value = String(viCfg.enabled !== false)
+    $('#voice_asr_model').value = asrCfg.model || ''
+    $('#voice_asr_language').value = asrCfg.language || ''
+    $('#voice_asr_timeout').value = ((asrCfg.timeout) != null ? (asrCfg.timeout) : (60000))
+    $('#voice_asr_prompt').value = asrCfg.prompt || ''
+
     $('#system_prompt').value = (resp.config.system && resp.config.system.prompt) || ''
     $('#agent_maxRounds').value =(((resp.config.agent && resp.config.agent.maxRounds)) != null ? ((resp.config.agent && resp.config.agent.maxRounds)) : (5))
     $('#agent_hardTimeoutMs').value =(((resp.config.agent && resp.config.agent.hardTimeoutMs)) != null ? ((resp.config.agent && resp.config.agent.hardTimeoutMs)) : (600000))
@@ -577,6 +585,16 @@ if (route === 'dashboard') {
         maxResults: Math.min(5, Math.max(1, parseIntOr($('#chat_music_maxResults').value, 3))),
         tryPlayUrl: $('#chat_music_tryPlayUrl').value !== 'false'
       }
+    })
+    const prevAsr = (c.voiceInput && c.voiceInput.asr) || {}
+    c.voiceInput = Object.assign({}, c.voiceInput || {}, {
+      enabled: $('#voice_enabled').value === 'true',
+      asr: Object.assign({}, prevAsr, {
+        model: $('#voice_asr_model').value.trim(),
+        language: $('#voice_asr_language').value.trim(),
+        timeout: parseIntOr($('#voice_asr_timeout').value, 60000),
+        prompt: $('#voice_asr_prompt').value.trim()
+      })
     })
     c.system = { prompt: $('#system_prompt').value }
 
@@ -1270,6 +1288,7 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         providersList[idx].model = sel.value
         const inp = $(`#providersList input[data-idx="${idx}"][data-field="model"]`)
         if (inp) inp.value = sel.value
+        applySuggestedScopes(idx, sel.value)
       })
     })
 
@@ -1580,13 +1599,9 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
           const urlHint = (!isOfficial && r.info.url) ? ` URL: ${escapeHtml(r.info.url)}` : ''
           box.innerHTML = `<span class="hint">⚠ ${note}${urlHint}</span>`
         } else {
-          const sel = $(`#providersList select.model-select[data-idx="${idx}"]`)
-          if (sel) {
-            sel.innerHTML = `<option value="">— 选择模型 (${models.length} 个可用) —</option>` +
-              models.map(m => `<option value="${escapeHtml(m)}"${m === p.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')
-            sel.classList.remove('hidden')
-          }
-          box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${((r.info.latencyMs) != null ? (r.info.latencyMs) : ('-'))} ms）。可在上方下拉中选择。</span>`
+          fillModelSelect(idx, models, r.info.details, p.model)
+          const asrHint = asrHintFromDetails(r.info.details)
+          box.innerHTML = `<span class="hint">✅ 探测到 ${models.length} 个可用模型（HTTP ${r.info.status || '-'}，${((r.info.latencyMs) != null ? (r.info.latencyMs) : ('-'))} ms）。可在上方下拉中选择。${asrHint}</span>`
         }
       } else {
         const urlHint = (!isOfficial && (r.info && r.info.url)) ? `<br>URL: ${escapeHtml(r.info.url)}` : ''
@@ -1627,13 +1642,8 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
         if (!models.length) {
           box.innerHTML = `<span class="hint">⚠ ${item.unsupported ? `未提供 /models 列表（HTTP ${item.status || '-'}），不影响对话，请手动填写模型 ID。` : `/models 可达（HTTP ${item.status || '-'}），但未返回任何模型。`}</span>`
         } else {
-          const sel = $(`#providersList select.model-select[data-idx="${idx}"]`)
-          if (sel) {
-            sel.innerHTML = `<option value="">— 选择模型 (${models.length} 个可用) —</option>` +
-              models.map(m => `<option value="${escapeHtml(m)}"${m === p.model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('')
-            sel.classList.remove('hidden')
-          }
-          box.innerHTML = `<span class="hint">✅ ${models.length} 个模型（${((item.latencyMs) != null ? (item.latencyMs) : ('-'))} ms）</span>`
+          fillModelSelect(idx, models, item.details, p.model)
+          box.innerHTML = `<span class="hint">✅ ${models.length} 个模型（${((item.latencyMs) != null ? (item.latencyMs) : ('-'))} ms）${asrHintFromDetails(item.details)}</span>`
         }
       } else {
         box.innerHTML = `<span class="err">❌ ${escapeHtml(item.error || (item.status != null ? `HTTP ${item.status}` : '未知错误'))}</span>`
@@ -1686,6 +1696,42 @@ Web 后台状态：${info.running ? '运行中' : '未运行'}<br>
     return String(((s) != null ? (s) : (''))).replace(/[&<>"'/]/g, c => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '/': '&#x2F;'
     }[c]))
+  }
+  function modelKindLabel(meta) {
+    if (!meta) return ''
+    if (meta.kind === 'asr') return ' [语音转写]'
+    if (meta.kind === 'image') return ' [图片生成]'
+    if (meta.kind === 'video') return ' [视频生成]'
+    if (Array.isArray(meta.scopes) && meta.scopes.includes('vision')) return ' [视觉]'
+    return ''
+  }
+  function fillModelSelect(idx, models, details, current) {
+    const p = providersList[idx]
+    if (p) p._details = details || []
+    const sel = $(`#providersList select.model-select[data-idx="${idx}"]`)
+    if (!sel) return
+    const byId = {}
+    for (const d of (details || [])) {
+      if (d && d.id) byId[d.id] = d
+    }
+    sel.innerHTML = `<option value="">— 选择模型 (${models.length} 个可用) —</option>` +
+      models.map((m) => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}${escapeHtml(modelKindLabel(byId[m]))}</option>`).join('')
+    sel.classList.remove('hidden')
+  }
+  function asrHintFromDetails(details) {
+    const hit = (details || []).find((d) => d && d.kind === 'asr')
+    return hit ? ` 语音转写可填：${escapeHtml(hit.id)}` : ''
+  }
+  function applySuggestedScopes(idx, modelId) {
+    const p = providersList[idx]
+    if (!p) return
+    const meta = (p._details || []).find((d) => d && d.id === modelId)
+    if (!meta || meta.kind === 'asr') return
+    if (!Array.isArray(meta.scopes) || !meta.scopes.length) return
+    p.scopes = meta.scopes.slice()
+    $$(`#providersList input[data-scope][data-idx="${idx}"]`).forEach((cb) => {
+      cb.checked = p.scopes.includes(cb.dataset.scope)
+    })
   }
   function parseIntOr(v, fallback) {
     const n = parseInt(v, 10)

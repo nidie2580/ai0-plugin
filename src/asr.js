@@ -21,6 +21,7 @@ import { safeLogger, sanitizeLog } from './globals.js'
 import { safeAxiosRequest, safeFetchWithRedirects } from './security.js'
 import { normalizeApiBase, getVoiceSegments } from './helper.js'
 import { isOfficialKind, OFFICIAL_API_BASE } from './officialApi.js'
+import { pickAsrModel, getModelCatalog } from './modelCapabilities.js'
 
 const DEFAULT_MODEL = 'whisper-1'
 const DEFAULT_TIMEOUT_MS = 60000
@@ -39,7 +40,7 @@ const QQ_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
  * 解析语音输入/ASR 配置。
  * apiBase / apiKey 留空时复用 model.<default> 的凭据：官方模型会落到官方域名，
  * 由 safeAxiosRequest 自动套用钉扎 agent；自定义模型走完整 TLS 校验。
- * @returns {{apiBase:string, apiKey:string, model:string, timeout:number, maxBytes:number, language:string, prompt:string}|null}
+ * @returns {{apiBase:string, apiKey:string, model:string, timeout:number, maxBytes:number, language:string, prompt:string, providerKey:string}|null}
  */
 export function resolveAsrConfig(config = cfg.loadConfig()) {
   const voice = (config && config.voiceInput) || {}
@@ -50,27 +51,58 @@ export function resolveAsrConfig(config = cfg.loadConfig()) {
   const main = modelCfg[defKey] || {}
   const mainOfficial = isOfficialKind(main.kind)
 
+  const inheritedBase = !String(asr.apiBase || '').trim()
+  const inheritedKey = !String(asr.apiKey || '').trim()
   let apiBase = String(asr.apiBase || '').trim()
   let apiKey = String(asr.apiKey || '').trim()
   if (!apiBase) apiBase = mainOfficial ? OFFICIAL_API_BASE : String(main.apiBase || '').trim()
   if (!apiKey) apiKey = String(main.apiKey || '').trim()
 
-  const model = String(asr.model || '').trim() || DEFAULT_MODEL
+  const preferred = String(asr.model || '').trim() || DEFAULT_MODEL
   const rawTimeout = Number(asr.timeout)
   const timeout = Math.max(1000, Math.min(300000, Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : DEFAULT_TIMEOUT_MS))
   const rawMax = Number(asr.maxBytes)
   const maxBytes = Math.max(64 * 1024, Math.min(DEFAULT_MAX_BYTES, Number.isFinite(rawMax) && rawMax > 0 ? rawMax : DEFAULT_MAX_BYTES))
 
-  if (!apiBase || !apiKey || !model) return null
+  if (!apiBase || !apiKey) return null
+  const normalizedBase = normalizeApiBase(apiBase)
+  const model = pickAsrModel(getModelCatalog(normalizedBase), preferred)
+  if (!model) return null
   return {
-    apiBase: normalizeApiBase(apiBase),
+    apiBase: normalizedBase,
     apiKey,
     model,
     timeout,
     maxBytes,
     language: String(asr.language || '').trim(),
     prompt: String(asr.prompt || '').trim(),
+    providerKey: (inheritedBase && inheritedKey) ? String(defKey) : '',
   }
+}
+
+const catalogProbed = new Set()
+
+/**
+ * 目录为空时探测一次 /models，用返回的 ASR 名称替换默认 whisper-1。
+ * 可注入 listModels 便于测试。
+ */
+export async function ensureAsrCatalog(conf, deps = {}) {
+  if (!conf?.apiBase) return conf
+  if (getModelCatalog(conf.apiBase).length) return resolveAsrConfig() || conf
+  const key = String(conf.providerKey || '').trim()
+  if (!key || catalogProbed.has(conf.apiBase)) return resolveAsrConfig() || conf
+  catalogProbed.add(conf.apiBase)
+  try {
+    const list = typeof deps.listModels === 'function'
+      ? deps.listModels
+      : (await import('./llm.js')).listAvailableModels
+    await list({ modelKey: key })
+  } catch (_) {}
+  return resolveAsrConfig() || conf
+}
+
+export function clearAsrCatalogProbe() {
+  catalogProbed.clear()
 }
 
 /* -------------------------------------------------------------------------- */
@@ -373,8 +405,9 @@ export function clearTranscriptCache() {
 export async function transcribeVoiceMessage(e, deps = {}) {
   const segs = getVoiceSegments(e)
   if (!segs.length) return { ok: true, texts: [], text: '', errors: [] }
-  const conf = deps.config || resolveAsrConfig()
+  let conf = deps.config || resolveAsrConfig()
   if (!conf) return { ok: false, texts: [], text: '', errors: ['语音输入未启用或 ASR 未配置'] }
+  if (!deps.config) conf = await ensureAsrCatalog(conf, deps)
 
   const texts = []
   const errors = []

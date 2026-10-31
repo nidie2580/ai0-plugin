@@ -68,6 +68,7 @@ before(() => { restoreConfig(); createTempMp3() })
 after(() => {
   restoreConfig()
   asr.clearTranscriptCache()
+  asr.clearAsrCatalogProbe()
   if (fs.existsSync(TMP_MP3)) fs.unlinkSync(TMP_MP3)
   try { fs.rmdirSync(TMP_DIR) } catch (_) {}
 })
@@ -133,6 +134,46 @@ describe('V4 resolveAsrConfig', () => {
   it('禁用或缺凭据时返回 null', () => {
     assert.equal(asr.resolveAsrConfig({ voiceInput: { enabled: false } }), null)
     assert.equal(asr.resolveAsrConfig({ voiceInput: { enabled: true, asr: {} } }), null)
+  })
+
+  it('目录里有官方 ASR 模型时，whisper-1 自动改成该名称', async () => {
+    const caps = await import('../../src/modelCapabilities.js')
+    caps.clearModelCatalog()
+    caps.rememberModelCatalog('https://api.djyun.click/v1', ['gpt-4o', 'SenseVoiceSmall'])
+    const conf = asr.resolveAsrConfig({
+      model: { default: 'official', official: { kind: 'official', apiBase: 'https://api.djyun.click/v1', apiKey: 'k' } },
+      voiceInput: { enabled: true, asr: { apiBase: '', apiKey: '', model: 'whisper-1' } },
+    })
+    assert.equal(conf.model, 'SenseVoiceSmall')
+    caps.clearModelCatalog()
+  })
+
+  it('ensureAsrCatalog 在目录为空时探测一次 /models', async () => {
+    const caps = await import('../../src/modelCapabilities.js')
+    caps.clearModelCatalog()
+    asr.clearAsrCatalogProbe()
+    writeConfig({
+      model: {
+        default: 'official',
+        official: { kind: 'official', apiBase: 'https://api.djyun.click/v1', apiKey: 'k', model: 'gpt-4o' },
+      },
+      voiceInput: { enabled: true, asr: { apiBase: '', apiKey: '', model: 'whisper-1' } },
+    })
+    let calls = 0
+    const listModels = async () => {
+      calls += 1
+      caps.rememberModelCatalog('https://api.djyun.click/v1', ['gpt-4o', 'paraformer-v2'])
+      return { ok: true, models: ['gpt-4o', 'paraformer-v2'] }
+    }
+    const conf = asr.resolveAsrConfig()
+    assert.equal(conf.model, 'whisper-1')
+    const next = await asr.ensureAsrCatalog(conf, { listModels })
+    assert.equal(next.model, 'paraformer-v2')
+    assert.equal(calls, 1)
+    await asr.ensureAsrCatalog(next, { listModels })
+    assert.equal(calls, 1)
+    caps.clearModelCatalog()
+    asr.clearAsrCatalogProbe()
   })
 })
 

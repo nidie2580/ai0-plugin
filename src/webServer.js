@@ -1189,6 +1189,7 @@ export function createApp() {
             status: info.status,
             url: info.url,
             models: info.models || [],
+            details: info.details || [],
             count: info.count || 0,
             latencyMs: Date.now() - t0,
             unsupported: !!info.unsupported,

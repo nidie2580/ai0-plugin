@@ -99,3 +99,111 @@ export function isUsableEntry(entry) {
   if (!entry || typeof entry !== 'object') return false
   return !!String(entry.apiKey || '').trim() && !!String(entry.apiBase || '').trim()
 }
+
+/* -------------------------------------------------------------------------- */
+/*                     /models 元数据 → 能力推断                               */
+/* -------------------------------------------------------------------------- */
+
+const ASR_ID_RE = /whisper|asr|transcri|paraformer|sensevoice|funasr|speech-to-text|\bstt\b/
+const VISION_ID_RE = /vision|\bvl\b|vl-|gpt-4o|gpt-4\.1|gpt-5|gemini|claude|qwen-vl|qwen2-vl|qwen2\.5-vl/
+const IMAGE_ID_RE = /dall-e|dalle|gpt-image|flux|sdxl|stable-diffusion|imagen|midjourney|image-gen/
+const VIDEO_ID_RE = /sora|runway|kling|luma|minimax-video|video-gen|cogvideox/
+
+const modelCatalogByBase = new Map()
+
+function blobOf(item) {
+  const caps = item?.capabilities || item?.capability || item?.supports || ''
+  const endpoints = item?.supported_endpoints || item?.endpoints || item?.permission || ''
+  return [
+    item?.id, item?.model, item?.name, item?.owned_by, item?.object, item?.type,
+    item?.mode, item?.category, item?.architecture,
+    typeof caps === 'string' ? caps : JSON.stringify(caps || ''),
+    typeof endpoints === 'string' ? endpoints : JSON.stringify(endpoints || ''),
+  ].join(' ').toLowerCase()
+}
+
+/** 模型 id 是否像语音转写（ASR）模型 */
+export function isAsrModelId(id) {
+  return ASR_ID_RE.test(String(id || '').toLowerCase())
+}
+
+/**
+ * 从 /models 条目推断 kind + scopes。
+ * kind: chat | asr | image | video
+ * 官方接口常只给 id；有 type/capabilities 时优先用元数据。
+ */
+export function inferModelMeta(item) {
+  const id = String(item?.id || item?.model || '').trim()
+  if (!id) return null
+  const blob = blobOf(item)
+  const idLower = id.toLowerCase()
+
+  const capsObj = (item && typeof item.capabilities === 'object' && item.capabilities)
+    || (item && typeof item.capability === 'object' && item.capability)
+    || null
+  const explicit = new Set()
+  if (capsObj) {
+    if (capsObj.chat || capsObj.completion || capsObj.chat_completions) explicit.add('chat')
+    if (capsObj.vision || capsObj.image_in || capsObj.image_input) explicit.add('vision')
+    if (capsObj.image_generation || capsObj.image_out || capsObj.images) explicit.add('image')
+    if (capsObj.video_generation || capsObj.video) explicit.add('video')
+  }
+
+  let kind = 'chat'
+  if (capsObj && (capsObj.transcription || capsObj.asr || capsObj.audio_transcriptions || capsObj.speech_to_text)) {
+    kind = 'asr'
+  } else if (isAsrModelId(id) || /audio\.transcriptions|speech-to-text|\/audio\b/.test(blob)) {
+    kind = 'asr'
+  } else if (explicit.has('video') || VIDEO_ID_RE.test(idLower) || /\bvideo[-_]?generation\b/.test(blob)) {
+    kind = 'video'
+  } else if (explicit.has('image') || IMAGE_ID_RE.test(idLower) || /\bimage[-_]?generation\b/.test(blob)) {
+    kind = 'image'
+  }
+
+  if (kind === 'asr') return { id, kind, scopes: [] }
+
+  const scopes = new Set(explicit)
+  if (kind === 'image') scopes.add('image')
+  else if (kind === 'video') scopes.add('video')
+  else {
+    scopes.add('chat')
+    if (VISION_ID_RE.test(idLower) || /\bvision\b/.test(blob)) scopes.add('vision')
+  }
+  if (scopes.has('image') && scopes.has('video')) scopes.delete('video')
+  return { id, kind, scopes: SCOPES.filter((s) => scopes.has(s)) }
+}
+
+/**
+ * 从可用模型 id 列表里挑 ASR 模型。
+ * 仅当 preferred 为空或默认 whisper-1 时，才用列表里的 ASR 名称替换。
+ */
+export function pickAsrModel(ids, preferred = '') {
+  const list = (Array.isArray(ids) ? ids : []).map((s) => String(s || '').trim()).filter(Boolean)
+  const pref = String(preferred || '').trim()
+  const auto = !pref || pref.toLowerCase() === 'whisper-1'
+  if (pref && list.includes(pref)) return pref
+  if (auto) {
+    const hit = list.find((id) => isAsrModelId(id))
+    if (hit) return hit
+  }
+  if (pref) return pref
+  return 'whisper-1'
+}
+
+/** 记住某 apiBase 最近一次 /models 返回的 id 列表，供 ASR 自动匹配。 */
+export function rememberModelCatalog(apiBase, ids) {
+  const base = String(apiBase || '').replace(/\/+$/, '')
+  if (!base) return
+  const list = (Array.isArray(ids) ? ids : []).map((s) => String(s || '').trim()).filter(Boolean)
+  if (!list.length) return
+  modelCatalogByBase.set(base, list)
+}
+
+export function getModelCatalog(apiBase) {
+  const base = String(apiBase || '').replace(/\/+$/, '')
+  return modelCatalogByBase.get(base) || []
+}
+
+export function clearModelCatalog() {
+  modelCatalogByBase.clear()
+}

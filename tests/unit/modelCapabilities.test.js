@@ -92,6 +92,32 @@ describe('modelCapabilities: hasScope / isChatModel / isVisionModel', () => {
   })
 })
 
+describe('modelCapabilities: inferModelMeta / pickAsrModel', () => {
+  it('只给 id 时按名称推断 chat/vision/image/video/asr', () => {
+    assert.deepEqual(caps.inferModelMeta({ id: 'gpt-4o' }), { id: 'gpt-4o', kind: 'chat', scopes: ['chat', 'vision'] })
+    assert.equal(caps.inferModelMeta({ id: 'whisper-1' }).kind, 'asr')
+    assert.equal(caps.inferModelMeta({ id: 'paraformer-v2' }).kind, 'asr')
+    assert.equal(caps.inferModelMeta({ id: 'dall-e-3' }).kind, 'image')
+    assert.equal(caps.inferModelMeta({ id: 'sora-1' }).kind, 'video')
+    assert.equal(caps.inferModelMeta({ id: 'tts-1' }).kind, 'chat')
+  })
+
+  it('有 capabilities 元数据时优先用字段', () => {
+    const r = caps.inferModelMeta({ id: 'custom-stt', capabilities: { transcription: true } })
+    assert.equal(r.kind, 'asr')
+    const chat = caps.inferModelMeta({ id: 'foo', capabilities: { chat: true, vision: true } })
+    assert.deepEqual(chat.scopes, ['chat', 'vision'])
+  })
+
+  it('pickAsrModel：preferred 在列表中则沿用；仅 whisper-1/空才自动替换', () => {
+    assert.equal(caps.pickAsrModel(['gpt-4o', 'whisper-1'], 'whisper-1'), 'whisper-1')
+    assert.equal(caps.pickAsrModel(['gpt-4o', 'SenseVoiceSmall'], 'whisper-1'), 'SenseVoiceSmall')
+    assert.equal(caps.pickAsrModel(['gpt-4o'], 'whisper-1'), 'whisper-1')
+    assert.equal(caps.pickAsrModel(['SenseVoiceSmall'], 'my-stt'), 'my-stt')
+    assert.equal(caps.pickAsrModel([], ''), 'whisper-1')
+  })
+})
+
 describe('modelCapabilities: findGenerationProvider', () => {
   const config = {
     model: {

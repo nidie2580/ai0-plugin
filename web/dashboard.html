@@ -129,6 +129,17 @@
       <p class="hint">开启后，AI 对话内识别到点歌/推荐歌意图即自动搜索并发送音乐卡片；拿不到可播直链时自动降级为文本链接。点歌使用网易云/QQ音乐公开接口+歌曲页元数据爬虫，不依赖任何个人登录 Cookie，无需额外配置。</p>
 
       <hr>
+      <h3>语音输入（ASR）</h3>
+      <div class="grid-2">
+        <label>语音转写 <select id="voice_enabled"><option value="true">开启</option><option value="false">关闭</option></select></label>
+        <label>转写模型 <input id="voice_asr_model" placeholder="留空则自动匹配（whisper / 官方 ASR）"/></label>
+        <label>语言提示 <input id="voice_asr_language" placeholder="zh；留空由服务端识别"/></label>
+        <label>超时(ms) <input id="voice_asr_timeout" type="number" min="1000" max="300000"/></label>
+        <label>提示词 <input id="voice_asr_prompt" placeholder="可选，补充专有名词"/></label>
+      </div>
+      <p class="hint">收到语音后先转成文字再交给对话模型。接口地址/密钥留空（本页不展示）时复用默认平台；官方 API 会走证书钉扎。转写模型留空或填 whisper-1 时，若最近一次「拉取模型列表」里有 whisper / paraformer / sensevoice 等 ASR 模型，会自动改用该名称。</p>
+
+      <hr>
       <h3>Agent 配置</h3>
       <div class="grid-2">
         <label>最大执行轮数 <input id="agent_maxRounds" type="number" min="1" max="10000"/></label>
