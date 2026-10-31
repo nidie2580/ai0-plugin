@@ -9,7 +9,7 @@ import { safeLogger, sanitizeLog } from './globals.js'
  * 核心流程：
  *  1) chatService 在群聊时调用 buildGroupContext() 收集群信息
  *  2) 将群信息注入 system prompt，告诉 AI：
- *     - 机器人主人 QQ 列表（不可被操作）
+ *     - 机器人主人 QQ 列表（不可被踢出/禁言/拉黑；头衔类操作除外）
  *     - 请求者 QQ + 角色
  *     - 被@目标 QQ + 角色
  *     - 机器人角色
@@ -815,7 +815,7 @@ export async function buildGroupContext(e) {
     `当前群号：${groupId}`,
     `机器人角色：${botRoleZh}${botInferred === 'owner' ? '（群主，可设置管理员）' : botInferred === 'admin' ? '（管理员，可踢出/禁言）' : botInferred === 'member' ? '（普通成员，无法执行管理操作）' : '（身份未知，按保守策略不允许执行管理操作）'}`,
     `机器人主人QQ：${masters.length ? masters.join(', ') : '(无)'}`,
-    `机器人主人说明：以上QQ号是机器人主人，任何人（包括群主）都不能对他们执行踢出/禁言操作。`,
+    `机器人主人说明：以上QQ号是机器人主人，任何人（包括群主）都不能对他们执行踢出/禁言/拉黑操作。设置头衔（set_title/custom_title/level_title）不受此限制，可以给主人挂头衔。`,
     `说明：接口未返回明确角色时一律按 unknown 处理，不要脑补为普通成员。` + (ownerUin ? `（已确认群主UIN=${ownerUin}）` : ''),
     '',
     `当前请求者：QQ=${userId}，昵称=${requesterName}，群内角色=${reqRoleZh}`,
@@ -825,7 +825,7 @@ export async function buildGroupContext(e) {
   if (targetUid) {
     lines.push('')
     lines.push(`被@目标：QQ=${targetUid}，昵称=${targetName}，群内角色=${tgtRoleZh}`)
-    lines.push(`  → 目标${targetIsProtected ? '⚠️ 受保护（群主/管理员/机器人主人），不可对其执行踢出/禁言' : '是普通群员，可被踢出/禁言（前提：请求者有权限、且机器人有管理权限）'}`)
+    lines.push(`  → 目标${targetIsProtected ? '⚠️ 受保护（群主/管理员/机器人主人），不可对其执行踢出/禁言/拉黑；设置头衔不受此限制' : '是普通群员，可被踢出/禁言（前提：请求者有权限、且机器人有管理权限）'}`)
   }
 
   lines.push('', '【可用操作与规则】')
@@ -840,7 +840,7 @@ export async function buildGroupContext(e) {
     lines.push('  - 设置/取消管理员：仅机器人主人可发起（机器人必须明确是群主）')
   }
   if (allowTitle) {
-    lines.push('  - 设置头衔：所有人可给自己设；群主/管理员/主人可给他人设')
+    lines.push('  - 设置头衔：所有人可给自己设；群主/管理员/主人可给他人设。头衔是授予性操作，可以对主人/群主/管理员执行。')
   }
   const allowGroupName = cfg.get('groupOps.allowGroupName', true) !== false
   const allowMuteAll = cfg.get('groupOps.allowMuteAll', true) !== false
@@ -924,7 +924,7 @@ export async function buildGroupContext(e) {
   lines.push('  例：用户问"群里都有谁/查一下小明的QQ"，你可输出 [action:member_list:小明] 获取结果后再按实际需求回复用户。描述成员列表时注意：仅在请求者有权查询时，才泄露具体成员；无权时只说明"无权限"。')
   lines.push('')
   lines.push('重要规则：')
-  lines.push('  1) 你必须先判断请求者是否有权限、目标是否受保护，如果无权或受保护，拒绝并说明原因，不要输出操作指令。')
+  lines.push('  1) 你必须先判断请求者是否有权限、目标是否受保护，如果无权或受保护，拒绝并说明原因，不要输出操作指令。受保护仅针对踢出/禁言/拉黑/设管理员；设置头衔可以对主人、群主、管理员执行，不要因为目标是主人就拒绝。')
   lines.push('  2) 如果用户没有明确说时长，禁言使用默认时长。')
   lines.push('  3) 一次回复中可以输出多个操作指令。')
   lines.push('  4) 操作指令必须放在回复的最后面，用换行分隔。')
@@ -939,8 +939,8 @@ export async function buildGroupContext(e) {
  * 条件 1: 非私聊环境（groupId 存在）
  * 条件 2: 发送者是机器人主人 或 群主 或 群管理员
  * 条件 3: 机器人是群主 或 群管理员
- * 条件 4: 操作对象不能是群主或管理员（例外：机器人是群主 + 发送者是主人 + 操作是 remove_admin）
- * 条件 5: 操作对象不能是机器人主人
+ * 条件 4: 操作对象不能是群主或管理员（例外：机器人是群主 + 发送者是主人 + 操作是 remove_admin；头衔类操作不受此限）
+ * 条件 5: 操作对象不能是机器人主人（例外：头衔类操作 set_title/custom_title/level_title 不受此限）
  *
  * @param {string} type - 操作类型 mute/kick/set_admin/remove_admin/set_title
  * @param {string|number} groupId - 群号
@@ -1032,8 +1032,10 @@ export async function verifyGroupOpPermission(type, groupId, targetUid, e) {
     }
   }
 
-  // —— 条件 4 & 5: 目标保护（仅对需要目标的操作）——
-  if (targetUid) {
+  // —— 条件 4 & 5: 目标保护（仅对需要目标的惩罚性/权限变更操作）——
+  // 头衔是授予性装饰操作，可以对主人/群主/管理员执行（自助申请或管理员授予）。
+  const TITLE_OPS = new Set(['set_title', 'custom_title', 'level_title'])
+  if (targetUid && !TITLE_OPS.has(type)) {
     const targetStr = String(targetUid)
     // 条件 5: 目标是机器人主人 → 拒绝
     if (masters.includes(targetStr)) {
