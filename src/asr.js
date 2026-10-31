@@ -117,8 +117,8 @@ export function clearAsrCatalogProbe() {
 export function detectAudioFormat(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 12) return null
   const lat = (a, b) => buf.slice(a, b).toString('latin1')
-  // QQ / 微信语音常用 SILK（部分适配器带 0x02 前缀）
-  if (buf[0] === 0x02 && lat(1, 10) === '#!SILK_V3') return { ext: 'silk', mime: 'audio/silk', transcode: true }
+  // QQ / 微信语音常用 SILK（适配器带 0x02 前缀；NTQQ 新版带 0x03 前缀）
+  if ((buf[0] === 0x02 || buf[0] === 0x03) && lat(1, 10) === '#!SILK_V3') return { ext: 'silk', mime: 'audio/silk', transcode: true }
   if (lat(0, 9).startsWith('#!SILK')) return { ext: 'silk', mime: 'audio/silk', transcode: true }
   if (lat(0, 5) === '#!AMR') return { ext: 'amr', mime: 'audio/amr', transcode: true }
   if (lat(0, 3) === 'ID3') return { ext: 'mp3', mime: 'audio/mpeg', transcode: false }
@@ -247,7 +247,10 @@ async function downloadAudio(url, maxBytes) {
     maxBytes,
     headers,
   })
-  if (!result.ok) return null
+  if (!result.ok) {
+    safeLogger.warn(`[ai0-plugin] 语音下载失败 url=${sanitizeLog(String(url).slice(0, 100))}...: ${sanitizeLog(result && result.error ? result.error : 'unknown')}`)
+    return null
+  }
   const resp = result.response
   const buf = Buffer.isBuffer(resp.data) ? resp.data : Buffer.from(resp.data || [])
   if (!buf.length || buf.length > maxBytes) return null
@@ -258,9 +261,23 @@ async function downloadAudio(url, maxBytes) {
  * 把单个语音段解析为音频 Buffer。优先 http(s) URL，其次 base64://，最后本地路径。
  * @returns {Promise<Buffer|null>}
  */
+// CQ 码转义实体解码：适配器下发的 url 常带实体分隔符（如 &分隔符转义），
+// 不解码会让 QQ 多媒体 CDN 返回 400，导致「音频读取失败」且完全无日志。
+function decodeCQEntities(s) {
+  const A = String.fromCharCode(38)
+  return String(s || '')
+    .replace(new RegExp(A + '(amp|#38);', 'gi'), A)
+    .replace(new RegExp(A + '(quot|#34);', 'gi'), '"')
+    .replace(new RegExp(A + '(lt|#60);', 'gi'), '<')
+    .replace(new RegExp(A + '(gt|#62);', 'gi'), '>')
+    .replace(new RegExp(A + '#91;', 'gi'), '[')
+    .replace(new RegExp(A + '#93;', 'gi'), ']')
+    .replace(new RegExp(A + '#44;', 'gi'), ',')
+}
+
 export async function resolveVoiceSegmentBuffer(seg, maxBytes) {
   if (!seg || typeof seg !== 'object') return null
-  const candidates = [seg.url, seg.file, seg.path]
+  const candidates = [seg.url, seg.file, seg.path].map(decodeCQEntities)
   for (const c of candidates) {
     if (typeof c !== 'string' || !c) continue
     if (/^https?:\/\//i.test(c)) {
@@ -281,6 +298,66 @@ export async function resolveVoiceSegmentBuffer(seg, maxBytes) {
 /* -------------------------------------------------------------------------- */
 /*                              ASR 请求                                       */
 /* -------------------------------------------------------------------------- */
+
+/* ---------------------- SILK 解码（silk-wasm） ----------------------- */
+
+let _silkWasm = undefined   // undefined=未探测, null=不可用, 模块对象=可用
+async function loadSilkWasm() {
+  if (_silkWasm !== undefined) return _silkWasm
+  _silkWasm = null
+  try {
+    const m = await import('silk-wasm')
+    if (m && typeof m.decode === 'function') {
+      _silkWasm = m
+      safeLogger.info('[ai0-plugin] silk-wasm 已加载，SILK 语音走 WASM 解码(16kHz)')
+    }
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] silk-wasm 加载失败: ${sanitizeLog(err?.message || err)}`)
+  }
+  return _silkWasm
+}
+
+function pcmToWav(pcm, sampleRate, channels = 1) {
+  const bits = 16
+  const h = Buffer.alloc(44)
+  h.write('RIFF', 0)
+  h.writeUInt32LE(36 + pcm.length, 4)
+  h.write('WAVE', 8)
+  h.write('fmt ', 12)
+  h.writeUInt32LE(16, 16)
+  h.writeUInt16LE(1, 20)
+  h.writeUInt16LE(channels, 22)
+  h.writeUInt32LE(sampleRate, 24)
+  h.writeUInt32LE(sampleRate * channels * (bits >> 3), 28)
+  h.writeUInt16LE(channels * (bits >> 3), 32)
+  h.writeUInt16LE(bits, 34)
+  h.write('data', 36)
+  h.writeUInt32LE(pcm.length, 40)
+  return Buffer.concat([h, pcm])
+}
+
+/** SILK → WAV(16kHz mono s16le)。silk-wasm 的 C 封装硬编码只认 0x02 前缀头
+ *  （decoder.c: strncmp "\x02#!SILK_V3"），QQ NTQQ 新版带 0x03 前缀 → 解码前统一规范化。
+ *  whisper 特征提取要求 16kHz，故解码目标采样率取 16000。 */
+async function silkToWav(buffer) {
+  const silk = await loadSilkWasm()
+  if (!silk) return null
+  try {
+    let data = buffer
+    const head = data.subarray(1, 10).toString('latin1')
+    if ((data[0] === 0x02 || data[0] === 0x03) && head === '#!SILK_V3') {
+      data = Buffer.concat([Buffer.from([0x02]), data.subarray(1)])
+    } else if (data.subarray(0, 9).toString('latin1') === '#!SILK_V3') {
+      data = Buffer.concat([Buffer.from([0x02]), data])
+    }
+    const { data: pcm } = await silk.decode(new Uint8Array(data), 16000)
+    if (!pcm || !pcm.length) return null
+    return pcmToWav(Buffer.from(pcm), 16000)
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] silk 解码异常: ${sanitizeLog(err?.message || err)}`)
+    return null
+  }
+}
 
 function buildTranscriptionForm(fields, fileBuf, filename, mime) {
   const form = new FormData()
@@ -311,12 +388,26 @@ export async function transcribeAudioBuffer(buffer, opts = {}, deps = {}) {
   let format = detectAudioFormat(buffer)
   if (!format) return { ok: false, error: '无法识别的音频格式' }
   if (format.transcode) {
-    const mp3 = await convertToMp3(buffer, format.ext, conf.timeout)
-    if (!mp3) {
-      return { ok: false, error: `${format.ext} 音频需要 ffmpeg 转码，但本机 ffmpeg 不可用或转码失败` }
+    // SILK（QQ/微信语音原生格式）：ffmpeg 无 silk 解码器，优先走 silk-wasm（纯 WASM，已验证）
+    let handled = false
+    if (format.ext === 'silk') {
+      const wav = await silkToWav(buffer)
+      if (wav) {
+        buffer = wav
+        format = { ext: 'wav', mime: 'audio/wav', transcode: false }
+        handled = true
+      } else {
+        safeLogger.warn('[ai0-plugin] silk-wasm 不可用，回退 ffmpeg 转码（大概率失败）')
+      }
     }
-    buffer = mp3
-    format = { ext: 'mp3', mime: 'audio/mpeg', transcode: false }
+    if (!handled) {
+      const mp3 = await convertToMp3(buffer, format.ext, conf.timeout)
+      if (!mp3) {
+        return { ok: false, error: `${format.ext} 音频转码失败：silk-wasm 不可用且 ffmpeg 不支持该格式` }
+      }
+      buffer = mp3
+      format = { ext: 'mp3', mime: 'audio/mpeg', transcode: false }
+    }
   }
 
   const url = `${conf.apiBase}/audio/transcriptions`
@@ -333,6 +424,7 @@ export async function transcribeAudioBuffer(buffer, opts = {}, deps = {}) {
   )
 
   let resp
+  let uploadRetried = false
   try {
     resp = await request('post', url, form, {
       headers: { Authorization: `Bearer ${conf.apiKey}`, Accept: 'application/json' },
@@ -341,7 +433,24 @@ export async function transcribeAudioBuffer(buffer, opts = {}, deps = {}) {
       maxContentLength: 1024 * 1024,
     })
   } catch (err) {
-    return { ok: false, error: sanitizeLog(err?.message || err) }
+    // CDN 偶发掐断新 TLS 握手（钉扎层「未取得对端证书」）：传输层抖动，新建连接重试一次
+    if (err && err.code === 'AI0_OFFICIAL_PIN_MISMATCH' && !uploadRetried) {
+      uploadRetried = true
+      safeLogger.warn('[ai0-plugin] ASR 上传连接被 CDN 掐断，300ms 后重试一次')
+      await new Promise((r) => setTimeout(r, 300))
+      try {
+        resp = await request('post', url, form, {
+          headers: { Authorization: `Bearer ${conf.apiKey}`, Accept: 'application/json' },
+          timeout: conf.timeout,
+          maxBodyLength: conf.maxBytes + 1024 * 1024,
+          maxContentLength: 1024 * 1024,
+        })
+      } catch (err2) {
+        return { ok: false, error: sanitizeLog(err2?.message || err2) }
+      }
+    } else {
+      return { ok: false, error: sanitizeLog(err?.message || err) }
+    }
   }
 
   if (!resp || resp.status < 200 || resp.status >= 300) {
@@ -406,7 +515,10 @@ export async function transcribeVoiceMessage(e, deps = {}) {
   const segs = getVoiceSegments(e)
   if (!segs.length) return { ok: true, texts: [], text: '', errors: [] }
   let conf = deps.config || resolveAsrConfig()
-  if (!conf) return { ok: false, texts: [], text: '', errors: ['语音输入未启用或 ASR 未配置'] }
+  if (!conf) {
+    safeLogger.warn('[ai0-plugin] 语音转写跳过：ASR 配置解析为空（未启用/无密钥/模型目录无 ASR 模型）')
+    return { ok: false, texts: [], text: '', errors: ['语音输入未启用或 ASR 未配置'] }
+  }
   if (!deps.config) conf = await ensureAsrCatalog(conf, deps)
 
   const texts = []
@@ -434,9 +546,11 @@ export async function transcribeVoiceMessage(e, deps = {}) {
       }
       const r = await transcribeAudioBuffer(buf, { config: conf }, deps)
       if (r.ok) {
+        safeLogger.info(`[ai0-plugin] 语音转写成功(第${used}段, 模型=${sanitizeLog(conf.model)}): ${sanitizeLog(r.text.slice(0, 80))}`)
         texts.push(r.text)
         cacheSet(key, r.text)
       } else {
+        safeLogger.warn(`[ai0-plugin] 语音转写失败(第${used}段, 模型=${sanitizeLog(conf.model)}): ${sanitizeLog(r.error)}`)
         texts.push('')
         errors.push(r.error)
       }

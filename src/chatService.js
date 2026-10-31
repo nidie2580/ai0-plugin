@@ -757,6 +757,8 @@ export async function handleChat(e) {
   const hasImageSegs = imageInputEnabled && helper.getImageSegments(e).length > 0
 
   // 语音输入开关：启用时允许"纯语音"消息通过入口守卫，转写后再交给模型
+  if (e?.message?.some?.(seg => seg?.type === 'record' || seg?.type === 'voice')) {
+  }
   const voiceInputEnabled = cfg.get('voiceInput.enabled', true) !== false
   const hasVoiceSegs = voiceInputEnabled && helper.getVoiceSegments(e).length > 0
 
@@ -776,7 +778,7 @@ export async function handleChat(e) {
   }
 
   const groupAtReply = cfg.get('chat.groupAtReply', true)
-  const privateReply = cfg.get('chat.privateReply', true)
+  const privateReply = cfg.get('chat.privateReply', false) === true
   const triggerPrefix = cfg.get('chat.triggerPrefix', []) || []
 
   // 全局AI模式：开启后在指定群内所有消息都回复，不需要@
@@ -874,11 +876,11 @@ export async function handleChat(e) {
       }
       parsed.current.text = helper.replaceVoicePlaceholders(parsed.current.text || text, voice.texts)
     } else {
-      // 纯语音消息转写失败：没有可交给模型的内容，静默跳过（维持旧行为）
-      if (!text && !hasImageSegs) return false
       if (voice && Array.isArray(voice.errors) && voice.errors.length) {
         safeLogger.warn(`[ai0-plugin] 语音转写失败: ${voice.errors.join('; ')}`)
       }
+      // 纯语音消息转写失败：没有可交给模型的内容，跳过（原因已在上条日志记录，不再完全静默）
+      if (!text && !hasImageSegs) return false
     }
   }
 

@@ -618,6 +618,7 @@ export async function chatCompletions(messages, {
 
   let resp
   let toolsFallbackTried = false
+  let pinRetryTried = false
   const doRequest = async () => {
     try {
       return await safeAxiosRequest('post', url, body, {
@@ -636,9 +637,13 @@ export async function chatCompletions(messages, {
       }
       // 当模型开启联网(web:true)却因上游不支持 web_search 工具而失败时，回退为"不联网"重试一次，
       // 保证对话主链路可用（联网是增强项，不应阻塞正常问答）。
-      if (m.web === true && !toolsFallbackTried && body.tools) {
-        toolsFallbackTried = true
-        delete body.tools
+      // 官方域名经 CDN 时偶发新 TLS 握手被掐（钉扎层报「未取得对端证书」）：
+      // 属传输层抖动而非真实 MITM。每次尝试都独立做钉扎校验，重试不放松安全性；
+      // 仅重试一次，真实证书不匹配依然 fail-closed。
+      if (s.code === 'AI0_OFFICIAL_PIN_MISMATCH' && !pinRetryTried) {
+        pinRetryTried = true
+        safeLogger.warn('[ai0-plugin] 官方域名 TLS 握手被 CDN 掐断，300ms 后新建连接重试一次')
+        await new Promise((r) => setTimeout(r, 300))
         return doRequest()
       }
       safeLogger.error(`[ai0-plugin] LLM 调用异常(${sanitizeLog(s.method)} ${sanitizeLog(s.url)}): code=${sanitizeLog(s.code)} message=${sanitizeLog(s.message)}`)
