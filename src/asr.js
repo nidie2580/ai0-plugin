@@ -424,7 +424,7 @@ export async function transcribeAudioBuffer(buffer, opts = {}, deps = {}) {
   )
 
   let resp
-  let uploadRetried = false
+  let uploadRetryCount = 0
   try {
     resp = await request('post', url, form, {
       headers: { Authorization: `Bearer ${conf.apiKey}`, Accept: 'application/json' },
@@ -433,11 +433,12 @@ export async function transcribeAudioBuffer(buffer, opts = {}, deps = {}) {
       maxContentLength: 1024 * 1024,
     })
   } catch (err) {
-    // CDN 偶发掐断新 TLS 握手（钉扎层「未取得对端证书」）：传输层抖动，新建连接重试一次
-    if (err && err.code === 'AI0_OFFICIAL_PIN_MISMATCH' && !uploadRetried) {
-      uploadRetried = true
-      safeLogger.warn('[ai0-plugin] ASR 上传连接被 CDN 掐断，300ms 后重试一次')
-      await new Promise((r) => setTimeout(r, 300))
+    // CDN 偶发掐断新 TLS 握手（钉扎层「未取得对端证书」）：传输层抖动，新建连接最多重试 2 次
+    if (err && err.code === 'AI0_OFFICIAL_PIN_MISMATCH' && uploadRetryCount < 2) {
+      uploadRetryCount += 1
+      const waitMs = uploadRetryCount === 1 ? 300 : 700
+      safeLogger.warn(`[ai0-plugin] ASR 上传连接被 CDN 掐断，${waitMs}ms 后第${uploadRetryCount}次重试`)
+      await new Promise((r) => setTimeout(r, waitMs))
       try {
         resp = await request('post', url, form, {
           headers: { Authorization: `Bearer ${conf.apiKey}`, Accept: 'application/json' },

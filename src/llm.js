@@ -618,7 +618,7 @@ export async function chatCompletions(messages, {
 
   let resp
   let toolsFallbackTried = false
-  let pinRetryTried = false
+  let pinRetryCount = 0
   const doRequest = async () => {
     try {
       return await safeAxiosRequest('post', url, body, {
@@ -639,11 +639,12 @@ export async function chatCompletions(messages, {
       // 保证对话主链路可用（联网是增强项，不应阻塞正常问答）。
       // 官方域名经 CDN 时偶发新 TLS 握手被掐（钉扎层报「未取得对端证书」）：
       // 属传输层抖动而非真实 MITM。每次尝试都独立做钉扎校验，重试不放松安全性；
-      // 仅重试一次，真实证书不匹配依然 fail-closed。
-      if (s.code === 'AI0_OFFICIAL_PIN_MISMATCH' && !pinRetryTried) {
-        pinRetryTried = true
-        safeLogger.warn('[ai0-plugin] 官方域名 TLS 握手被 CDN 掐断，300ms 后新建连接重试一次')
-        await new Promise((r) => setTimeout(r, 300))
+      // 最多重试 2 次（递增退避），真实证书不匹配依然 fail-closed。
+      if (s.code === 'AI0_OFFICIAL_PIN_MISMATCH' && pinRetryCount < 2) {
+        pinRetryCount += 1
+        const waitMs = pinRetryCount === 1 ? 300 : 700
+        safeLogger.warn(`[ai0-plugin] 官方域名 TLS 握手被 CDN 掐断，${waitMs}ms 后第${pinRetryCount}次重试`)
+        await new Promise((r) => setTimeout(r, waitMs))
         return doRequest()
       }
       safeLogger.error(`[ai0-plugin] LLM 调用异常(${sanitizeLog(s.method)} ${sanitizeLog(s.url)}): code=${sanitizeLog(s.code)} message=${sanitizeLog(s.message)}`)
