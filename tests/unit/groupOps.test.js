@@ -537,3 +537,110 @@ describe('RECALL 开关：allowRecall=false 时拒绝', () => {
     assert.match(r.results[0].msg, /撤回功能未启用/)
   })
 })
+
+describe('TITLE: 头衔类操作不受主人/群主/管理员目标保护拦截', () => {
+  const MASTER_UID = '198635967'
+  const prevConfig = globalThis.Config
+
+  before(() => {
+    globalThis.Config = { master: [MASTER_UID] }
+  })
+  after(() => {
+    if (prevConfig === undefined) delete globalThis.Config
+    else globalThis.Config = prevConfig
+  })
+
+  function setupWithMaster(extra = {}) {
+    return setupMockBot({
+      botRole: 'owner',
+      requesterRole: 'owner',
+      members: {
+        [MASTER_UID]: { role: 'member', nickname: '机器人主人', user_id: MASTER_UID }
+      },
+      ...extra
+    })
+  }
+
+  it('主人给自己设头衔 → 放行', async () => {
+    const { gid, calls } = setupWithMaster()
+    const e = makeEvent(gid, MASTER_UID)
+    const r = await groupOps.parseAndExecuteActions(`[action:set_title:${MASTER_UID}:...]`, gid, e)
+    assert.equal(r.results[0].ok, true, '主人自助申请头衔应成功')
+    assert.equal(r.results[0].msg, `已为 ${MASTER_UID} 设置头衔：...`)
+    assert.ok(calls.some((c) => c.type === 'setTitle' && c.uid === MASTER_UID && c.title === '...'))
+  })
+
+  it('群主给主人设头衔 → 放行', async () => {
+    const { gid, requesterUid, calls } = setupWithMaster()
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions(`[action:set_title:${MASTER_UID}:大佬]`, gid, e)
+    assert.equal(r.results[0].ok, true, '头衔是授予性操作，可以对主人执行')
+    assert.ok(calls.some((c) => c.type === 'setTitle' && c.uid === MASTER_UID && c.title === '大佬'))
+  })
+
+  it('普通群员给主人设头衔 → 拒绝（无权给他人设）', async () => {
+    const { gid } = setupWithMaster()
+    const e = makeEvent(gid, '66666')
+    const r = await groupOps.parseAndExecuteActions(`[action:set_title:${MASTER_UID}:大佬]`, gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /发送者无权限/)
+  })
+
+  it('踢出主人 → 仍拦截', async () => {
+    const { gid, requesterUid, calls } = setupWithMaster()
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions(`[action:kick:${MASTER_UID}]`, gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /是机器人主人，不可操作/)
+    assert.equal(calls.filter((c) => c.type === 'kickMember').length, 0)
+  })
+
+  it('禁言主人 → 仍拦截', async () => {
+    const { gid, requesterUid } = setupWithMaster()
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions(`[action:mute:${MASTER_UID}:600]`, gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /是机器人主人，不可操作/)
+  })
+
+  it('拉黑主人 → 仍拦截', async () => {
+    const { gid, requesterUid } = setupWithMaster()
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions(`[action:blacklist:${MASTER_UID}:add]`, gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /是机器人主人，不可操作/)
+  })
+
+  it('给管理员设头衔 → 放行', async () => {
+    const { gid, requesterUid, calls } = setupWithMaster()
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:set_title:77777:管理头衔]', gid, e)
+    assert.equal(r.results[0].ok, true, '头衔可以对管理员执行')
+    assert.ok(calls.some((c) => c.type === 'setTitle' && c.uid === '77777'))
+  })
+
+  it('踢出管理员 → 仍拦截', async () => {
+    const { gid, requesterUid } = setupWithMaster()
+    const e = makeEvent(gid, requesterUid)
+    const r = await groupOps.parseAndExecuteActions('[action:kick:77777]', gid, e)
+    assert.equal(r.results[0].ok, false)
+    assert.match(r.results[0].msg, /受保护/)
+  })
+
+  it('主人给自己设自定义头衔 → 放行', async () => {
+    const { gid, calls } = setupWithMaster()
+    const e = makeEvent(gid, MASTER_UID)
+    const r = await groupOps.parseAndExecuteActions(`[action:custom_title:${MASTER_UID}:...]`, gid, e)
+    assert.equal(r.results[0].ok, true)
+    assert.ok(calls.some((c) => c.type === 'setTitle' && c.uid === MASTER_UID && c.title === '...'))
+  })
+
+  it('提示词明确头衔可以对主人执行', async () => {
+    const { gid, requesterUid } = setupWithMaster()
+    const e = makeEvent(gid, requesterUid)
+    const ctx = await groupOps.buildGroupContext(e)
+    assert.ok(ctx)
+    assert.match(ctx, /设置头衔（set_title\/custom_title\/level_title）不受此限制/)
+    assert.match(ctx, /头衔是授予性操作，可以对主人\/群主\/管理员执行/)
+  })
+})
