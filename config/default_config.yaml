@@ -344,6 +344,10 @@ agent:
   extraAllowedCommands: []
   # 额外禁止的命令（追加黑名单，正则表达式，如：["gcc"]）
   extraDeniedPatterns: []
+  # Agent 工具开关（网页搜索/访问 + 浏览器操作；命令执行不受此开关影响）
+  tools:
+    web: true
+    browser: true
 
 # 系统提示词
 system:

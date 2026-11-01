@@ -8,6 +8,7 @@ import * as llm from './llm.js'
 import * as securityLog from './securityLog.js'
 import { isPrivateIp, isAllowedOutboundUrl } from './security.js'
 import { safeLogger, sanitizeLog } from './globals.js'
+import * as agentTools from './agentTools.js'
 
 /**
  * AI0-Plugin Agent 能力模块
@@ -986,7 +987,9 @@ export function buildAgentContext() {
     '支持 curl / wget / ls / cat / grep / find / sed / mkdir / touch / cp / mv / rm（禁止 rm -rf）等常规命令（node/python/awk 等解释器与 git 默认禁用；所有路径参数必须落在工作区内）。',
     'curl/wget 仅可访问公网 http/https：禁止内网/本机/元数据地址，且不跟随重定向（遇 3xx 请直接用最终 URL 重试）。',
     '每次只能执行一条命令：禁止管道 / && / ; / 重定向；命令不经过 /bin/sh。',
-    '禁止 sudo / shutdown / reboot / mkfs / mount / chown / ssh / scp / nc / chmod（除+x）/ 命令替换 / 写入系统目录等危险操作。禁止修改 AGENTS.md。'
+    '禁止 sudo / shutdown / reboot / mkfs / mount / chown / ssh / scp / nc / chmod（除+x）/ 命令替换 / 写入系统目录等危险操作。禁止修改 AGENTS.md。',
+    '',
+    agentTools.buildToolsPromptSection()
   ].join('\n')
 }
 
@@ -1315,6 +1318,15 @@ export async function runAgentLoop({ task, maxRounds, modelKey = null, signal = 
     messages.push({ role: 'assistant', content: text })
     const outputs = []
     for (const cmd of commands) {
+      // 内置工具优先（search/fetch/browser/help），不命中则回退沙箱命令
+      const toolR = await agentTools.tryRunAgentTool(cmd, { signal: ac.signal })
+      if (toolR) {
+        resetHardTimer()
+        logs.push({ cmd, ok: toolR.ok, code: toolR.code, costMs: toolR.costMs, output: toolR.detail, tool: true })
+        emitAudit('agent_tool', { action: cmd, ok: toolR.ok, reason: toolR.ok ? undefined : String(toolR.error || '').slice(0, 200) })
+        outputs.push(formatResult(toolR))
+        continue
+      }
       const check = checkCommand(cmd)
       if (!check.ok) {
         logs.push({ cmd, ok: false, reason: check.reason })
@@ -1351,6 +1363,10 @@ export async function parseAndExecuteAgentAction(replyText) {
   if (!commands.length) return null
   const cmd = commands[0]
   const cleanText = stripAgentActionTags(replyText)
+  const toolR = await agentTools.tryRunAgentTool(cmd)
+  if (toolR) {
+    return { cleanText, ok: toolR.ok, cmd, result: formatResult(toolR) }
+  }
   const check = checkCommand(cmd)
   if (!check.ok) {
     return { cleanText, ok: false, cmd, result: `命令被安全策略拒绝：${check.reason}` }
@@ -1443,6 +1459,16 @@ export async function continueAgentInHistory({ history, assistantText, modelKey 
     const outputs = []
     for (const cmd of commands) {
       if (executed >= cap) break
+      // 内置工具优先（search/fetch/browser/help），不命中则回退沙箱命令
+      const toolR = await agentTools.tryRunAgentTool(cmd, { signal: ac.signal })
+      if (toolR) {
+        resetHardTimer()
+        logs.push({ cmd, ok: toolR.ok, code: toolR.code, costMs: toolR.costMs, output: toolR.detail, tool: true })
+        emitAudit('agent_tool', { action: cmd, ok: toolR.ok, reason: toolR.ok ? undefined : String(toolR.error || '').slice(0, 200) })
+        outputs.push(formatResult(toolR))
+        executed++
+        continue
+      }
       const check = checkCommand(cmd)
       if (!check.ok) {
         logs.push({ cmd, ok: false, reason: check.reason })
