@@ -85,6 +85,12 @@ chat:
   # 对话过期时间（毫秒），-1 为永不过期
   sessionTimeout: 1800000
 
+  # --- 艾特群成员 ---
+  # 允许 AI 在回复中用 @昵称 / @QQ号 真正艾特群成员；无法识别的 @ 原样保留为文本
+  atMember:
+    enabled: true
+    maxPerMessage: 5
+
   # --- 上下文增强（默认全部开启，可单独关闭） ---
   # 是否注入"引用消息"（QQ回复/引用按钮选中的那条消息）作为上下文
   includeQuote: true

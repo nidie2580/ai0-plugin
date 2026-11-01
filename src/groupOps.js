@@ -1084,6 +1084,42 @@ function roleLabel(role) {
  * 返回一段可直接展示给用户的"昵称(QQ) · 角色"清单；可选关键词过滤（args[0]）。
  * 失败返回带提示的字符串（由调用方包成 ok:true 的结果，避免打断主流程）。
  */
+// 艾特解析用的群成员列表（{qq, name}），60 秒缓存，失败返回空数组
+const _memberAtCache = new Map()
+export async function getGroupMembersNormalized(groupId) {
+  const key = String(groupId || '')
+  if (!key) return []
+  const hit = _memberAtCache.get(key)
+  if (hit && Date.now() - hit.at < 60000) return hit.list
+  const list = []
+  try {
+    const group = resolveGroup(key)
+    if (group) {
+      const params = { groupId: key }
+      let map = null
+      if (typeof group.getMemberMap === 'function') {
+        const r = await qqCandidate('group.getMemberMap', params, () => Promise.resolve(group.getMemberMap()))
+        if (r !== QQ_CALL_TIMED_OUT && r.value) map = r.value
+      }
+      if (!map) {
+        const arr = group?.info?.members || group?.memberList || group?.members || []
+        if (Array.isArray(arr) && arr.length) map = arr
+      }
+      let members = []
+      if (map instanceof Map) members = [...map.values()]
+      else if (Array.isArray(map)) members = map
+      else if (map && typeof map === 'object') members = Object.values(map)
+      for (const m of members) {
+        const qq = String(m?.user_id ?? m?.uin ?? m?.uid ?? m?.qq ?? m?.userId ?? '')
+        const name = String(m?.card ?? m?.nickname ?? m?.name ?? m?.nick ?? '').trim()
+        if (qq && name) list.push({ qq, name })
+      }
+    }
+  } catch (_) {}
+  _memberAtCache.set(key, { at: Date.now(), list })
+  return list
+}
+
 async function getMemberListSummary(groupId, filter) {
   try {
     if (!groupId) return '无法获取群信息'

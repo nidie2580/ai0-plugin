@@ -16,6 +16,7 @@ import * as musicService from './musicService.js'
 import * as botIdentity from './botIdentity.js'
 import * as asr from './asr.js'
 import * as groupContext from './groupContext.js'
+import { parseMemberMentions } from './memberAt.js'
 import * as memoryStore from './memory.js'
 import { INJECT_BEGIN, INJECT_END, scrubSensitiveTokens } from './helper.js'
 
@@ -1161,6 +1162,14 @@ export async function handleChat(e) {
   const extraContext = [botIdentityContext, chatHistoryContext, memoryContext, identityContext, groupContext, imageContext, videoContext, musicContext, agentContext].filter(Boolean).join('\n\n')
   let finalSysPrompt = (extraContext ? basePrompt + '\n\n' + extraContext : basePrompt)
 
+  // 艾特群成员能力说明（群聊且开启时）
+  if (isGroup && cfg.get('chat.atMember.enabled', true) !== false) {
+    const atMax = Number(cfg.get('chat.atMember.maxPerMessage', 5)) || 5
+    finalSysPrompt = finalSysPrompt +
+      '\n\n【艾特群成员】需要点名提醒某位群成员时，直接在回复中写 @昵称 或 @QQ号（会发送成真正的艾特），每次最多 ' + atMax + ' 个；' +
+      '不要滥用，只在确实需要提醒/呼叫某人时使用。'
+  }
+
   // 多模型互聊：给所有参与模型注入"机器人消息 [*] 标记协议"，让它们能辨认并选择回应/忽略彼此发言。
   const mmCfg = cfg.get('chat.multiModel', {}) || {}
   const multiModelEnabled = mmCfg.enabled === true
@@ -1636,7 +1645,25 @@ export async function handleChat(e) {
     finalText += `\n\n—— ${modelName}`
   }
 
-  await helper.replyText(e, finalText)
+  // 群聊：把 AI 回复中的 @昵称 / @QQ号 转成真实艾特（长度可控时才走段消息，超长仍走原分段逻辑）
+  let mentionedSent = false
+  if (isGroup && finalText && finalText.includes('@') &&
+      cfg.get('chat.atMember.enabled', true) !== false && finalText.length <= 1000) {
+    try {
+      const members = await groupOps.getGroupMembersNormalized(groupId)
+      const segs = parseMemberMentions(finalText, members, {
+        selfId: e?.self_id,
+        max: Number(cfg.get('chat.atMember.maxPerMessage', 5)) || 5,
+      })
+      if (segs && segs.length) {
+        await e.reply(segs)
+        mentionedSent = true
+      }
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 艾特群成员解析失败: ${err.message}`)
+    }
+  }
+  if (!mentionedSent) await helper.replyText(e, finalText)
   if (isGroup && finalText) {
     try { groupContext.recordBotMessage({ groupId, text: finalText }) } catch (_) {}
   }
