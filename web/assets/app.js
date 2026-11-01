@@ -382,6 +382,7 @@ if (route === 'dashboard') {
 
     // chat
     $('#chat_groupAtReply').value = String((((resp.config.chat && resp.config.chat.groupAtReply)) != null ? ((resp.config.chat && resp.config.chat.groupAtReply)) : (true)))
+    $('#chat_autoAtSender').value = String((((resp.config.chat && resp.config.chat.autoAtSender)) != null ? ((resp.config.chat && resp.config.chat.autoAtSender)) : (false)))
     $('#chat_privateReply').value = String((((resp.config.chat && resp.config.chat.privateReply)) != null ? ((resp.config.chat && resp.config.chat.privateReply)) : (true)))
     $('#chat_globalAI').value = String((((resp.config.chat && resp.config.chat.globalAI)) != null ? ((resp.config.chat && resp.config.chat.globalAI)) : (false)))
     $('#chat_globalAIGroups').value = ((resp.config.chat && resp.config.chat.globalAIGroups) || []).join(',')
@@ -552,6 +553,7 @@ if (route === 'dashboard') {
     if (!Number.isInteger(delibRounds) || delibRounds < 2 || delibRounds > 8) delibRounds = 3
     c.chat = Object.assign({}, prevChat, {
       groupAtReply: $('#chat_groupAtReply').value === 'true',
+      autoAtSender: $('#chat_autoAtSender').value === 'true',
       privateReply: $('#chat_privateReply').value === 'true',
       globalAI: $('#chat_globalAI').value === 'true',
       globalAIGroups: splitCsvInt($('#chat_globalAIGroups').value),

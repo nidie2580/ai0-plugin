@@ -160,6 +160,7 @@ model:
 # ========== 对话设置 ==========
 chat:
   groupAtReply: true        # 是否响应群聊 @
+  autoAtSender: false       # AI 回复前自动艾特发送者(仅群聊)
   privateReply: true        # 是否响应私聊
   triggerPrefix: []         # 自定义触发前缀,如 ["#ai ", "小爱"]
   contextSize: 10           # 记忆的上下文对话轮数

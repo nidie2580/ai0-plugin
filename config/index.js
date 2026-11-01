@@ -74,6 +74,8 @@ bot:
 chat:
   # 是否开启群聊艾特回复
   groupAtReply: true
+  # 是否在 AI 回复正文前自动艾特本条消息的发送者（仅群聊生效，私聊无需艾特）
+  autoAtSender: false
   # 是否开启私聊回复
   privateReply: true
   # 触发前缀（不需要艾特直接触发），留空则只有艾特/私聊触发

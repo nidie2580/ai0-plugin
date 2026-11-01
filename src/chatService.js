@@ -743,6 +743,49 @@ export function applyAtUserText(history, atUserText) {
   })
 }
 
+/* -------------------------------------------------------------------------- */
+/*                AI 回复前自动艾特发送者（chat.autoAtSender）                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 「AI 回复前自动艾特发送者」：开关开启 + 群聊 + 发送者有效（且不是机器人自己）时，
+ * 返回一条真实的 at 消息段；否则返回 null。只做判定与段构造，不负责发送。
+ */
+export function buildAtSenderSegment(e, userId) {
+  if (cfg.get('chat.autoAtSender', false) !== true) return null
+  if (!e || !e.group_id) return null
+  const uid = String(userId ?? helper.getUserId?.(e) ?? '').trim()
+  if (!uid) return null
+  if (helper.isSelfId?.(e, uid)) return null
+  return { type: 'at', qq: uid }
+}
+
+/**
+ * 发送 AI 文本回复：开启「自动艾特发送者」时把 at 段拼在正文最前。
+ * - 传入 segments（如艾特群成员解析出的段）：at 段置顶后原样发送
+ * - 短正文（<=1000 字，与艾特群成员的段消息阈值一致）：at + 正文合并为一条段消息
+ * - 超长正文：先单独发出 at 段，正文仍按原有分段/合并转发逻辑发送
+ * 开关关闭时行为与 helper.replyText / e.reply 完全一致。
+ */
+async function sendAiReplyWithAtSender(e, text, userId, { segments = null, options = {} } = {}) {
+  const atSeg = buildAtSenderSegment(e, userId)
+  if (!atSeg) {
+    if (Array.isArray(segments) && segments.length) return e.reply(segments)
+    return helper.replyText(e, text, options)
+  }
+  if (Array.isArray(segments) && segments.length) {
+    return e.reply([atSeg, { type: 'text', text: ' ' }, ...segments])
+  }
+  const s = String(text ?? '')
+  if (s.length <= 1000) {
+    return e.reply([atSeg, { type: 'text', text: s ? ' ' + s : '' }])
+  }
+  try { await e.reply([atSeg]) } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 自动艾特发送者发送失败: ${err.message}`)
+  }
+  return helper.replyText(e, s, options)
+}
+
 export async function handleChat(e) {
   helper.normalizeMessage(e)
   // 自回复防护：机器人自己发的消息、message_sent 事件直接跳过
@@ -1075,7 +1118,7 @@ export async function handleChat(e) {
         safeLogger.info(
           `[ai0-plugin] 身份接口未返回数据，命中确定性兜底(kind=${fallback.kind})：群=${groupId} 用户=${userId} 原文=${pureText.slice(0, 60)}`
         )
-          await helper.replyText(e, fallback.reply)
+          await sendAiReplyWithAtSender(e, fallback.reply, userId)
           return true
       }
     } catch (err) {
@@ -1461,7 +1504,7 @@ export async function handleChat(e) {
           if (imgResult.ok) {
             // 先发送文本回复
             if (replyText.trim()) {
-              await helper.replyText(e, replyText)
+              await sendAiReplyWithAtSender(e, replyText, userId)
             }
             // 再发送图片
             if (imgResult.imageBuffer) {
@@ -1498,7 +1541,7 @@ export async function handleChat(e) {
           replyText = vidResult.cleanText
           if (vidResult.ok) {
             if (replyText.trim()) {
-              await helper.replyText(e, replyText)
+              await sendAiReplyWithAtSender(e, replyText, userId)
             }
             if (vidResult.videoBuffer) {
               try {
@@ -1531,7 +1574,7 @@ export async function handleChat(e) {
           if (musicResult.ok) {
             // 先发送 AI 正文（若有）；卡片/降级文本已在 parseAndExecuteMusicAction 内部发送
             if (replyText.trim()) {
-              await helper.replyText(e, replyText)
+              await sendAiReplyWithAtSender(e, replyText, userId)
             }
             const tag = musicResult.cardSent ? '已发送音乐卡片' : (musicResult.sentText ? '已为你点歌（文本分享）' : '已为你点歌')
             const base = historyText.trim()
@@ -1658,14 +1701,14 @@ export async function handleChat(e) {
         allowAtAll: cfg.get('chat.atMember.allowAtAll', true) !== false,
       })
       if (segs && segs.length) {
-        await e.reply(segs)
+        await sendAiReplyWithAtSender(e, finalText, userId, { segments: segs })
         mentionedSent = true
       }
     } catch (err) {
       safeLogger.warn(`[ai0-plugin] 艾特群成员解析失败: ${err.message}`)
     }
   }
-  if (!mentionedSent) await helper.replyText(e, finalText)
+  if (!mentionedSent) await sendAiReplyWithAtSender(e, finalText, userId)
   if (isGroup && finalText) {
     try { groupContext.recordBotMessage({ groupId, text: finalText }) } catch (_) {}
   }

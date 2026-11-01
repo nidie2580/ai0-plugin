@@ -950,6 +950,10 @@ export function createApp() {
       if (chat.maxSessionsPerUser != null && (typeof chat.maxSessionsPerUser !== 'number' || chat.maxSessionsPerUser < 1 || chat.maxSessionsPerUser > 50)) {
         return res.json({ ok: false, msg: 'chat.maxSessionsPerUser 必须为 1-50 之间的数字' })
       }
+      // AI 回复前自动艾特发送者：仅布尔开关
+      if (chat.autoAtSender != null && typeof chat.autoAtSender !== 'boolean') {
+        return res.json({ ok: false, msg: 'chat.autoAtSender 必须为布尔值' })
+      }
       // 防 AI 互聊无限循环：总开关 + 阈值，网页端可调
       const lg = chat.loopGuard
       if (lg) {
