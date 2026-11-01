@@ -15,10 +15,11 @@ import * as deliberate from './deliberate.js'
 import * as musicService from './musicService.js'
 import * as botIdentity from './botIdentity.js'
 import * as asr from './asr.js'
-import * as groupContext from './groupContext.js'
+import * as groupCtx from './groupContext.js'
 import { parseMemberMentions } from './memberAt.js'
 import * as memoryStore from './memory.js'
 import { INJECT_BEGIN, INJECT_END, scrubSensitiveTokens } from './helper.js'
+import * as idcHandoff from './idcHandoff.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
 // Web 后台保存/返回的原始模板不做替换，保证编辑框里始终看到 <master> 等标记。
@@ -802,7 +803,7 @@ export async function handleChat(e) {
   // 放在触发判定之前 → 无论是否触发 AI 回复都会记录，保证上下文完整。
   if (isGroup && text) {
     try {
-      groupContext.recordGroupMessage({
+      groupCtx.recordGroupMessage({
         groupId,
         userId,
         userName: e?.sender?.nickname || String(userId),
@@ -1190,12 +1191,12 @@ export async function handleChat(e) {
   let chatHistoryContext = null
   let memoryContext = null
   if (isGroup) {
-    try { chatHistoryContext = await groupContext.getRecentContextBlock(groupId) } catch (err) {
+    try { chatHistoryContext = await groupCtx.getRecentContextBlock(groupId) } catch (err) {
       safeLogger.warn(`[ai0-plugin] 群上下文注入失败: ${err.message}`)
     }
     try { memoryContext = memoryStore.recallBlock(groupId, userId, pureText || text, true) } catch (_) {}
     // 惰性维护任务：过期压缩 / 前一天自动记忆摘要（fire-and-forget，不阻塞回复）
-    try { groupContext.maybeCompress(groupId).catch(() => {}) } catch (_) {}
+    try { groupCtx.maybeCompress(groupId).catch(() => {}) } catch (_) {}
     try { memoryStore.maybeAutoDigest(groupId).catch(() => {}) } catch (_) {}
   }
 
@@ -1212,6 +1213,14 @@ export async function handleChat(e) {
       '\n\n【艾特群成员】需要点名提醒某位群成员时，直接在回复中写 @昵称 或 @QQ号（会发送成真正的艾特），每次最多 ' + atMax + ' 个；' +
       '需要提醒群里所有人时写 @全体成员（等价写法 @all，都会被发送成真正的"艾特全体成员"）。' +
       '不要滥用，只在确实需要提醒/呼叫某人或通知全员时使用。'
+  }
+
+  // 私聊：IDC 业务问题交接给 IDC 客服（AI 判断 + action 交接，替代此前"私聊全禁"的硬编码）
+  if (!isGroup && cfg.get('chat.idcHandoff.enabled', true) !== false) {
+    finalSysPrompt = finalSysPrompt +
+      '\n\n【IDC 客服交接】如果用户的问题属于 IDC 云服务业务（服务器/实例/账单/续费/退款/工单/实名认证/绑定账号/控制台/机房网络/备案等），' +
+      '不要自行回答或编造业务信息，直接在回复中输出 [action:idc:handoff]（系统会自动把会话转接给 IDC 客服）；' +
+      '普通闲聊、技术问答、天气/新闻等照常回答。'
   }
 
   // 多模型互聊：给所有参与模型注入"机器人消息 [*] 标记协议"，让它们能辨认并选择回应/忽略彼此发言。
@@ -1685,6 +1694,20 @@ export async function handleChat(e) {
 
   // 默认只输出 AI 纯回复，不加任何固定后缀。想追加模型名标签可在 config.yaml 里 response.showModelTag: true
   let finalText = replyText || '（没有产生回复内容）'
+
+  // IDC 客服交接：AI 判断为 IDC 业务 → 建立客服会话（后续消息由 idc-assistant 接管）
+  if (!isGroup && /\[action:idc:handoff\]/i.test(finalText) && cfg.get('chat.idcHandoff.enabled', true) !== false) {
+    finalText = finalText.replace(/\[action:idc:handoff\]/gi, '').trim()
+    try {
+      const hr = await idcHandoff.handoffToIdc({ qq: userId, userName: e?.sender?.nickname || '' })
+      finalText = (finalText ? finalText + '\n\n' : '') + (hr.ok
+        ? '已为你转接 IDC 客服，直接把问题发过来就行，客服马上处理～'
+        : '这个问题建议找 IDC 客服处理：发送「客服」两个字即可接入。')
+    } catch (err) {
+      safeLogger.warn(`[ai0-plugin] IDC 交接异常: ${err.message}`)
+      finalText = (finalText ? finalText + '\n\n' : '') + '这个问题建议找 IDC 客服处理：发送「客服」两个字即可接入。'
+    }
+  }
   if (cfg.get('response.showModelTag', false) && modelName) {
     finalText += `\n\n—— ${modelName}`
   }
@@ -1710,7 +1733,7 @@ export async function handleChat(e) {
   }
   if (!mentionedSent) await sendAiReplyWithAtSender(e, finalText, userId)
   if (isGroup && finalText) {
-    try { groupContext.recordBotMessage({ groupId, text: finalText }) } catch (_) {}
+    try { groupCtx.recordBotMessage({ groupId, text: finalText }) } catch (_) {}
   }
   return true
   } finally {
