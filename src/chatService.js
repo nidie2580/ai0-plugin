@@ -15,6 +15,8 @@ import * as deliberate from './deliberate.js'
 import * as musicService from './musicService.js'
 import * as botIdentity from './botIdentity.js'
 import * as asr from './asr.js'
+import * as groupContext from './groupContext.js'
+import * as memoryStore from './memory.js'
 import { INJECT_BEGIN, INJECT_END, scrubSensitiveTokens } from './helper.js'
 
 // 系统提示词动态变量：仅在"发送给模型的最终 prompt"中替换占位符；
@@ -752,6 +754,19 @@ export async function handleChat(e) {
   const text = helper.getMessageText(e)
   const isGroup = !!groupId
 
+  // 群聊上下文记录：所有经过本插件的消息进 7 天滚动存储（原文 + 到期压缩摘要）。
+  // 放在触发判定之前 → 无论是否触发 AI 回复都会记录，保证上下文完整。
+  if (isGroup && text) {
+    try {
+      groupContext.recordGroupMessage({
+        groupId,
+        userId,
+        userName: e?.sender?.nickname || String(userId),
+        text,
+      })
+    } catch (_) {}
+  }
+
   // 图片输入开关：启用时允许"纯图片"消息通过入口守卫（正文为空但有图片段也能进入处理链路）
   const imageInputEnabled = cfg.get('imageInput.enabled', true) !== false
   const hasImageSegs = imageInputEnabled && helper.getImageSegments(e).length > 0
@@ -1127,10 +1142,23 @@ export async function handleChat(e) {
     safeLogger.warn(`[ai0-plugin] 构建机器人身份上下文失败: ${err.message}`)
   }
 
+  // 群聊 7 天上下文（原文+压缩摘要）与长期记忆注入
+  let chatHistoryContext = null
+  let memoryContext = null
+  if (isGroup) {
+    try { chatHistoryContext = await groupContext.getRecentContextBlock(groupId) } catch (err) {
+      safeLogger.warn(`[ai0-plugin] 群上下文注入失败: ${err.message}`)
+    }
+    try { memoryContext = memoryStore.recallBlock(groupId, userId, pureText || text, true) } catch (_) {}
+    // 惰性维护任务：过期压缩 / 前一天自动记忆摘要（fire-and-forget，不阻塞回复）
+    try { groupContext.maybeCompress(groupId).catch(() => {}) } catch (_) {}
+    try { memoryStore.maybeAutoDigest(groupId).catch(() => {}) } catch (_) {}
+  }
+
   // 合并所有上下文到 system prompt（身份信息放最前面，让 AI 优先记住真实数据）
   // 动态变量在"发送前的最终 prompt"处替换：Web 后台保存的原始模板保持不变
   const basePrompt = resolvePromptVars(sysPrompt, e)
-  const extraContext = [botIdentityContext, identityContext, groupContext, imageContext, videoContext, musicContext, agentContext].filter(Boolean).join('\n\n')
+  const extraContext = [botIdentityContext, chatHistoryContext, memoryContext, identityContext, groupContext, imageContext, videoContext, musicContext, agentContext].filter(Boolean).join('\n\n')
   let finalSysPrompt = (extraContext ? basePrompt + '\n\n' + extraContext : basePrompt)
 
   // 多模型互聊：给所有参与模型注入"机器人消息 [*] 标记协议"，让它们能辨认并选择回应/忽略彼此发言。
@@ -1609,6 +1637,9 @@ export async function handleChat(e) {
   }
 
   await helper.replyText(e, finalText)
+  if (isGroup && finalText) {
+    try { groupContext.recordBotMessage({ groupId, text: finalText }) } catch (_) {}
+  }
   return true
   } finally {
     releaseChatInflight()

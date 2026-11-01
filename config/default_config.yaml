@@ -298,6 +298,24 @@ voiceInput:
     # 可选提示词：补充专有名词等上下文
     prompt: ""
 
+# 群聊上下文：记录群消息，注入近 N 天原文；更早的按天压缩成摘要（惰性，每天一批）
+groupContext:
+  enabled: true
+  days: 7                    # 原文保留天数
+  maxInjectMessages: 80      # 单次注入的原文条数上限
+  maxInjectChars: 5000       # 单次注入的原文总字数上限
+  summaryMaxChars: 2500      # 历史摘要注入上限
+  storeMaxBytes: 1572864     # 单群原文存储上限(1.5MB)，超出淘汰最旧
+
+# 长期记忆（类 Minis：每日日志 + 关键词检索 + 全局记忆）
+memory:
+  enabled: true
+  autoDigest: true           # 每天把前一天的群聊自动提取成记忆条目
+  digestHour: 4              # 摘要允许触发的最早小时（惰性）
+  recentDays: 3              # 注入最近几天的记忆
+  maxInjectChars: 1600       # 记忆注入总字数上限
+  searchHits: 6              # 关键词检索最多注入条数
+
 # Agent 能力设置（AI 在受控沙箱工作区执行命令完成任务，仅主人可触发）
 agent:
   # 是否启用 Agent 能力。默认关闭（P0 安全策略）：首次安装需主人手动开启。
