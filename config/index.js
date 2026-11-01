@@ -84,6 +84,15 @@ chat:
   maxSessionsPerUser: 3
   # 对话过期时间（毫秒），-1 为永不过期
   sessionTimeout: 1800000
+
+  # --- 艾特群成员 ---
+  # 允许 AI 在回复中用 @昵称 / @QQ号 真正艾特群成员；无法识别的 @ 原样保留为文本
+  atMember:
+    enabled: true
+    maxPerMessage: 5
+    # 允许 AI 用 @全体成员 / @all 真正艾特全体成员（每条回复最多生效 1 次）
+    allowAtAll: true
+
   # 私聊速率限制：同一用户在窗口内最多回复 N 次，超出则静默跳过（防刷 API）
   privateRateLimit:
     enabled: true

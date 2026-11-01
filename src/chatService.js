@@ -1167,7 +1167,8 @@ export async function handleChat(e) {
     const atMax = Number(cfg.get('chat.atMember.maxPerMessage', 5)) || 5
     finalSysPrompt = finalSysPrompt +
       '\n\n【艾特群成员】需要点名提醒某位群成员时，直接在回复中写 @昵称 或 @QQ号（会发送成真正的艾特），每次最多 ' + atMax + ' 个；' +
-      '不要滥用，只在确实需要提醒/呼叫某人时使用。'
+      '需要提醒群里所有人时写 @全体成员（等价写法 @all，都会被发送成真正的"艾特全体成员"）。' +
+      '不要滥用，只在确实需要提醒/呼叫某人或通知全员时使用。'
   }
 
   // 多模型互聊：给所有参与模型注入"机器人消息 [*] 标记协议"，让它们能辨认并选择回应/忽略彼此发言。
@@ -1654,6 +1655,7 @@ export async function handleChat(e) {
       const segs = parseMemberMentions(finalText, members, {
         selfId: e?.self_id,
         max: Number(cfg.get('chat.atMember.maxPerMessage', 5)) || 5,
+        allowAtAll: cfg.get('chat.atMember.allowAtAll', true) !== false,
       })
       if (segs && segs.length) {
         await e.reply(segs)

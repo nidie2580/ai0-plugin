@@ -90,6 +90,8 @@ chat:
   atMember:
     enabled: true
     maxPerMessage: 5
+    # 允许 AI 用 @全体成员 / @all 真正艾特全体成员（每条回复最多生效 1 次）
+    allowAtAll: true
 
   # --- 上下文增强（默认全部开启，可单独关闭） ---
   # 是否注入"引用消息"（QQ回复/引用按钮选中的那条消息）作为上下文
