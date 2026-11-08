@@ -569,7 +569,7 @@ async function browserCommand(rest, opts = {}) {
       const gate = await isAllowedBrowserUrl(url).catch(() => ({ ok: false, reason: 'URL 校验异常' }))
       if (!gate.ok) {
         return toolErr(
-          `目标地址被安全策略拒绝：${gate.reason}（如确需访问本机/内网服务，请在 config.yaml 的 security.allowPrivateHosts 显式放行）`,
+          `目标地址被安全策略拒绝：${gate.reason}（如确需访问本机/内网服务，请在 config.yaml 的 agent.allowPrivateHosts 显式放行）`,
           t0,
         )
       }

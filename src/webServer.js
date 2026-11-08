@@ -832,6 +832,21 @@ export function createApp() {
       }
     }
 
+    // — 安全：agent 高危字段禁止通过网页后台写入（RCE 面） —
+    //   extraAllowedCommands 可放开解释器/网络命令；allowPrivateHosts / allowRawIpUrls 可放开
+    //   Agent 对本机、内网、自身公网 IP 的访问。这些只允许改服务器上的 config/config.yaml。
+    //   前端保存时会带上整段 agent，这里静默还原为磁盘值，避免"保存成功但被改回去"的困惑。
+    if (config.agent && typeof config.agent === 'object' && !Array.isArray(config.agent)) {
+      let diskAgent = {}
+      try { diskAgent = cfg.loadConfig()?.agent || {} } catch (_) { diskAgent = {} }
+      for (const k of ['extraAllowedCommands', 'allowPrivateHosts', 'allowRawIpUrls']) {
+        if (!Object.prototype.hasOwnProperty.call(config.agent, k)) continue
+        if (Object.prototype.hasOwnProperty.call(diskAgent, k)) config.agent[k] = diskAgent[k]
+        else delete config.agent[k]
+        safeLogger.warn(`[ai0-plugin] 网页后台尝试修改 agent.${k}，已忽略（该字段仅允许改 config.yaml）`)
+      }
+    }
+
     // — P0-2: 禁止通过 API 修改 permissions.masters —
     // 前端保存时总是带 masters 键（即便为空数组），统一删除；
     // saveConfig（config/index.js）发现 permissions 里缺 masters 时会从磁盘还原，
