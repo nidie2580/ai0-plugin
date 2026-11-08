@@ -51,9 +51,16 @@ function ensureDir() {
   try { fs.mkdirSync(DATA_DIR, { recursive: true }) } catch (_) {}
 }
 
-function rawFile(groupId) { return path.join(DATA_DIR, `group-${groupId}.jsonl`) }
-function summaryFile(groupId) { return path.join(DATA_DIR, `group-${groupId}-summary.md`) }
-function metaFile(groupId) { return path.join(DATA_DIR, `group-${groupId}-meta.json`) }
+// groupId 会拼进文件名：与 llm.js 对 userId 的校验保持一致（仅数字，≤20 位），防止路径穿越
+function fileGroupId(groupId) {
+  const s = String(groupId == null ? '' : groupId).trim()
+  if (/^\d{1,20}$/.test(s)) return s
+  const digits = s.replace(/\D/g, '').slice(0, 20)
+  return digits || 'invalid'
+}
+function rawFile(groupId) { return path.join(DATA_DIR, `group-${fileGroupId(groupId)}.jsonl`) }
+function summaryFile(groupId) { return path.join(DATA_DIR, `group-${fileGroupId(groupId)}-summary.md`) }
+function metaFile(groupId) { return path.join(DATA_DIR, `group-${fileGroupId(groupId)}-meta.json`) }
 
 function readRaw(groupId) {
   try {

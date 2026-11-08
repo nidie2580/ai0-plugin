@@ -207,7 +207,15 @@ function loadSessions() {
   }
 }
 // 不 import globals.js 顶部（避免循环依赖）；错误路径内只做弱引用。正常路径无日志。
-function await_import_global_error_only() { return { safeLogger: (...a) => console.error(...a), sanitizeLog: x => String(x ?? '') } }
+function await_import_global_error_only() {
+  // 返回带 .error/.warn/.info 的日志函数：调用方有 safeLogger.error?.(msg) 的写法，
+  // 若只返回普通函数，这些日志会被 ?. 静默吞掉（sessions.key 损坏时完全无声）。
+  const log = (...a) => console.error(...a)
+  log.error = log
+  log.warn = log
+  log.info = log
+  return { safeLogger: log, sanitizeLog: x => String(x ?? '') }
+}
 
 let saveTimer = null
 let lastSaveSucceeded = true

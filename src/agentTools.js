@@ -19,7 +19,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import { safeLogger, sanitizeLog } from './globals.js'
-import { safeFetchWithRedirects } from './security.js'
+import { safeFetchWithRedirects, isAllowedOutboundUrl } from './security.js'
 
 const PLUGIN_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const WORKSPACE = path.join(PLUGIN_ROOT, 'agent', 'workspace')
@@ -392,9 +392,52 @@ async function ensurePage() {
     _page = await b.newPage()
     await _page.setViewport({ width: 1280, height: 900 })
     await _page.setUserAgent(BROWSER_UA)
+    await installRequestGuard(_page)
   }
   _lastUse = Date.now()
   return _page
+}
+
+/**
+ * 浏览器出站请求守卫（SSRF 纵深防御）。
+ *
+ * 只信任 security.isAllowedOutboundUrl 的判定：私有/回环/链路本地/元数据地址一律中止，
+ * 除非管理员在 config.yaml 的 security.allowPrivateHosts 显式放行。
+ * 覆盖三种绕过路径：直接 open、页面内点击/表单提交引发的跳转、以及第三方页面加载的
+ * 内网子资源（例如 <img src="http://127.0.0.1:12580/...">）。
+ *
+ * 已知边界：Chrome 自己解析 DNS，理论上存在 rebinding 时间窗；这里靠每次请求实时校验
+ * 域名解析结果把窗口压到最小，务必保持 fail-closed（校验异常一律 abort）。
+ */
+async function installRequestGuard(page) {
+  try {
+    await page.setRequestInterception(true)
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] 浏览器请求拦截启用失败（将拒绝继续使用浏览器）: ${sanitizeLog(err?.message || err)}`)
+    return
+  }
+  page.on('request', (req) => {
+    const raw = String(req.url() || '')
+    const scheme = (raw.split(':', 1)[0] || '').toLowerCase()
+    if (scheme !== 'http' && scheme !== 'https') {
+      // data:/blob:/about: 是页面自身资源，本地渲染不产生外发；其余（file:、chrome: 等）一律拒绝
+      if (scheme === 'data' || scheme === 'blob' || scheme === 'about') {
+        req.continue().catch(() => {})
+      } else {
+        req.abort().catch(() => {})
+      }
+      return
+    }
+    isAllowedOutboundUrl(raw)
+      .then((r) => {
+        if (r && r.ok) return req.continue()
+        safeLogger.warn(
+          `[ai0-plugin] 浏览器拦截出站请求：${sanitizeLog(r?.reason || '目标地址不允许')} ${sanitizeLog(raw.slice(0, 200))}`,
+        )
+        return req.abort()
+      })
+      .catch(() => { req.abort().catch(() => {}) })
+  })
 }
 
 async function pageSummary(page, cap = 1200) {
@@ -417,7 +460,19 @@ async function browserCommand(rest, opts = {}) {
     if (sub === 'open') {
       const url = args.split(/\s+/)[0]
       if (!/^https?:\/\//i.test(url)) return toolErr('用法：browser open <http(s)://…>', t0)
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 })
+      // SSRF 前置校验：不把内网/回环/元数据地址交给浏览器（页面级拦截是第二道防线）
+      const gate = await isAllowedOutboundUrl(url).catch(() => ({ ok: false, reason: 'URL 校验异常' }))
+      if (!gate.ok) {
+        return toolErr(
+          `目标地址被安全策略拒绝：${gate.reason}（如确需访问本机/内网服务，请在 config.yaml 的 security.allowPrivateHosts 显式放行）`,
+          t0,
+        )
+      }
+      try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 })
+      } catch (err) {
+        return toolErr(`打开失败：${sanitizeLog(err?.message || err)}`, t0)
+      }
       await sleep(800)
       return toolOk(await pageSummary(page), t0)
     }

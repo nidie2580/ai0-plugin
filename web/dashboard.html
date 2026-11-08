@@ -151,7 +151,7 @@
       <hr>
       <h3>系统提示词</h3>
       <textarea id="system_prompt" rows="6"></textarea>
-      <div class="hint" style="margin-top:4px;">
+      <div class="hint mt4">
         支持动态变量（发送给模型时替换）：<code>&lt;master&gt;</code> 主人QQ、<code>&lt;user&gt;</code> 当前发送者、<code>&lt;bot&gt;</code> 机器自身、<code>&lt;admin&gt;</code> 管理员列表。
       </div>
 
@@ -180,8 +180,8 @@
         <label>网页后台端口 <input id="web_port" type="number"/></label>
         <label>网页后台绑定地址 <input id="web_host" placeholder="127.0.0.1 / 0.0.0.0"/></label>
       </div>
-      <div class="hint" style="margin-top:4px">
-        <label class="inline-toggle" style="margin-top:2px">
+      <div class="hint mt4">
+        <label class="inline-toggle mt2">
           <input type="checkbox" id="web_trustProxy"/>
           信任反向代理头 (web.trustProxy) — 部署在 Nginx/Caddy/Cloudflare 后时勾选；直接裸端口对外请勿勾选。
         </label>
@@ -274,7 +274,7 @@
           <div id="micModelList" class="chips">加载中…</div>
         </div>
 
-        <label class="inline-toggle" style="margin:4px 0 10px" title="开启后所有参与模型先互相商量，再输出一份统一回复；勾选状态保存于本页">
+        <label class="inline-toggle my-4-10" title="开启后所有参与模型先互相商量，再输出一份统一回复；勾选状态保存于本页">
           <input type="checkbox" id="micDeliberate"/>
           协同讨论（先商量，输出一份统一回复）
         </label>

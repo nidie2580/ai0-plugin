@@ -716,6 +716,8 @@ function assertNoToolExecSwitches(cmd) {
 const INTERPRETER_COMMANDS = new Set([
   'node', 'nodejs', 'python', 'python3', 'python2', 'pythonw', 'ruby', 'perl', 'php', 'lua',
   'deno', 'bun', 'npm', 'npx', 'yarn', 'pnpm', 'pip', 'pip3', 'coffee', 'ts-node',
+  // shell 类：即使被 extraAllowedCommands 放开，也不允许 -c 内联执行
+  'bash', 'sh', 'zsh', 'dash', 'ash', 'ksh', 'csh', 'tcsh', 'fish',
 ])
 const INTERPRETER_INLINE_CODE_RE = /(?:^|[\s])-(?:c|e|p)(?![a-zA-Z])|--eval\b|--print\b|--execute\b/
 
