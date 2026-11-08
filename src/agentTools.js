@@ -19,7 +19,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import { safeLogger, sanitizeLog } from './globals.js'
-import { safeFetchWithRedirects, isAllowedOutboundUrl } from './security.js'
+import { safeFetchWithRedirects, isAllowedOutboundUrl, isPrivateIp } from './security.js'
 
 const PLUGIN_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const WORKSPACE = path.join(PLUGIN_ROOT, 'agent', 'workspace')
@@ -409,12 +409,42 @@ async function ensurePage() {
  * 已知边界：Chrome 自己解析 DNS，理论上存在 rebinding 时间窗；这里靠每次请求实时校验
  * 域名解析结果把窗口压到最小，务必保持 fail-closed（校验异常一律 abort）。
  */
+/**
+ * 浏览器工具专用 URL 校验：在 security.isAllowedOutboundUrl 之上再收紧一层。
+ *
+ * 为什么不直接复用：security.allowPrivateHosts 为了本机 API（127.0.0.1:8300 / ASR 8311）
+ * 必须放行 127.0.0.1，但浏览器一旦继承这个白名单，Agent 就能打开本插件网页后台
+ * （127.0.0.1:12580）、NapCat 接口（5700）等本机服务 —— 等于没设防。
+ * 因此浏览器单独走 agent.browser.allowPrivateHosts（默认空 = 本机/内网一律拒绝）。
+ */
+export async function isAllowedBrowserUrl(raw) {
+  const r = await isAllowedOutboundUrl(raw).catch(() => ({ ok: false, reason: 'URL 校验异常' }))
+  if (!r || !r.ok) return r
+  let host = ''
+  try { host = new URL(raw).hostname.replace(/^\[|\]$/g, '') } catch (_) { return { ok: false, reason: '非法 URL' } }
+  const resolved = r.resolvedIp || ''
+  const privateish =
+    host === 'localhost' || host.endsWith('.localhost') ||
+    isPrivateIp(host) || (resolved && isPrivateIp(resolved))
+  if (!privateish) return { ok: true, resolvedIp: r.resolvedIp }
+  let list = []
+  try { list = cfg.get('agent.browser.allowPrivateHosts', []) } catch (_) { list = [] }
+  const allow = (Array.isArray(list) ? list : (list ? [list] : [])).map((x) => String(x || '').trim().toLowerCase()).filter(Boolean)
+  const hostAllowed = allow.includes('*') || allow.includes(host)
+  if (hostAllowed) return { ok: true, resolvedIp: r.resolvedIp }
+  return {
+    ok: false,
+    reason: '浏览器工具不允许访问本机/内网地址（默认关闭；确需调试请在 config.yaml 的 agent.browser.allowPrivateHosts 显式放行）',
+  }
+}
+
 async function installRequestGuard(page) {
   try {
     await page.setRequestInterception(true)
   } catch (err) {
-    safeLogger.warn(`[ai0-plugin] 浏览器请求拦截启用失败（将拒绝继续使用浏览器）: ${sanitizeLog(err?.message || err)}`)
-    return
+    // fail-closed：拦截器起不来就不允许用浏览器，绝不"无防护继续跑"
+    safeLogger.error(`[ai0-plugin] 浏览器请求拦截启用失败，已禁用浏览器工具: ${sanitizeLog(err?.message || err)}`)
+    throw new Error('浏览器安全拦截启用失败，已禁用浏览器工具')
   }
   page.on('request', (req) => {
     const raw = String(req.url() || '')
@@ -428,7 +458,7 @@ async function installRequestGuard(page) {
       }
       return
     }
-    isAllowedOutboundUrl(raw)
+    isAllowedBrowserUrl(raw)
       .then((r) => {
         if (r && r.ok) return req.continue()
         safeLogger.warn(
@@ -461,7 +491,7 @@ async function browserCommand(rest, opts = {}) {
       const url = args.split(/\s+/)[0]
       if (!/^https?:\/\//i.test(url)) return toolErr('用法：browser open <http(s)://…>', t0)
       // SSRF 前置校验：不把内网/回环/元数据地址交给浏览器（页面级拦截是第二道防线）
-      const gate = await isAllowedOutboundUrl(url).catch(() => ({ ok: false, reason: 'URL 校验异常' }))
+      const gate = await isAllowedBrowserUrl(url).catch(() => ({ ok: false, reason: 'URL 校验异常' }))
       if (!gate.ok) {
         return toolErr(
           `目标地址被安全策略拒绝：${gate.reason}（如确需访问本机/内网服务，请在 config.yaml 的 security.allowPrivateHosts 显式放行）`,
