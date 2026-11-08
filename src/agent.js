@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import * as llm from './llm.js'
 import * as securityLog from './securityLog.js'
-import { isPrivateIp, isAllowedOutboundUrl } from './security.js'
+import { isPrivateIp, isAllowedOutboundUrl, isAllowedAgentUrl } from './security.js'
 import { safeLogger, sanitizeLog } from './globals.js'
 import * as agentTools from './agentTools.js'
 
@@ -526,7 +526,7 @@ function extractAgentUrls(cmd) {
  * @param {Function} [checkFn] 可注入校验函数（测试用），默认 security.isAllowedOutboundUrl
  * @returns {Promise<{ok:boolean, reason?:string}>}
  */
-export async function assertAgentUrlsAllowed(cmd, checkFn = isAllowedOutboundUrl) {
+export async function assertAgentUrlsAllowed(cmd, checkFn = (u) => isAllowedAgentUrl(u)) {
   for (const u of extractAgentUrls(cmd)) {
     const r = await Promise.resolve(checkFn(u)).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
     if (!r || !r.ok) {

@@ -15,11 +15,12 @@
  *       浏览器仅无头模式、无持久化 profile，空闲 5 分钟自动关闭。
  */
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as cfg from '../config/index.js'
 import { safeLogger, sanitizeLog } from './globals.js'
-import { safeFetchWithRedirects, isAllowedOutboundUrl, isPrivateIp } from './security.js'
+import { safeFetchWithRedirects, isAllowedAgentUrl } from './security.js'
 
 const PLUGIN_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const WORKSPACE = path.join(PLUGIN_ROOT, 'agent', 'workspace')
@@ -335,6 +336,7 @@ async function webFetchResult(url, opts = {}) {
     const u = String(url || '').trim()
     if (!/^https?:\/\//i.test(u)) return toolErr('仅支持 http/https 链接', t0)
     const r = await safeFetchWithRedirects(u, {
+      checkUrl: (x) => isAllowedAgentUrl(x),
       maxBytes: 3 * 1024 * 1024,
       headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8' },
     })
@@ -410,6 +412,94 @@ async function ensurePage() {
  * 域名解析结果把窗口压到最小，务必保持 fail-closed（校验异常一律 abort）。
  */
 /**
+ * 自身地址识别（浏览器工具的硬边界）。
+ *
+ * 云服务器的公网 IP 通常不在网卡上（NAT），所以"私有 IP 段"拦截拦不住
+ * http://<本机公网IP>:9178 这类自访问。这里维护三份集合：
+ *   1) os.networkInterfaces() 的所有网卡地址（回环/私网/额外 IP）
+ *   2) agent.browser.selfPublicIps（手工配置，优先）
+ *   3) 自动探测到的公网出口 IP（1.1.1.1/cdn-cgi/trace，缓存 12h，失败静默）
+ * 命中任意一个即视为"访问自己"，一律拒绝 —— 防止 Agent 打开本插件网页后台
+ * （9178）、OneBot 端口（2537/5700）等自身服务。
+ */
+const SELF_CACHE = { at: 0, addrs: new Set() }
+const SELF_CACHE_TTL = 60_000
+let _publicIpCache = { at: 0, ip: '' }
+const PUBLIC_IP_TTL = 12 * 3600_000
+
+function localInterfaceAddrs() {
+  const out = new Set()
+  try {
+    for (const list of Object.values(os.networkInterfaces() || {})) {
+      for (const a of list || []) {
+        if (a && a.address) out.add(String(a.address).toLowerCase())
+      }
+    }
+  } catch (_) {}
+  return out
+}
+
+async function detectOwnPublicIp() {
+  if (Date.now() - _publicIpCache.at < PUBLIC_IP_TTL) return _publicIpCache.ip
+  let ip = ''
+  try {
+    const r = await safeFetchWithRedirects('https://1.1.1.1/cdn-cgi/trace', { timeout: 5000 })
+    const body = String(r?.response?.data || '')
+    const m = body.match(/^ip=([0-9a-fA-F:.]+)$/m)
+    if (m) ip = m[1]
+  } catch (_) {}
+  if (!ip) {
+    try {
+      const r = await safeFetchWithRedirects('https://api.ipify.org', { timeout: 5000 })
+      const t = String(r?.response?.data || '').trim()
+      if (/^[0-9a-fA-F:.]+$/.test(t)) ip = t
+    } catch (_) {}
+  }
+  _publicIpCache = { at: Date.now(), ip }
+  return ip
+}
+
+async function selfAddressSet() {
+  if (Date.now() - SELF_CACHE.at < SELF_CACHE_TTL) return SELF_CACHE.addrs
+  const addrs = localInterfaceAddrs()
+  try {
+    const conf = cfg.get('agent.browser.selfPublicIps', [])
+    for (const x of (Array.isArray(conf) ? conf : [conf])) {
+      const v = String(x || '').trim().toLowerCase()
+      if (v) addrs.add(v)
+    }
+  } catch (_) {}
+  try {
+    if (cfg.get('agent.browser.autoDetectPublicIp', true) !== false) {
+      const pub = await detectOwnPublicIp()
+      if (pub) addrs.add(String(pub).toLowerCase())
+    }
+  } catch (_) {}
+  SELF_CACHE.at = Date.now()
+  SELF_CACHE.addrs = addrs
+  return addrs
+}
+
+/** 目标是否指向本机（含公网 IP）或命中自身服务端口 */
+async function isSelfTarget(host, resolvedIp, port) {
+  const selfAddrs = await selfAddressSet()
+  const ips = [host, resolvedIp].map((x) => String(x || '').toLowerCase()).filter(Boolean)
+  for (const ip of ips) {
+    if (selfAddrs.has(ip)) return { self: true, reason: `目标地址指向本机自身（${ip}）` }
+  }
+  // 端口兜底：即使解析 IP 未知（多网卡/别名 IP），也不允许访问自身服务的默认端口
+  let blockedPorts = [9178, 2537, 5700, 6099]
+  try {
+    const conf = cfg.get('agent.browser.blockedPorts', null)
+    if (Array.isArray(conf)) blockedPorts = conf.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+  } catch (_) {}
+  if (port && blockedPorts.includes(Number(port))) {
+    return { self: true, reason: `目标端口 ${port} 属于机器人自身服务，浏览器工具禁止访问` }
+  }
+  return { self: false }
+}
+
+/**
  * 浏览器工具专用 URL 校验：在 security.isAllowedOutboundUrl 之上再收紧一层。
  *
  * 为什么不直接复用：security.allowPrivateHosts 为了本机 API（127.0.0.1:8300 / ASR 8311）
@@ -418,24 +508,9 @@ async function ensurePage() {
  * 因此浏览器单独走 agent.browser.allowPrivateHosts（默认空 = 本机/内网一律拒绝）。
  */
 export async function isAllowedBrowserUrl(raw) {
-  const r = await isAllowedOutboundUrl(raw).catch(() => ({ ok: false, reason: 'URL 校验异常' }))
-  if (!r || !r.ok) return r
-  let host = ''
-  try { host = new URL(raw).hostname.replace(/^\[|\]$/g, '') } catch (_) { return { ok: false, reason: '非法 URL' } }
-  const resolved = r.resolvedIp || ''
-  const privateish =
-    host === 'localhost' || host.endsWith('.localhost') ||
-    isPrivateIp(host) || (resolved && isPrivateIp(resolved))
-  if (!privateish) return { ok: true, resolvedIp: r.resolvedIp }
-  let list = []
-  try { list = cfg.get('agent.browser.allowPrivateHosts', []) } catch (_) { list = [] }
-  const allow = (Array.isArray(list) ? list : (list ? [list] : [])).map((x) => String(x || '').trim().toLowerCase()).filter(Boolean)
-  const hostAllowed = allow.includes('*') || allow.includes(host)
-  if (hostAllowed) return { ok: true, resolvedIp: r.resolvedIp }
-  return {
-    ok: false,
-    reason: '浏览器工具不允许访问本机/内网地址（默认关闭；确需调试请在 config.yaml 的 agent.browser.allowPrivateHosts 显式放行）',
-  }
+  // 复用 security.isAllowedAgentUrl：私有/本机/自身公网 IP 一律拒绝，
+  // 仅 agent.allowPrivateHosts 显式列出的主机例外。
+  return isAllowedAgentUrl(raw)
 }
 
 async function installRequestGuard(page) {

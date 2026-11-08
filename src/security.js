@@ -1,5 +1,6 @@
 import dns from 'node:dns/promises'
 import net from 'node:net'
+import os from 'node:os'
 import axios from 'axios'
 import * as cfg from '../config/index.js'
 import { isOfficialHost, officialHttpsAgent } from './officialApi.js'
@@ -254,6 +255,103 @@ export function hasSystemProxy() {
  * 且 officialHttpsAgent() 会在 secureConnect 后核对证书钉扎，不匹配即中止连接。
  * 其余主机一律保持完整证书校验；DNS pinning 与 Host/servername 逻辑不变。
  */
+/* ------------------------------------------------------------------ */
+/*      Agent 工具专用严格出站策略（浏览器 / fetch / curl/wget）        */
+/* ------------------------------------------------------------------ */
+
+let _ownIps = { at: 0, ips: [] }
+const OWN_IP_TTL = 10 * 60_000
+
+/**
+ * 探测本机对外的公网 IP（云主机 NAT 下网卡上只有内网地址，必须问外部服务）。
+ * 缓存 10 分钟。全部失败返回 [] —— 此时"域名解析到本机公网 IP"这一层失效，
+ * 但裸 IP / 内网判定仍然生效，并会打一条 error 日志。
+ */
+export async function getOwnPublicIps() {
+  const now = Date.now()
+  if (now - _ownIps.at < OWN_IP_TTL) return _ownIps.ips
+  const providers = ['https://api.ipify.org', 'https://ifconfig.me/ip', 'https://ipinfo.io/ip']
+  let ips = []
+  for (const u of providers) {
+    try {
+      const r = await axios.get(u, { timeout: 2500, responseType: 'text', transformResponse: [(d) => d], proxy: false })
+      const ip = String(r.data || '').trim().split(/\s+/)[0]
+      if (net.isIP(ip)) { ips = [ip]; break }
+    } catch (_) {}
+  }
+  if (!ips.length) {
+    console.error('[ai0-plugin] 本机公网 IP 探测失败，Agent 出站策略缺少"自身公网 IP"保护层')
+  }
+  _ownIps = { at: now, ips }
+  return ips
+}
+
+function localInterfaceIps() {
+  const out = new Set(['127.0.0.1', '::1'])
+  try {
+    for (const list of Object.values(os.networkInterfaces())) {
+      for (const a of list || []) if (a && a.address) out.add(String(a.address).toLowerCase())
+    }
+  } catch (_) {}
+  return out
+}
+
+function agentAllowSet(explicit) {
+  let raw = explicit
+  if (raw == null) {
+    try { raw = cfg.get('agent.allowPrivateHosts', cfg.get('agent.browser.allowPrivateHosts', [])) } catch (_) { raw = [] }
+  }
+  const list = Array.isArray(raw) ? raw : (raw ? [raw] : [])
+  return new Set(list.map((x) => String(x || '').trim().toLowerCase()).filter(Boolean))
+}
+
+/**
+ * Agent 工具（浏览器 / 网页抓取 / curl）专用严格校验。
+ *
+ * 与 isAllowedOutboundUrl 的关键区别：**不继承** security.allowPrivateHosts。
+ * 那份白名单是给插件内部调用本机 API（djyun-api:8300 / ASR:8311）用的，放行了
+ * 127.0.0.1；Agent 工具一旦复用它，就能打开本插件网页后台（9178）、NapCat（5700）、
+ * 云元数据等 —— 等于没设防。
+ *
+ * 云主机特别处理：机器上只有内网网卡，但**从机器内部访问自己的公网 IP 会命中本机
+ * 0.0.0.0 监听的服务**（实测 45.192.98.189:9178 从本机 curl 返回 200）。因此必须
+ * 额外探测并拒绝"自身公网 IP"。
+ *
+ * 规则（fail-closed）：
+ *  - 仅 http/https
+ *  - localhost / *.localhost → 拒绝
+ *  - 私有/回环/链路本地地址 → 拒绝
+ *  - 本机自身地址（网卡 IP + 公网 IP）→ 拒绝
+ *  - 裸 IP 默认拒绝（agent.allowRawIpUrls: true 放开）
+ *  - 例外：agent.allowPrivateHosts 显式列出的主机
+ */
+export async function isAllowedAgentUrl(u, allowHosts) {
+  const r = await isAllowedOutboundUrl(u).catch(() => ({ ok: false, reason: 'URL 校验异常' }))
+  if (!r || !r.ok) return r
+  let parsed
+  try { parsed = new URL(u) } catch (_) { return { ok: false, reason: '非法 URL' } }
+  const host = String(parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '')
+  const allow = agentAllowSet(allowHosts)
+  if (allow.has('*') || allow.has(host)) return { ok: true, resolvedIp: r.resolvedIp }
+  if (host === 'localhost' || host.endsWith('.localhost')) {
+    return { ok: false, reason: 'Agent 工具不允许访问本机地址（确需调试请在 config.yaml 的 agent.allowPrivateHosts 显式放行）' }
+  }
+  const local = localInterfaceIps()
+  const ownIps = await getOwnPublicIps()
+  const isSelf = (ip) => !!ip && (local.has(String(ip).toLowerCase()) || ownIps.includes(ip) || isPrivateIp(ip))
+  if (net.isIP(host)) {
+    if (isSelf(host)) return { ok: false, reason: 'Agent 工具不允许访问本机/内网地址（含本机公网 IP）' }
+    if (cfg.get('agent.allowRawIpUrls', false) !== true) {
+      return { ok: false, reason: 'Agent 工具默认禁止直接访问裸 IP；确需访问请在 config.yaml 设置 agent.allowRawIpUrls: true' }
+    }
+    return { ok: true, resolvedIp: r.resolvedIp }
+  }
+  if (isSelf(r.resolvedIp)) {
+    return { ok: false, reason: 'Agent 工具不允许访问本机/内网地址（目标解析到本机地址）' }
+  }
+  return { ok: true, resolvedIp: r.resolvedIp }
+}
+
 function applyOfficialTlsBypass(axiosOpts, url) {
   try {
     const u = new URL(url)
@@ -266,6 +364,7 @@ function applyOfficialTlsBypass(axiosOpts, url) {
 }
 
 export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 3) {
+  const checkUrl = typeof opts?.checkUrl === 'function' ? opts.checkUrl : isAllowedOutboundUrl
   let current = origUrl
   let redirects = 0
   // — 副作用修复：先克隆 opts.headers，避免跨主机重定向时 delete 调用方的对象 —
@@ -275,7 +374,7 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
     ? { ...opts, headers: opts.headers ? { ...opts.headers } : undefined }
     : {}
   while (true) {
-    const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
+    const check = await checkUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
     if (!check.ok) return { ok: false, error: check.reason || '拒绝访问该 URL' }
     // DNS Rebinding 防护：使用已解析 IP 直连，Host 头保留原始域名，servername 用于 TLS SNI
     let connectUrl = current
@@ -321,7 +420,7 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
           delete workingOpts.headers.Cookie
         }
       }
-      const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
+      const chk2 = await checkUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
       if (!chk2.ok) return { ok: false, error: chk2.reason || '拒绝重定向目标' }
       current = next
       continue
@@ -338,6 +437,7 @@ export async function safeFetchWithRedirects(origUrl, opts = {}, maxRedirects = 
  * Returns axios response on success or throws Error on failure
  */
 export async function safeAxiosRequest(method, url, data = null, opts = {}, maxRedirects = 3) {
+  const checkUrl = typeof opts?.checkUrl === 'function' ? opts.checkUrl : isAllowedOutboundUrl
   let current = url
   let redirects = 0
   // — P2-1 修复：(1) 不直接 mutate 调用方 opts / opts.headers（消除副作用污染） —
@@ -348,7 +448,7 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
     ? { ...opts, headers: opts.headers ? { ...opts.headers } : undefined }
     : {}
   while (true) {
-    const check = await isAllowedOutboundUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
+    const check = await checkUrl(current).catch(() => ({ ok: false, reason: 'URL 校验失败' }))
     if (!check.ok) throw new Error(check.reason || '拒绝访问该 URL')
     try {
       // DNS Rebinding 防护：使用已解析的 IP 直接连接，避免二次 DNS 解析
@@ -381,7 +481,7 @@ export async function safeAxiosRequest(method, url, data = null, opts = {}, maxR
         const next = nextUrl.toString()
         redirects += 1
         if (redirects > maxRedirects) throw new Error('重定向次数过多')
-        const chk2 = await isAllowedOutboundUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
+        const chk2 = await checkUrl(next).catch(() => ({ ok: false, reason: '重定向目标 URL 校验失败' }))
         if (!chk2.ok) throw new Error(chk2.reason || '拒绝重定向目标')
         // — P2-1(2): 跨主机重定向剥离认证头 —
         const origUrl = new URL(current)

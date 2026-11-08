@@ -355,10 +355,11 @@ agent:
   tools:
     web: true
     browser: true
-  # 浏览器工具允许访问的本机/内网主机（独立于 security.allowPrivateHosts；默认空=一律拒绝）
-  # 不继承 security.allowPrivateHosts：否则 Agent 能打开本插件网页后台(12580)、NapCat(5700) 等本机服务
-  browser:
-    allowPrivateHosts: []
+  # Agent 工具（浏览器 / 网页访问 / curl）允许访问的本机、内网、自身公网地址
+  # 默认空 = 一律拒绝；与 security.allowPrivateHosts（供插件内部调用本机 API）相互独立
+  allowPrivateHosts: []
+  # 是否允许 Agent 直接访问裸 IP（域名不受此限）；内网与自身地址始终拒绝
+  allowRawIpUrls: false
 
 # 系统提示词
 system:
