@@ -105,11 +105,12 @@ export default function register({ router, app, cfg, logger, requireCsrf, dataDi
   /* ---------------- 绑定码 ---------------- */
 
   const PAIR_FILE = path.join(dataDir, 'app-manager-pairing.json')
-  let pair = { code: null, expires: 0, used: false }
-  try {
-    const raw = JSON.parse(fs.readFileSync(PAIR_FILE, 'utf8'))
-    if (raw && typeof raw.code === 'string') pair = { code: raw.code, expires: +raw.expires || 0, used: !!raw.used }
-  } catch (_) {}
+  const readPair = () => {
+    try {
+      const r = JSON.parse(fs.readFileSync(PAIR_FILE, 'utf8'))
+      return { code: typeof r.code === 'string' ? r.code : null, expires: +r.expires || 0, used: !!r.used }
+    } catch (_) { return { code: null, expires: 0, used: true } }
+  }
 
   const savePair = () => {
     try {
@@ -120,13 +121,16 @@ export default function register({ router, app, cfg, logger, requireCsrf, dataDi
 
   // 生成绑定码（需登录 + CSRF）
   router.post('/pair-code', requireCsrf, (req, res) => {
-    pair = {
+    const p = {
       code: crypto.randomBytes(4).toString('hex').toUpperCase(),
       expires: Date.now() + 10 * 60 * 1000,
       used: false
     }
-    savePair()
-    res.json({ ok: true, code: pair.code, ttl: 600 })
+    try {
+      fs.writeFileSync(PAIR_FILE, JSON.stringify(p))
+      try { fs.chmodSync(PAIR_FILE, 0o600) } catch (_) {}
+    } catch (e) { logger.warn(`[app-manager] 绑定码持久化失败: ${e.message}`) }
+    res.json({ ok: true, code: p.code, ttl: 600 })
   })
 
   // 绑定（免登录；内存级限速：每 IP 每分钟 6 次）
@@ -147,12 +151,12 @@ export default function register({ router, app, cfg, logger, requireCsrf, dataDi
     if (!pairRate(ip)) return res.status(429).json({ ok: false, msg: '尝试过于频繁，请稍后再试' })
     const code = String((req.body && req.body.code) || '').trim().toUpperCase()
     if (!code) return res.json({ ok: false, msg: '缺少绑定码' })
-    if (!pair.code || pair.used || Date.now() > pair.expires) {
+    const p = readPair()
+    if (!p.code || p.used || Date.now() > p.expires) {
       return res.json({ ok: false, msg: '绑定码无效或已过期，请在网页后台重新生成' })
     }
-    if (code !== pair.code) return res.json({ ok: false, msg: '绑定码不正确' })
-    pair.used = true
-    savePair()
+    if (code !== p.code) return res.json({ ok: false, msg: '绑定码不正确' })
+    try { fs.writeFileSync(PAIR_FILE, JSON.stringify({ ...p, used: true })) } catch (_) {}
     const identity = getPrimaryIdentity() || 'app-binding'
     const s = issueSession(ip, identity)
     logger.info?.(`[app-manager] App 绑定成功（身份 ${identity}，IP ${ip}）`)
