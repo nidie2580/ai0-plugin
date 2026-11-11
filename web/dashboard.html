@@ -19,6 +19,7 @@
     <a class="nav-item" data-view="sessions">💬 会话</a>
     <a class="nav-item" data-view="chatlog">💭 模型互聊</a>
     <a class="nav-item" data-view="test">🧪 模型测试</a>
+    <a class="nav-item" data-view="extensions">🧩 扩展</a>
     <a class="nav-item" data-view="about">ℹ️ 关于</a>
   </nav>
   <button id="logoutBtn" class="btn ghost sm">退出登录</button>
@@ -330,6 +331,18 @@
       <div id="aboutInfo"></div>
     </div>
   </section>
+  <!-- ==================== 扩展 ==================== -->
+  <section id="view-extensions" class="view">
+    <div class="ext-head">
+      <h2>🧩 扩展</h2>
+      <p class="hint">扩展是独立目录：单个扩展加载失败不会影响主插件与其它扩展。启停后需重启插件生效。</p>
+    </div>
+    <div class="ext-actions">
+      <button id="extRefresh" class="btn ghost sm" type="button">刷新</button>
+    </div>
+    <div id="extList" class="ext-list"></div>
+  </section>
+
 </main>
 
 <!-- 登录守卫锁定遮罩：检测到异身份登录时冻结控制台 -->

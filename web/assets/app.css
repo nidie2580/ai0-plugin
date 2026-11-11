@@ -1023,3 +1023,22 @@ audio.broadcast-media { width: 320px; max-width: 100%; height: 36px; }
 .mt2 { margin-top: 2px; }
 .mt4 { margin-top: 4px; }
 .my-4-10 { margin: 4px 0 10px; }
+
+
+/* ===== 扩展页 ===== */
+.ext-head h2 { margin: 0 0 6px; font-size: 20px; }
+.ext-actions { margin: 10px 0 4px; }
+.ext-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.ext-item { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 12px; background: rgba(255, 255, 255, 0.03); }
+.ext-icon { font-size: 24px; line-height: 1; }
+.ext-main { flex: 1; min-width: 0; }
+.ext-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ext-name { font-weight: 600; }
+.ext-meta { color: rgba(255, 255, 255, 0.45); font-size: 12px; margin-top: 2px; }
+.ext-desc { color: rgba(255, 255, 255, 0.65); font-size: 13px; margin-top: 4px; }
+.ext-err { color: #ff8a8a; font-size: 12px; margin-top: 4px; word-break: break-all; }
+.ext-side { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+.ext-badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); }
+.ext-badge.ok { background: rgba(80, 220, 140, 0.15); color: #6fe3a1; }
+.ext-badge.off { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.45); }
+.ext-badge.err { background: rgba(255, 90, 90, 0.15); color: #ff9a9a; }

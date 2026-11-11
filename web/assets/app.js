@@ -241,6 +241,69 @@ if (route === 'dashboard') {
     else if (name === 'providers') loadProviders()
     else if (name === 'home') loadHome()
     else if (name === 'about') loadAbout()
+    else if (name === 'extensions') loadExtensions()
+  }
+
+  // ---- 扩展 ----
+  async function loadExtensions() {
+    const box = $('#extList')
+    if (!box) return
+    box.innerHTML = '<div class="hint">加载中…</div>'
+    try {
+      const r = await api('/api/extensions', { timeout: 10000 })
+      if (!r.ok) throw new Error(r.msg || '加载失败')
+      const list = r.list || []
+      if (!list.length) {
+        box.innerHTML = '<div class="hint">还没有安装扩展。把扩展目录放到 <code>plugins/ai0-plugin/extensions/&lt;id&gt;/</code>（含 manifest.json）即可。</div>'
+        return
+      }
+      box.innerHTML = list.map(renderExt).join('')
+      box.querySelectorAll('[data-ext-toggle]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          toggleExt(btn.getAttribute('data-ext-toggle'), btn.getAttribute('data-enabled') === '1')
+        })
+      })
+    } catch (e) {
+      box.innerHTML = '<div class="hint">加载失败：' + escapeHtml(String(e.message || e)) + '</div>'
+    }
+  }
+
+  function renderExt(x) {
+    const st = x.status
+    const badge = st === 'loaded' ? '<span class="ext-badge ok">已加载</span>'
+      : st === 'broken' ? '<span class="ext-badge err">异常</span>'
+      : st === 'disabled' ? '<span class="ext-badge off">已停用</span>'
+      : '<span class="ext-badge">待加载</span>'
+    const open = x.enabled && x.manifest && x.manifest.web
+      ? '<a class="btn ghost sm" href="/ext/' + encodeURIComponent(x.id) + '/" target="_blank" rel="noopener">打开</a>'
+      : ''
+    const btn = '<button class="btn ghost sm" data-ext-toggle="' + escapeHtml(x.id) + '" data-enabled="' + (x.enabled ? '0' : '1') + '">'
+      + (x.enabled ? '停用' : '启用') + '</button>'
+    return '<div class="ext-item">'
+      + '<div class="ext-icon">' + escapeHtml(x.icon || '🧩') + '</div>'
+      + '<div class="ext-main">'
+      + '<div class="ext-title"><span class="ext-name">' + escapeHtml(x.name || x.id) + '</span>' + badge + '</div>'
+      + '<div class="ext-meta">' + escapeHtml(x.id) + ' · v' + escapeHtml(x.version || '0') + (x.author ? ' · ' + escapeHtml(x.author) : '') + '</div>'
+      + (x.description ? '<div class="ext-desc">' + escapeHtml(x.description) + '</div>' : '')
+      + (x.error ? '<div class="ext-err">' + escapeHtml(x.error) + '</div>' : '')
+      + '</div>'
+      + '<div class="ext-side">' + open + btn + '</div>'
+      + '</div>'
+  }
+
+  async function toggleExt(id, enable) {
+    try {
+      const r = await api('/api/extensions/' + encodeURIComponent(id) + '/toggle', {
+        method: 'POST',
+        body: { enabled: enable },
+        timeout: 15000
+      })
+      if (!r.ok) throw new Error(r.msg || '操作失败')
+      alert(r.msg || '已保存')
+      loadExtensions()
+    } catch (e) {
+      alert('操作失败：' + String(e.message || e))
+    }
   }
 
   function statusLabel(m) {

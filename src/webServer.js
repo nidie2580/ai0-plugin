@@ -16,6 +16,7 @@ import * as videoGen from './videoGen.js'
 import * as caps from './modelCapabilities.js'
 import * as helper from './helper.js'
 import * as multiChatService from './multiChatService.js'
+import * as extensions from './extensions.js'
 import { isAllowedOutboundUrl, safeAxiosRequest } from './security.js'
 import { safeLogger } from './globals.js'
 import * as loginGuard from './loginGuard.js'
@@ -693,6 +694,24 @@ export function createApp() {
     } catch (e) {
       res.json({ ok: false, msg: String(e && e.message || e) })
     }
+  })
+
+  // ---- 扩展 ----
+  app.get('/api/extensions', requireAuth, (req, res) => {
+    try {
+      res.json({ ok: true, list: extensions.listExtensions(), loaded: extensions.isLoaded() })
+    } catch (e) {
+      res.json({ ok: false, msg: String((e && e.message) || e) })
+    }
+  })
+
+  app.post('/api/extensions/:id/toggle', requireAuth, requireCsrf, requireApiRate('ext-toggle', 20, 60_000), (req, res) => {
+    const id = String(req.params.id || '')
+    const enabled = !(req.body && (req.body.enabled === false || req.body.enabled === 'false'))
+    const r = extensions.setEnabled(id, enabled)
+    if (!r.ok) return res.json({ ok: false, msg: r.msg })
+    // 扩展路由在启动时挂载；启停需要重启插件（页面会提示）
+    res.json({ ok: true, enabled: r.enabled, needRestart: true, msg: '已保存，重启插件后生效' })
   })
 
   // ---- 管理 ----
@@ -1681,6 +1700,16 @@ export function startWebServer(port = 12580, host = '127.0.0.1', options = {}) {
     const tryBind = () => {
       try {
         const app = createApp()
+        // 扩展：异步加载，失败不影响主服务（每个扩展独立隔离）
+        extensions.loadExtensions(app, {
+          express,
+          cfg,
+          logger: safeLogger,
+          requireAuth,
+          requireCsrf,
+          requireApiRate,
+          dataDir: path.join(PLUGIN_ROOT, 'data'),
+        }).catch((e) => safeLogger.warn(`[ai0-plugin] 扩展加载异常: ${(e && e.message) || e}`))
         serverInstance = app.listen(p, h)
         let bound = false
         serverInstance.once('listening', () => {
