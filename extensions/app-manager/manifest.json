@@ -1,0 +1,10 @@
+{
+  "id": "app-manager",
+  "name": "App 管理",
+  "version": "1.0.0",
+  "description": "在手机 App 里查看状态、管理模型，不用打开网页后台",
+  "author": "ai0",
+  "icon": "📱",
+  "main": "index.js",
+  "web": "web"
+}

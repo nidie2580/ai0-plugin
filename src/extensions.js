@@ -197,13 +197,13 @@ export async function loadExtensions(app, ctx = {}) {
       if (typeof register !== 'function') throw new Error('入口未导出 register/default 函数')
 
       const router = express.Router()
-      app.use(`/api/ext/${ext.id}`, ctx.requireAuth, router)
       if (ext.manifest.web) {
         const webDir = path.join(ext.dir, ext.manifest.web)
         if (fs.existsSync(webDir)) {
           app.use(`/ext/${ext.id}`, ctx.requireAuth, express.static(webDir, { dotfiles: 'deny', maxAge: 0 }))
         }
       }
+      // 先执行 register：扩展可在挂载鉴权路由前注册自己的免登录路由（如 pair）
       await register({
         ...ctx,
         router,
@@ -212,6 +212,8 @@ export async function loadExtensions(app, ctx = {}) {
         manifest: ext.manifest,
         logger: ctx.logger || console,
       })
+      // 再挂载鉴权路由（register 里 app.post 的免登录路由优先匹配）
+      app.use(`/api/ext/${ext.id}`, ctx.requireAuth, router)
       _runtime.set(ext.id, { loaded: true, error: '', routes: router.stack?.length || 0 })
       result.loaded.push(ext.id)
     } catch (e) {
