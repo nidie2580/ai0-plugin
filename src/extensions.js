@@ -164,6 +164,7 @@ export function listExtensions() {
     const enabled = !disabled.has(name)
     out.push({
       ...v.manifest,
+      manifest: v.manifest,
       dir,
       status: !enabled ? 'disabled' : (rt.error ? 'broken' : (rt.loaded ? 'loaded' : 'ready')),
       error: rt.error || '',
