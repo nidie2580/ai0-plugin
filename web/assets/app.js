@@ -179,6 +179,7 @@ if (route === 'dashboard') {
       if (a.dataset.view === 'providers') loadProviders()
       if (a.dataset.view === 'home') loadHome()
       if (a.dataset.view === 'about') loadAbout()
+      if (a.dataset.view === 'extensions') loadExtensions()
     })
   })
 
@@ -245,6 +246,7 @@ if (route === 'dashboard') {
   }
 
   // ---- 扩展 ----
+  { const b=$('#extRefresh'); if (b) b.addEventListener('click', loadExtensions) }
   async function loadExtensions() {
     const box = $('#extList')
     if (!box) return
