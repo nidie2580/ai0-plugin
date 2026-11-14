@@ -1,6 +1,7 @@
 import * as cfg from '../config/index.js'
 import * as helper from '../src/helper.js'
 import * as chatSvc from '../src/chatService.js'
+import * as stopGuard from '../src/stopGuard.js'
 import * as ws from '../src/webServer.js'
 import * as auth from '../src/auth.js'
 import * as groupOps from '../src/groupOps.js'
@@ -53,6 +54,11 @@ export class AICommands extends plugin {
         {
           reg: '^#ai(新会话|重置|clear)$',
           fnc: 'resetSession',
+          permission: 'all'
+        },
+        {
+          reg: '^#(停止|stop)(\\s+.*)?$',
+          fnc: 'stopAI',
           permission: 'all'
         },
         {
@@ -181,6 +187,18 @@ export class AICommands extends plugin {
         }
       ]
     })
+  }
+
+  async stopAI() {
+    const e = this.e
+    if (!e.isGroup) return e.reply('该命令仅在群聊生效')
+    const role = String(e.sender?.role || '')
+    if (!e.isMaster && role !== 'owner' && role !== 'admin') {
+      return e.reply('只有主人或群管理员可以停止回复')
+    }
+    const arg = String(e.msg || '').replace(/^#(停止|stop)\s*/i, '').trim()
+    const r = stopGuard.setStop(e.group_id, arg)
+    return e.reply(r.msg)
   }
 
   async help() {

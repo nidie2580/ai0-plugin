@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import * as cfg from '../config/index.js'
+import * as stopGuard from './stopGuard.js'
 import * as llm from './llm.js'
 import * as helper from './helper.js'
 import * as groupOps from './groupOps.js'
@@ -916,6 +917,8 @@ export async function handleChat(e) {
 
   // 防 AI 互聊循环：确认要回复前登记一次触发；若判定循环冷却中则静默跳过，
   // 避免与同群的其他机器人互相 @ 无限互答烧 token/余额。
+  // 手动停止闸门（#停止 / #stop）：时间或次数缓冲，优先于 loopGuard
+  if (isGroup && stopGuard.shouldSuppress(groupId)) return false
   if (loopGuardReport(groupId, userId).suppressed) return false
   if (!isGroup && privateRateReport(userId).suppressed) return false
 
