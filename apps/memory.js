@@ -2,10 +2,13 @@
  * 记忆指令：#记忆/#记住、#全局记忆、#记忆搜索、#查看记忆、#删除记忆
  * 作用域：群聊 → group-<群号>；私聊 → user-<用户>；#全局记忆 → global（仅主人）
  * 注意：plugin 基类由 Yunzai 全局注入（与本插件其他 app 一致），不显式 import
+ *
+ * 2026-11-18：接入 API 平台远端记忆（/v1/memory）。本地永远先写，远端同步失败只影响 ☁️ 标记。
  */
 import * as cfg from '../config/index.js'
 import * as helper from '../src/helper.js'
 import * as memory from '../src/memory.js'
+import * as remote from '../src/remoteMemory.js'
 
 export class AIMemory extends plugin {
   constructor() {
@@ -40,7 +43,15 @@ export class AIMemory extends plugin {
     if (!text) return false
     const { scope, label } = this._scope(e)
     const ok = memory.writeEntry(scope, text)
-    await e.reply(ok ? `✅ 已记到${label}：${text.slice(0, 80)}` : '❌ 记忆写入失败')
+    let synced = false
+    if (ok) {
+      try {
+        synced = await remote.push(scope, text)
+      } catch {
+        synced = false
+      }
+    }
+    await e.reply(ok ? `✅ 已记到${label}：${text.slice(0, 80)}${synced ? ' ☁️' : ''}` : '❌ 记忆写入失败')
     return true
   }
 
@@ -49,7 +60,15 @@ export class AIMemory extends plugin {
     const text = (m?.[1] || '').trim()
     if (!text) return false
     const ok = memory.writeGlobal(text)
-    await e.reply(ok ? '✅ 已记到全局记忆（所有会话可见）' : '❌ 写入失败')
+    let synced = false
+    if (ok) {
+      try {
+        synced = await remote.push('global', text)
+      } catch {
+        synced = false
+      }
+    }
+    await e.reply(ok ? `✅ 已记到全局记忆（所有会话可见）${synced ? ' ☁️' : ''}` : '❌ 写入失败')
     return true
   }
 
@@ -59,14 +78,34 @@ export class AIMemory extends plugin {
     if (!q) return false
     const { scope } = this._scope(e)
     const hits = memory.searchMemory([scope, 'global'], q, 8)
-    await e.reply(hits.length ? `🔎 记忆检索（${q.slice(0, 30)}）：\n${hits.join('\n')}` : `没有找到与「${q.slice(0, 30)}」相关的记忆`)
+    let cloud = []
+    try {
+      cloud = await remote.search(q, { limit: 5 })
+    } catch {
+      cloud = []
+    }
+    const lines = [...hits, ...cloud.map((t) => `☁️ ${t}`)]
+    await e.reply(
+      lines.length
+        ? `🔎 记忆检索（${q.slice(0, 30)}）：\n${lines.join('\n')}`
+        : `没有找到与「${q.slice(0, 30)}」相关的记忆`
+    )
     return true
   }
 
   async list(e) {
     const { scope, label } = this._scope(e)
     const rec = memory.listRecent(scope, 3, 1200)
-    await e.reply(rec.length ? `📒 ${label}（近3天，共${rec.length}条）：\n${rec.join('\n')}` : `${label}暂无内容`)
+    let cloud = ''
+    try {
+      const st = await remote.stats()
+      if (st.count > 0) {
+        cloud = `\n☁️ 云端共 ${st.count} 条（${(st.used / 1048576).toFixed(1)}/${(st.quota / 1048576).toFixed(0)}MB）`
+      }
+    } catch {
+      cloud = ''
+    }
+    await e.reply(rec.length ? `📒 ${label}（近3天，共${rec.length}条）：\n${rec.join('\n')}${cloud}` : `${label}暂无内容${cloud}`)
     return true
   }
 
@@ -76,7 +115,17 @@ export class AIMemory extends plugin {
     if (!q) return false
     const { scope } = this._scope(e)
     const n = memory.deleteEntries([scope, 'global'], q)
-    await e.reply(n ? `🗑️ 已删除 ${n} 条含「${q.slice(0, 30)}」的记忆` : `没有找到含「${q.slice(0, 30)}」的记忆`)
+    let rn = 0
+    try {
+      rn = await remote.removeMatching(q)
+    } catch {
+      rn = 0
+    }
+    await e.reply(
+      n || rn
+        ? `🗑️ 已删除 ${n} 条含「${q.slice(0, 30)}」的记忆${rn ? `，云端 ${rn} 条` : ''}`
+        : `没有找到含「${q.slice(0, 30)}」的记忆`
+    )
     return true
   }
 }
