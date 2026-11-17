@@ -224,6 +224,9 @@ export async function loadExtensions(app, ctx = {}) {
     }
   }
   _loaded = true
+  try {
+    ctx.logger?.info?.(`[ai0-plugin] 扩展加载完成：成功=${result.loaded.join(",")||"无"} 失败=${result.failed.length}${result.failed.length ? " " + JSON.stringify(result.failed) : ""}`)
+  } catch (_) {}
   return result
 }
 

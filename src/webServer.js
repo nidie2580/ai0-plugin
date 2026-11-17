@@ -820,11 +820,26 @@ export function createApp() {
 
     // — P0-2: 白名单校验顶层字段 —
     const ALLOWED_TOP_KEYS = new Set([
-      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web', 'securityLog', 'imageInput', 'voiceInput', 'security'
+      'model', 'chat', 'groupOps', 'imageGen', 'agent', 'system', 'permissions', 'response', 'web', 'securityLog', 'imageInput', 'voiceInput', 'security', 'bot'
     ])
     const unknownKeys = Object.keys(config).filter(k => !ALLOWED_TOP_KEYS.has(k))
     if (unknownKeys.length) {
       return res.json({ ok: false, msg: `不允许的配置字段: ${unknownKeys.join(', ')}` })
+    }
+
+    // — bot：仅允许 primarySid / selfIds（多账号应答归属） —
+    if (config.bot != null) {
+      if (typeof config.bot !== 'object' || Array.isArray(config.bot)) {
+        return res.json({ ok: false, msg: 'bot 必须是对象' })
+      }
+      const badBot = Object.keys(config.bot).filter(k => k !== 'primarySid' && k !== 'selfIds')
+      if (badBot.length) return res.json({ ok: false, msg: `bot 含有不允许的字段: ${badBot.join(', ')}` })
+      if (config.bot.primarySid != null && !/^\d{5,12}$/.test(String(config.bot.primarySid).trim())) {
+        return res.json({ ok: false, msg: 'bot.primarySid 必须是 QQ 号' })
+      }
+      if (config.bot.selfIds != null && !Array.isArray(config.bot.selfIds)) {
+        return res.json({ ok: false, msg: 'bot.selfIds 必须是数组' })
+      }
     }
 
     // — security.allowPrivateHosts：显式放行可访问私有/回环地址的 API 主机（SSRF 白名单）—

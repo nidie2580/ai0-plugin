@@ -44,6 +44,8 @@ let QQ_API_TIMEOUT_MS_OVERRIDE = null   // 仅供 __test__ 覆盖默认/配置�
  * 现在：先 trim + 小写归一化，非法值按最严格的 'master' 处理并告警一次。
  */
 let _memberListPolicyWarned = false
+const __botRoleCache = new Map() // groupId -> 'owner'|'admin'|'member'
+
 export function resolveMemberListPolicy() {
   const raw = cfg.get('groupOps.allowMemberListFor', 'admin')
   const v = typeof raw === 'string' ? raw.trim().toLowerCase() : raw
@@ -780,6 +782,13 @@ export async function buildGroupContext(e) {
 
   // 群主 UIN 兜底：如果能拿到 ownerUin，即使角色未知也能反向推断
   const ownerUin = groupInfoRaw?.ownerUin != null ? String(groupInfoRaw.ownerUin) : null
+  // 角色查询偶发拿不到 → 用上次确认过的角色兜底，避免"一会群主一会未知"
+  const __cachedRole = __botRoleCache.get(String(groupId))
+  if (botRole === 'unknown' && __cachedRole) botRole = __cachedRole
+  if (botRole === 'owner' || botRole === 'admin' || botRole === 'member') {
+    __botRoleCache.set(String(groupId), botRole)
+  }
+
   let requesterInferred = requesterRole
   let botInferred = botRole
   if (ownerUin && userId && String(userId) === ownerUin && requesterRole === 'unknown') requesterInferred = 'owner'
@@ -816,7 +825,7 @@ export async function buildGroupContext(e) {
     `机器人角色：${botRoleZh}${botInferred === 'owner' ? '（群主，可设置管理员）' : botInferred === 'admin' ? '（管理员，可踢出/禁言）' : botInferred === 'member' ? '（普通成员，无法执行管理操作）' : '（身份未知，按保守策略不允许执行管理操作）'}`,
     `机器人主人QQ：${masters.length ? masters.join(', ') : '(无)'}`,
     `机器人主人说明：以上QQ号是机器人主人，任何人（包括群主）都不能对他们执行踢出/禁言/拉黑操作。设置头衔（set_title/custom_title/level_title）不受此限制，可以给主人挂头衔。`,
-    `说明：接口未返回明确角色时一律按 unknown 处理，不要脑补为普通成员。` + (ownerUin ? `（已确认群主UIN=${ownerUin}）` : ''),
+    `说明：接口未返回角色时以「机器人角色」这一行为准（已用上次确认值兜底）；只有完全未知才按保守策略处理，不要脑补。` + (ownerUin ? `（群主UIN=${ownerUin}）` : ''),
     '',
     `当前请求者：QQ=${userId}，昵称=${requesterName}，群内角色=${reqRoleZh}`,
     `  → 请求者${isRequesterElevated ? (requesterInferred === 'owner' ? '是群主，有权踢出/禁言普通群员和管理员' : requesterInferred === 'admin' ? '是管理员，有权踢出/禁言普通群员' : '是机器人主人，有权踢出/禁言普通群员') : '身份非群主/管理员/主人，无权管理群员'}`
@@ -825,7 +834,7 @@ export async function buildGroupContext(e) {
   if (targetUid) {
     lines.push('')
     lines.push(`被@目标：QQ=${targetUid}，昵称=${targetName}，群内角色=${tgtRoleZh}`)
-    lines.push(`  → 目标${targetIsProtected ? '⚠️ 受保护（群主/管理员/机器人主人），不可对其执行踢出/禁言/拉黑；设置头衔不受此限制' : '是普通群员，可被踢出/禁言（前提：请求者有权限、且机器人有管理权限）'}`)
+    lines.push(`  → 目标${targetIsProtected ? '⚠️ 受保护（群主/管理员/机器人主人）：仅限制踢出/禁言/拉黑；【设置或取消管理员、设置头衔不受此限制】，除非目标是群主' : '是普通群员，可被踢出/禁言（前提：请求者有权限、且机器人有管理权限）'}`)
   }
 
   lines.push('', '【可用操作与规则】')
