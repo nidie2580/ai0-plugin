@@ -41,6 +41,8 @@ const NCM_REAL_IP = '58.100.87.193'
 const NCM_COOKIE = 'os=pc; appver=2.10.10.201911;'
 // QQ 音乐第三方聚合 API（移植自 model_qq.py）
 const QQ_API_URL = 'https://a.aa.cab/qq.music'
+// GDStudio 聚合音源（公开可用，返回网易云真实 CDN 直链）
+const GD_API = 'https://music-api.gdstudio.xyz/api.php'
 
 /** 读取 chat.music 配置（含缺省补齐） */
 export function getMusicConfig() {
@@ -173,6 +175,18 @@ export async function ncmPlayUrl(songId, httpFn = null) {
       const url = String(urls[0]?.url || '')
       if (url && /^https?:\/\//.test(url)) return url
     }
+    // 主接口无直链 → GDStudio 兜底（网易云真实 CDN 地址）
+    try {
+      const g = `${GD_API}?types=url&source=netease&id=${encodeURIComponent(songId)}&br=320`
+      const gHeaders = { 'User-Agent': MUSIC_UA }
+      const gr = typeof httpFn === 'function'
+        ? await httpFn(g, { headers: gHeaders })
+        : await safeAxiosRequest('get', g, null, { headers: gHeaders, timeout: HTTP_TIMEOUT_MS * 2 })
+      const gurl = String(gr?.data?.url || '')
+      if (gr?.status === 200 && /^https?:\/\//.test(gurl)) return gurl
+    } catch (e) {
+      safeLogger.warn(`[ai0-plugin] GDStudio 直链兜底失败(id=${songId}): ${e?.message || e}`)
+    }
     return ''
   } catch (err) {
     safeLogger.warn(`[ai0-plugin] 网易云直链获取失败(id=${songId}): ${err?.message || err}`)
@@ -181,7 +195,49 @@ export async function ncmPlayUrl(songId, httpFn = null) {
 }
 
 /** QQ 音乐元数据（对齐 model_qq.MusicHelperQQ.meta_data，第三方聚合 API） */
+/** QQ 音乐（主接口 + meting 兜底），对外保持原签名 */
 export async function qqMeta(keywords, httpFn = null) {
+  try {
+    return await qqMetaLegacy(keywords, httpFn)
+  } catch (err) {
+    safeLogger.warn(`[ai0-plugin] QQ 主接口不可用，改用 meting：${err?.message || err}`)
+    try {
+      return await qqMetingMeta(keywords, httpFn)
+    } catch (e2) {
+      safeLogger.warn(`[ai0-plugin] meting QQ 也失败：${e2?.message || e2}`)
+      return null
+    }
+  }
+}
+
+/** meting 聚合接口（i-meto，QQ 音源）：a.aa.cab 挂掉时的兜底 */
+async function qqMetingMeta(keywords, httpFn = null) {
+  const url = `https://api.i-meto.com/meting/api?server=tencent&type=search&id=${encodeURIComponent(keywords)}`
+  const headers = { 'User-Agent': MUSIC_UA, Referer: 'https://y.qq.com/' }
+  const resp = typeof httpFn === 'function'
+    ? await httpFn(url, { headers })
+    : await safeAxiosRequest('get', url, null, { headers, timeout: HTTP_TIMEOUT_MS * 2 })
+  if (resp.status !== 200) throw new Error(`meting 搜索失败(HTTP ${resp.status})`)
+  const list = typeof resp.data === 'object' ? resp.data : JSON.parse(resp.data || '[]')
+  const first = Array.isArray(list) ? list[0] : null
+  if (!first || !first.title) return null
+  return {
+    source: 'qq',
+    id: '',
+    title: String(first.title),
+    alias: '',
+    artist: String(first.author || '未知'),
+    album: '',
+    cover: String(first.pic || ''),
+    durationSec: 0,
+    commentCount: 0,
+    shareCount: 0,
+    pageUrl: String(first.url || ''),
+    playUrl: String(first.url || ''),
+  }
+}
+
+async function qqMetaLegacy(keywords, httpFn = null) {
   const u = new URL(QQ_API_URL)
   u.searchParams.set('msg', keywords)
   u.searchParams.set('num', '1')
@@ -398,6 +454,13 @@ export async function searchSongs({ keyword, source, httpFn, httpPostFn, httpPag
     if (want === 'qq') {
       const meta = await tryQQ(false)
       if (meta) return { ok: true, songs: [meta], source: 'qq' }
+      // QQ 音源不可用（接口挂/无版权）时自动回退网易云，避免整个点歌功能失效
+      try {
+        const alt = await tryNcm(true)
+        if (alt) return { ok: true, songs: [alt], source: 'ncm' }
+      } catch (err) {
+        safeLogger.warn(`[ai0-plugin] QQ 失败后回退网易云异常: ${err?.message || err}`)
+      }
       return { ok: false, songs: [], source: 'qq', msg: 'QQ音乐没找到这首歌！' }
     }
 
