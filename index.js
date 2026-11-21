@@ -68,7 +68,7 @@ setTimeout(async () => {
 
 const appsDir = path.join(__dirname, 'apps')
 const apps = {}
-const ALLOWED_APPS = new Set(['chat.js', 'commands.js', 'groupOps.js'])
+const ALLOWED_APPS = new Set(['chat.js', 'commands.js', 'groupOps.js', 'memory.js'])
 if (fs.existsSync(appsDir)) {
   for (const file of fs.readdirSync(appsDir).filter(f => f.endsWith('.js'))) {
     if (!ALLOWED_APPS.has(file)) {

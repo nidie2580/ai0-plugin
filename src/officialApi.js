@@ -42,6 +42,8 @@ export function isOfficialHost(hostname) {
 const OFFICIAL_LEAF_SPKI_SHA256_PINS = [
   'rK/jlci9a5PbYu1mBdnIImXuG6illDiL9MbpIW4rNXg=', // 2026-10-11 轮换后的当前 CDN 叶子（LE YR1 签发）
   'wHjGum84n4Qt1hwIbGu3/zU8IKrtU/1sh2RQb10NUXU=', // 2026-10-11 轮换前的旧叶子（LE YR2 签发），容忍边缘灰度
+  'ECybBmI0jRijumQianI0m7A4ut65EihjdI0y3j5Uric=', // 2026-11-18 取消 CDN 后直连源站的 ECDSA 叶子（LE YE1 签发）
+  's/yX5Km34AQ3r7Uo+jsaJEqM5BFDtW/GQN2JV5qeKHA=', // 2026-11-18 源站同一 SNI 下的另一张 ECDSA 叶子（Node 协商到的那张）
 ]
 const OFFICIAL_INTERMEDIATE_YR1_PEM = `-----BEGIN CERTIFICATE-----
 MIIE2zCCAsOgAwIBAgIRAKICU/FfJpHAXcHOE7m8yk4wDQYJKoZIhvcNAQELBQAw
@@ -100,7 +102,23 @@ NA3wJdl4DDUuQSV8hBgx6zoI1ZSGORprDFux7c6rhc77QZMSRrEgomBeklervEve
 LRFgxIAphIukwTGSMZZR+AI+Qnp0BYTWovHXozOf3H8r6hozEoT02JHn0AeTfA==
 -----END CERTIFICATE-----`
 const OFFICIAL_SPKI_PINS = OFFICIAL_LEAF_SPKI_SHA256_PINS.map((p) => Buffer.from(p, 'base64'))
-const OFFICIAL_INTERMEDIATE_PEMS = [OFFICIAL_INTERMEDIATE_YR1_PEM, OFFICIAL_INTERMEDIATE_YR2_PEM]
+const OFFICIAL_INTERMEDIATE_YE1_PEM = `-----BEGIN CERTIFICATE-----
+MIICizCCAhGgAwIBAgIQXd1w3TH4AchcGGp6BLgK/jAKBggqhkjOPQQDAzAuMQsw
+CQYDVQQGEwJVUzENMAsGA1UEChMESVNSRzEQMA4GA1UEAxMHUm9vdCBZRTAeFw0y
+NTA5MDMwMDAwMDBaFw0yODA5MDIyMzU5NTlaMDMxCzAJBgNVBAYTAlVTMRYwFAYD
+VQQKEw1MZXQncyBFbmNyeXB0MQwwCgYDVQQDEwNZRTEwdjAQBgcqhkjOPQIBBgUr
+gQQAIgNiAAQHZVB1/mimla2hfSurylScjPMZaOJXLz/NnAc2sylm8WDyhU9Ccp+z
+ASQi5vSwGGJjSGklkD9fdPR8GpyDIOIjCEfrnbt/v+ZSEPLLEGbaM6EccDbN7p9x
+teIm2Avf+ryjge4wgeswDgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUF
+BwMBMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFLsgykcL/tflnPmPCSqj
+jDdFsbzYMB8GA1UdIwQYMBaAFKPIJlqOoUzQNWP8myPIOq5W809WMDIGCCsGAQUF
+BwEBBCYwJDAiBggrBgEFBQcwAoYWaHR0cDovL3llLmkubGVuY3Iub3JnLzATBgNV
+HSAEDDAKMAgGBmeBDAECATAnBgNVHR8EIDAeMBygGqAYhhZodHRwOi8veWUuYy5s
+ZW5jci5vcmcvMAoGCCqGSM49BAMDA2gAMGUCMQDgjUEahFT/h3DRakqiPZpLvPgf
+Zwkt6K2EOMmh1nvEzl83eMLYcod4GCl3b0J1Nn0CMBNYmEQJb4CEG5WoOe7aRn/L
+VKu6saHmHEynI7ysIPd8zQsK1HdmhlHKlw9Z5GpGvA==
+-----END CERTIFICATE-----`
+const OFFICIAL_INTERMEDIATE_PEMS = [OFFICIAL_INTERMEDIATE_YR1_PEM, OFFICIAL_INTERMEDIATE_YR2_PEM, OFFICIAL_INTERMEDIATE_YE1_PEM]
 let _officialIntermediates = null
 function officialIntermediates() {
   if (!_officialIntermediates) {
@@ -154,10 +172,17 @@ export function evaluateOfficialPinning(socket) {
     )
     // 分支二（SAN）：叶子必须精确覆盖官方域名，防御"合法 CA 签给别家域名"的证书
     if (diag.subjectaltname) {
-      diag.sanMatched = diag.subjectaltname
-        .split(',')
-        .map((s) => s.trim().toLowerCase())
-        .includes(`dns:${OFFICIAL_HOST}`)
+      const sanList = diag.subjectaltname.split(',').map((s) => s.trim().toLowerCase())
+      const exact = `dns:${OFFICIAL_HOST}`
+      // 通配符 SAN（*.djyun.click）按 RFC 6125 只覆盖一级标签，等价于精确覆盖 api.djyun.click
+      const wildcardMatch = sanList.some((entry) => {
+        if (!entry.startsWith('dns:*.')) return false
+        const suffix = entry.slice('dns:*'.length) // ".djyun.click"
+        if (!OFFICIAL_HOST.endsWith(suffix)) return false
+        const label = OFFICIAL_HOST.slice(0, -suffix.length)
+        return !!label && !label.includes('.')
+      })
+      diag.sanMatched = sanList.includes(exact) || wildcardMatch
     }
     // 分支三/四（签发链）：checkIssued 仅比对 DN/AKID（可被伪造 CA 满足），必须叠加
     // verify 做签名校验，二者同时满足才放行，防止自签 CA 伪造 DN 绕过钉扎（2026-10 审查修复）。

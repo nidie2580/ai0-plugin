@@ -900,9 +900,16 @@ export async function handleChat(e) {
   // 多账号应答归属：@ 指定账号时仅该账号回应；未 @ 任何自身账号时仅主账号回应（避免多号同时刷屏）。
   // 仅在成功识别到多个自身账号时生效；单账号或识别不到时保持原行为。
   if (isGroup) {
-    const atTargets = helper.listAtTargets(e)
-    const primarySid = String(cfg.get('bot.primarySid', '') || '')
-    if (!botIdentity.shouldAccountRespond(e, atTargets, { primarySid })) return false
+    // 多号归属：只有显式开启 bot.multiAccountReply=true 时才限制为「仅主号应答」（防多号刷屏）。
+    // 默认（配置项缺失或为 false）= 所有自身账号都回复。
+    // 原因：该子字段会被 ai0 网页后台保存配置时洗掉（saveConfig 只对顶层 key 做深度合并），
+    // 若按「缺失=仅主号」处理，主号一掉线整群就彻底沉默。
+    const multiReply = cfg.get('bot.multiAccountReply', false) === true
+    if (multiReply) {
+      const atTargets = helper.listAtTargets(e)
+      const primarySid = String(cfg.get('bot.primarySid', '') || '')
+      if (!botIdentity.shouldAccountRespond(e, atTargets, { primarySid })) return false
+    }
   }
 
   // 触发来源标注：仅当开启全局AI时，在发件人标识中标注本条是"艾特/前缀触发"还是"全局AI触发"，
