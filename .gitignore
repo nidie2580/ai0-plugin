@@ -29,3 +29,4 @@ web/assets/app.[0-9a-f]*.css
 # 扩展目录：用户可自由放置第三方扩展，不进仓库、更新时不会被覆盖或冲突
 extensions/*
 !extensions/README.md
+*.bak-*
